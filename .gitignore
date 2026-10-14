@@ -1,0 +1,7 @@
+vendor/
+.venv/
+__pycache__/
+*.pyc
+*.safetensors
+out/
+.pytest_cache/

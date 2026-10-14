@@ -1,0 +1,10 @@
+[project]
+name = "mlxstab"
+version = "0.1.0"
+description = "Video stabilization on Apple Silicon with MLX: RAFT optical flow, mesh/L1 camera paths, no-crop rendering"
+requires-python = ">=3.10"
+dependencies = ["mlx>=0.22", "numpy", "safetensors", "scipy"]
+[project.optional-dependencies]
+dev = ["torch", "pytest", "pillow"]
+[tool.pytest.ini_options]
+testpaths = ["tests"]
