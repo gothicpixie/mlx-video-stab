@@ -75,11 +75,11 @@ def vline_wobble(frames, every=2, sigma=6.0):
     return float(np.std(ang - gaussian_filter1d(ang, sigma, mode="nearest")))
 
 
-def measure(frames, flow_fn, W, H, fps, masks=None, keep_frames=False):
+def measure(frames, flow_fn, W, H, fps, masks=None, keep_frames=False, on_step=None):
     """frames: iterable of uint8 [H,W,3]. Returns dict of metrics (see module docstring)."""
     cfg = Config(mesh=(0, 0), rs_rows=18)
     frames = list(frames) if keep_frames else frames
-    mot = analyze(iter(frames), flow_fn, cfg, W, H, fps, masks=masks)
+    mot = analyze(iter(frames), flow_fn, cfg, W, H, fps, masks=masks, on_step=on_step)
     ser = path_series(mot); st = stability(ser); jt, fm = jitter(mot)
     r = {"stability": min(st), "stability_xyr": st, "jitter_px": jt, "frame_motion_px": fm, "wobble_px": wobble(mot),
          "fallback_frames": int(sum(f.fallback for f in mot.fits))}

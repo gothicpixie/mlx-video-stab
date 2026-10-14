@@ -10,8 +10,9 @@ from ..warp import sample
 class InstanceNorm(nn.Module):
     def __init__(self, eps=1e-5): super().__init__(); self.eps = eps
     def __call__(self, x):
+        dt = x.dtype; x = x.astype(mx.float32)                      # statistics in fp32 even when the net runs in fp16
         m = mx.mean(x, axis=(1, 2), keepdims=True); v = mx.var(x, axis=(1, 2), keepdims=True)
-        return (x - m) * mx.rsqrt(v + self.eps)
+        return ((x - m) * mx.rsqrt(v + self.eps)).astype(dt)
 
 
 def _norm(kind, c):
@@ -87,11 +88,50 @@ class BasicUpdateBlock(nn.Module):
         super().__init__()
         self.encoder = MotionEncoder(cor_planes); self.gru = SepConvGRU(hd, 128 + hd); self.flow_head = FlowHead(hd, 256)
         self.mask = [nn.Conv2d(128, 256, 3, padding=1), nn.ReLU(), nn.Conv2d(256, 64 * 9, 1)]
-    def __call__(self, net, inp, corr, flow):
+    def core(self, net, inp, corr, flow):
         mf = self.encoder(flow, corr)
         net = self.gru(net, mx.concatenate([inp, mf], -1))
-        m = .25 * self.mask[2](self.mask[1](self.mask[0](net)))
-        return net, m, self.flow_head(net)
+        return net, self.flow_head(net)
+
+    def mask_head(self, net):
+        return .25 * self.mask[2](self.mask[1](self.mask[0](net)))
+
+    def __call__(self, net, inp, corr, flow):
+        net, delta = self.core(net, inp, corr, flow)
+        return net, self.mask_head(net), delta
+
+
+_LOOK_SRC = """
+    uint gid = thread_position_in_grid.x;
+    const int D = 2 * R + 1, K = D * D;
+    int n = gid / K, k = gid % K;
+    if (n >= (int)coords_shape[0]) return;
+    int a = k / D, b = k % D;                                   // a offsets x, b offsets y (reference quirk, see CorrBlock)
+    const float sc = metal::exp2(-(float)LV);
+    float px = coords[n * 2] * sc + (float)(a - R), py = coords[n * 2 + 1] * sc + (float)(b - R);
+    int H = corr_shape[1], W = corr_shape[2];
+    float fx = metal::floor(px), fy = metal::floor(py);
+    int x0 = (int)fx, y0 = (int)fy; float tx = px - fx, ty = py - fy;
+    size_t base = (size_t)n * H * W;
+    float acc = 0.0f;
+    for (int j = 0; j < 2; j++) {
+        int yy = y0 + j; if (yy < 0 || yy >= H) continue;
+        float wy = j ? ty : 1.0f - ty;
+        for (int i = 0; i < 2; i++) {
+            int xx = x0 + i; if (xx < 0 || xx >= W) continue;
+            acc += (i ? tx : 1.0f - tx) * wy * (float)corr[base + (size_t)yy * W + xx];
+        }
+    }
+    out[(size_t)n * K + k] = acc;
+"""
+_look_kernel = mx.fast.metal_kernel(name="mlxstab_corr_lookup", input_names=["corr", "coords"], output_names=["out"], source=_LOOK_SRC)
+
+
+def lookup_level(corr, coords, level, radius):
+    """corr [N,h,w,1] (any float dtype), coords [N,2] level-0 pixel coords -> [N,(2r+1)^2] float32; bilinear, zero padding."""
+    N = corr.shape[0]; K = (2 * radius + 1) ** 2
+    return _look_kernel(inputs=[corr, coords], template=[("R", radius), ("LV", level)], grid=(N * K, 1, 1), threadgroup=(256, 1, 1),
+                        output_shapes=[(N, K)], output_dtypes=[mx.float32])[0]
 
 
 def _pool2(c):
@@ -114,12 +154,17 @@ class CorrBlock:
         self.delta = mx.stack([mx.broadcast_to(d[:, None], (2 * radius + 1,) * 2), mx.broadcast_to(d[None, :], (2 * radius + 1,) * 2)], -1)
 
     def __call__(self, coords):                       # coords [1,h,w,2] (x,y)
+        _, h, w, _ = coords.shape
+        c = coords.reshape(h * w, 2)
+        out = [lookup_level(self.pyr[i], c, i, self.radius) for i in range(self.levels)]
+        return mx.concatenate(out, -1).reshape(1, h, w, -1)
+
+    def lookup_reference(self, coords):               # the original grid_sample-based lookup (kept for the parity test)
         _, h, w, _ = coords.shape; out = []
         cen = coords.reshape(h * w, 1, 1, 2)
         for i in range(self.levels):
             g = cen / 2 ** i + self.delta[None]
-            s = sample(self.pyr[i].astype(mx.float32), g, "bilinear", "zeros")           # [hw, 9, 9, 1]
-            out.append(s.reshape(1, h, w, -1))
+            out.append(sample(self.pyr[i].astype(mx.float32), g, "bilinear", "zeros").reshape(1, h, w, -1))
         return mx.concatenate(out, -1)
 
 
@@ -138,35 +183,78 @@ def upsample_flow(flow, mask):
     return up.reshape(1, 8 * h, 8 * w, 2)
 
 
+def upsample_flow_batch(flow, mask):
+    return mx.concatenate([upsample_flow(flow[i:i + 1], mask[i:i + 1]) for i in range(flow.shape[0])], 0)
+
+
+class FrameFeat:
+    """Per-frame network features, reusable across the forward and backward pairs it takes part in."""
+    def __init__(self, fmap, net, inp): self.fmap, self.net, self.inp = fmap, net, inp
+
+
 class RAFT(nn.Module):
     def __init__(self, corr_levels=4, corr_radius=4):
         super().__init__()
         self.hdim = self.cdim = 128; self.levels, self.radius = corr_levels, corr_radius
         self.fnet = BasicEncoder(256, "instance"); self.cnet = BasicEncoder(256, "batch")
         self.update_block = BasicUpdateBlock(corr_levels * (2 * corr_radius + 1) ** 2, self.hdim)
+        self._dtype = mx.float32; self._step = None
+
+    def to_dtype(self, dtype):
+        """Run the encoders and update block in `dtype` (e.g. mx.float16). Correlation is built from fp32 features; see corr_dtype."""
+        self.set_dtype(dtype); self._dtype = dtype; self._step = None; return self
 
     def encode(self, im1, im2):
         """im 0..255 float [1,H,W,3], H,W multiples of 8. Returns fmap1, fmap2, net, inp."""
-        im1 = 2 * (im1 / 255.0) - 1; im2 = 2 * (im2 / 255.0) - 1
+        im1 = (2 * (im1 / 255.0) - 1).astype(self._dtype); im2 = (2 * (im2 / 255.0) - 1).astype(self._dtype)
         f = self.fnet(mx.concatenate([im1, im2], 0))
         c = self.cnet(im1)
         return f[:1], f[1:], mx.tanh(c[..., :self.hdim]), nn.relu(c[..., self.hdim:])
 
-    def __call__(self, im1, im2, iters=12, flow_init=None, corr_dtype=mx.float32, return_all=False):
+    def frame_features(self, im):
+        """im 0..255 [1,H,W,3] -> FrameFeat (fnet and cnet run once per frame, whatever pairs it joins)."""
+        x = (2 * (im / 255.0) - 1).astype(self._dtype)
+        c = self.cnet(x)
+        return FrameFeat(self.fnet(x), mx.tanh(c[..., :self.hdim]), nn.relu(c[..., self.hdim:]))
+
+    def _core(self):
+        if self._step is None:
+            ub = self.update_block
+            self._step = mx.compile(lambda net, inp, corr, flow: ub.core(net, inp, corr, flow))
+        return self._step
+
+    def _iterate(self, corr_fns, net, inp, c0, c1, iters, compiled=True):
+        """GRU refinement for len(corr_fns) pairs at once (batch dimension). One lazy graph, no host syncs."""
+        step = self._core() if compiled else self.update_block.core
+        for _ in range(iters):
+            corr = mx.concatenate([f(c1[i:i + 1]) for i, f in enumerate(corr_fns)], 0).astype(self._dtype)
+            net, delta = step(net, inp, corr, (c1 - c0).astype(self._dtype))
+            c1 = c1 + delta.astype(mx.float32)
+        return net, c1
+
+    def __call__(self, im1, im2, iters=12, flow_init=None, corr_dtype=mx.float32, return_all=False, compiled=True):
         """Returns (low-res flow [1,h,w,2], full-res flow [1,H,W,2]) in pixels (x, y). flow_init is low-res."""
         f1, f2, net, inp = self.encode(im1, im2)
-        corr_fn = CorrBlock(f1, f2, self.levels, self.radius, corr_dtype)
+        corr_fn = CorrBlock(f1.astype(mx.float32), f2.astype(mx.float32), self.levels, self.radius, corr_dtype)
         _, h, w, _ = f1.shape
         c0 = coords_grid(h, w); c1 = c0 if flow_init is None else c0 + flow_init
-        preds = []
-        for _ in range(iters):
-            corr = corr_fn(c1)
-            net, up_mask, delta = self.update_block(net, inp, corr, c1 - c0)
-            c1 = c1 + delta
-            mx.eval(c1, net)
-            if return_all: preds.append(upsample_flow(c1 - c0, up_mask))
-        flow_up = upsample_flow(c1 - c0, up_mask)
-        return c1 - c0, flow_up
+        net, c1 = self._iterate([corr_fn], net, inp, c0, c1, iters, compiled)
+        mask = self.update_block.mask_head(net)                 # only the last iteration's mask is ever used
+        return c1 - c0, upsample_flow((c1 - c0), mask.astype(mx.float32))
+
+    def flow_bidir(self, a, b, iters=12, init_f=None, init_b=None, corr_dtype=mx.float32):
+        """Forward (a->b) and backward (b->a) flow of two FrameFeats as ONE batch-2 refinement.
+        Returns (low_f, up_f, low_b, up_b); lazy (nothing evaluated)."""
+        cf = CorrBlock(a.fmap.astype(mx.float32), b.fmap.astype(mx.float32), self.levels, self.radius, corr_dtype)
+        cb = CorrBlock(b.fmap.astype(mx.float32), a.fmap.astype(mx.float32), self.levels, self.radius, corr_dtype)
+        _, h, w, _ = a.fmap.shape
+        c0 = mx.concatenate([coords_grid(h, w)] * 2, 0)
+        c1 = c0 + (mx.concatenate([init_f, init_b], 0) if init_f is not None and init_b is not None else 0)
+        net = mx.concatenate([a.net, b.net], 0); inp = mx.concatenate([a.inp, b.inp], 0)
+        net, c1 = self._iterate([cf, cb], net, inp, c0, c1, iters)
+        low = c1 - c0
+        up = upsample_flow_batch(low, self.update_block.mask_head(net).astype(mx.float32))
+        return low[:1], up[:1], low[1:], up[1:]
 
 
 def pad8(x):

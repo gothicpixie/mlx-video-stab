@@ -29,7 +29,7 @@ def dlt(src, dst, w=None):
     return Hm / Hm[2, 2]
 
 
-def ransac_homography(src, dst, iters=300, thr=1.5, rng=None):
+def ransac_homography(src, dst, iters=300, thr=1.5, rng=None, max_score_pts=3000):
     """Robust homography src->dst. Returns (H, inlier_mask). Batched 4-point hypotheses, then weighted refinement."""
     rng = rng or np.random.default_rng(0)
     n = len(src)
@@ -47,12 +47,14 @@ def ransac_homography(src, dst, iters=300, thr=1.5, rng=None):
     h = np.linalg.solve(A, rhs[..., None])[..., 0]
     Hs = np.concatenate([h, np.ones((iters, 1))], 1).reshape(iters, 3, 3)
     pa = np.concatenate([a, np.ones((n, 1))], 1)
-    proj = np.einsum("kij,nj->kni", Hs, pa)
-    pr = proj[..., :2] / np.where(np.abs(proj[..., 2:3]) < 1e-9, 1e-9, proj[..., 2:3])
-    err = np.sqrt(((pr - b[None]) ** 2).sum(-1)) * s
+    sub = rng.choice(n, min(n, max_score_pts), replace=False) if n > max_score_pts else np.arange(n)      # score hypotheses on a subset
+    proj = (Hs.reshape(iters * 3, 3) @ pa[sub].T).reshape(iters, 3, -1)
+    pr = proj[:, :2] / np.where(np.abs(proj[:, 2:3]) < 1e-9, 1e-9, proj[:, 2:3])
+    err = np.sqrt(((pr - b[sub].T[None]) ** 2).sum(1)) * s
     score = np.where(ok[:, None], (err < thr), False).sum(1)
     best = int(score.argmax())
-    inl = err[best] < thr
+    pb = Hs[best] @ pa.T; pb = pb[:2] / np.where(np.abs(pb[2]) < 1e-9, 1e-9, pb[2])
+    inl = np.sqrt(((pb.T - b) ** 2).sum(1)) * s < thr
     Hm = None
     for _ in range(3):                                                        # refine on inliers (IRLS-ish)
         if inl.sum() < 8: break

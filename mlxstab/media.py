@@ -52,6 +52,29 @@ class Encoder:
         if out_fps: cmd += ["-r", f"{out_fps}"]
         if gray: cmd += ["-c:v", "libx264", "-qp", "0", "-pix_fmt", "gray"]
         else: cmd += ["-c:v", "libx264", "-crf", str(crf), "-preset", preset, "-pix_fmt", "yuv420p"]
+        import queue, threading
         self.p = subprocess.Popen(cmd + [str(path)], stdin=subprocess.PIPE)
-    def write(self, frame): self.p.stdin.write(np.ascontiguousarray(frame, np.uint8).tobytes())
-    def close(self): self.p.stdin.close(); self.p.wait()
+        self.q = queue.Queue(6)                                   # writer thread: encoding overlaps with the next frame's GPU work
+        def run():
+            while True:
+                b = self.q.get()
+                if b is None: return
+                self.p.stdin.write(b)
+        self.t = threading.Thread(target=run, daemon=True); self.t.start()
+    def write(self, frame): self.q.put(np.ascontiguousarray(frame, np.uint8).tobytes())
+    def close(self): self.q.put(None); self.t.join(); self.p.stdin.close(); self.p.wait()
+
+
+def prefetch(gen, n=4):
+    """Run a frame generator in a thread so decoding overlaps with GPU/CPU work."""
+    import queue, threading
+    q = queue.Queue(n); end = object()
+    def run():
+        try:
+            for x in gen: q.put(x)
+        finally: q.put(end)
+    threading.Thread(target=run, daemon=True).start()
+    while True:
+        x = q.get()
+        if x is end: return
+        yield x

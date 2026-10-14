@@ -63,3 +63,16 @@ def test_roll_levelling_sign():
     li, lo = lean(tilted), lean(out)
     print("lean in/out", li, lo)
     assert li > 3.5 and abs(lo) < 1.5
+
+
+def test_analysis_stride_interpolates_path():
+    vid, _ = synth.render(T=61, W=256, H=144, jitter=6.0)
+    cfg = S.Config(budget=0.06, mesh=(8, 4), rs_rows=8, analysis_stride=2)
+    mot = S.analyze(iter(vid), farneback, cfg, 256, 144, 30.0, stride=2)
+    assert len(mot.fits) == 30 and mot.n_frames == 61
+    pl = S.plan(mot, cfg, n_frames=mot.n_frames)
+    assert len(pl.G) == 61 and pl.mesh_corr.shape[0] == 61
+    out = np.stack([S.render_frame(vid[t], pl, t, cfg)[0] for t in range(61)])
+    jin, jout = jitter_px(vid, cfg), jitter_px(out, cfg)
+    print("stride-2 jitter in/out", jin, jout)
+    assert jout < 0.6 * jin

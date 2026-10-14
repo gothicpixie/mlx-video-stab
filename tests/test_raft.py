@@ -74,3 +74,42 @@ def test_real_weights_synthetic_and_demo():
     ims = [x[:, :432, :1024] for x in ims]
     r = stages(tm, mm, *ims, 0); print("demo", {k: f"{v:.2e}" for k, v in r.items()})
     assert r["EPE_vs_torch"] < 0.01
+
+
+def _epe(a, b): return float(np.sqrt(((np.array(a) - np.array(b)) ** 2).sum(-1)).mean())
+
+
+def test_fast_paths_match_reference_path_random_init():
+    """New lookup kernel == grid_sample lookup; batch-2 bidirectional compiled path == two independent fp32 calls."""
+    tm = ref.torch_raft(random_init_seed=3); mm = ref.convert_in_memory(tm)
+    a, b = synth(); A, B = mx.array(a), mx.array(b)
+    f1, f2, net, inp = mm.encode(A, B)
+    cb = M.CorrBlock(f1, f2); c = M.coords_grid(*f1.shape[1:3]) + mx.array(np.random.default_rng(0).normal(0, 3, (1, *f1.shape[1:3], 2)).astype(np.float32))
+    d = float(mx.abs(cb(c) - cb.lookup_reference(c)).max()); assert d < 1e-3, d
+    lf, uf = mm(A, B, 6); lb, ub = mm(B, A, 6)
+    x, y = mm.frame_features(A), mm.frame_features(B)
+    blf, buf, blb, bub = mm.flow_bidir(x, y, 6)
+    assert _epe(uf[0], buf[0]) < 1e-3 and _epe(ub[0], bub[0]) < 1e-3, (_epe(uf[0], buf[0]), _epe(ub[0], bub[0]))
+    # compiled and eager update steps agree
+    l2, u2 = mm(A, B, 6, compiled=False); assert _epe(uf[0], u2[0]) < 1e-3
+
+
+@pytest.mark.skipif(not ref.WEIGHTS.exists(), reason="raft-things weights absent")
+def test_real_weights_bidir_and_fp16():
+    from PIL import Image
+    tm = ref.torch_raft(); mm = ref.convert_in_memory(tm)
+    ims = [np.array(Image.open(ref.DEMO / f"frame_00{n}.png").convert("RGB"))[:432, :1024].astype(np.float32) for n in (16, 17)]
+    ta = [torch.from_numpy(i.transpose(2, 0, 1).copy())[None] for i in ims]
+    with torch.no_grad():
+        _, tf = tm(ta[0], ta[1], iters=12, test_mode=True); _, tb = tm(ta[1], ta[0], iters=12, test_mode=True)
+    tf, tb = tf[0].numpy().transpose(1, 2, 0), tb[0].numpy().transpose(1, 2, 0)
+    A, B = mx.array(ims[0])[None], mx.array(ims[1])[None]
+    x, y = mm.frame_features(A), mm.frame_features(B)
+    _, uf, _, ub = mm.flow_bidir(x, y, 12)
+    e32 = max(_epe(uf[0], tf), _epe(ub[0], tb)); print("bidir fp32 EPE vs torch", e32)
+    assert e32 < 0.01
+    mh = ref.convert_in_memory(tm).to_dtype(mx.float16)
+    x, y = mh.frame_features(A), mh.frame_features(B)
+    _, uf, _, ub = mh.flow_bidir(x, y, 12)
+    e16 = max(_epe(uf[0], tf), _epe(ub[0], tb)); print("bidir fp16 EPE vs torch", e16)
+    assert e16 < 0.05

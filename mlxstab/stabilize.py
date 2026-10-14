@@ -26,6 +26,10 @@ class Config:
     kernel: str = "lanczos3"       # final resampling kernel
     zoom: float = 1.0              # optional output zoom composed into the same warp
     seed: int = 0
+    analysis_stride: int = 1       # analyse every n-th frame and interpolate the path (2 = source frame rate for 59.94p fields)
+    flow_dtype: str = "float32"    # "float16" runs encoders + update block in half precision (opt-in)
+    corr_dtype: str = "float32"    # "float16" stores the correlation pyramid in half precision (opt-in)
+    warm_iters: int = 0            # iterations once warm-started (0 = same as flow_iters)
     model: str = "similarity"      # global camera model: similarity | affine | homography (residuals go to the mesh)
     fidelity: float = 0.1          # L1 pull of the path towards the raw path (keeps the border small; 1.0 leaked jitter, 0 -> big border)
 
@@ -46,10 +50,20 @@ def roll_per_frame(roll, T, fps):
 
 
 class RaftFlow:
-    """Forward/backward RAFT flow with optional warm start from the previous pair's low-res flow."""
-    def __init__(self, weights, iters=24, downscale=1, warm=True, corr_dtype=mx.float32):
-        self.m = load_raft(weights); self.iters, self.ds, self.warm, self.cd = iters, downscale, warm, corr_dtype
-        self.prev = {}
+    """RAFT flow for the stabilizer.
+
+    `bidir(a, b)` gives forward and backward flow of one frame pair as a single batch-2 refinement, with the encoders run once
+    per frame (the previous call's features of `b` are reused as `a`), one host sync per pair, warm start from the previous pair.
+    Options (all default to the exact fp32 path of the parity tests; see the README for their measured cost):
+      dtype=mx.float16     encoders + update block in half precision (correlation volume still built from fp32 features)
+      corr_dtype=float16   store the correlation pyramid in half precision
+      warm_iters=N         iterations used once a warm start exists (first pair uses `iters`)
+      downscale=2          estimate flow on a box-filtered half-resolution image, flow returned at full resolution."""
+    def __init__(self, weights, iters=24, downscale=1, warm=True, corr_dtype=mx.float32, dtype=mx.float32, warm_iters=None):
+        self.m = load_raft(weights)
+        if dtype != mx.float32: self.m.to_dtype(dtype)
+        self.iters, self.ds, self.warm, self.cd, self.warm_iters = iters, downscale, warm, corr_dtype, warm_iters
+        self.prev = {}; self.prev_f = self.prev_b = None; self._last = None; self.syncs = 0
 
     def _prep(self, im):
         x = mx.array(im).astype(mx.float32)
@@ -58,20 +72,37 @@ class RaftFlow:
             x = x[:H2 * self.ds, :W2 * self.ds].reshape(H2, self.ds, W2, self.ds, 3).mean(axis=(1, 3))
         return x
 
-    def __call__(self, a, b, key="f"):
-        from .raft.model import pad8, unpad
-        H, W = a.shape[:2]
-        A, p = pad8(self._prep(a)[None]); B, _ = pad8(self._prep(b)[None])
-        init = self.prev.get(key) if self.warm else None
-        low, up = self.m(A, B, self.iters, init, corr_dtype=self.cd)
-        self.prev[key] = low; mx.eval(low, up)
+    def _restore(self, up, p, H, W):
+        from .raft.model import unpad
         f = unpad(up, p)[0]
         if self.ds > 1:
-            h, w = f.shape[:2]
             ys, xs = mx.meshgrid(mx.arange(H), mx.arange(W), indexing="ij")
             c = mx.stack([(xs + .5) / self.ds - .5, (ys + .5) / self.ds - .5], -1)[None].astype(mx.float32)
             f = sample(f[None], c, "bilinear", "border")[0] * self.ds
         return f
+
+    def __call__(self, a, b, key="f"):
+        """One direction (legacy API): flow a -> b at full resolution, lazily evaluated by the caller."""
+        from .raft.model import pad8
+        H, W = a.shape[:2]
+        A, p = pad8(self._prep(a)[None]); B, _ = pad8(self._prep(b)[None])
+        init = self.prev.get(key) if self.warm else None
+        low, up = self.m(A, B, self.iters, init, corr_dtype=self.cd)
+        self.prev[key] = low; mx.eval(low, up); self.syncs += 1
+        return self._restore(up, p, H, W)
+
+    def bidir(self, a, b):
+        from .raft.model import pad8
+        H, W = a.shape[:2]
+        if self._last is not None and self._last[0] is a: fa, p = self._last[1], self._last[2]
+        else:
+            x, p = pad8(self._prep(a)[None]); fa = self.m.frame_features(x)
+        x, _ = pad8(self._prep(b)[None]); fb = self.m.frame_features(x)
+        warm = self.warm and self.prev_f is not None
+        it = (self.warm_iters or self.iters) if warm else self.iters
+        lf, uf, lb, ub = self.m.flow_bidir(fa, fb, it, self.prev_f if warm else None, self.prev_b if warm else None, self.cd)
+        self.prev_f, self.prev_b = lf, lb; self._last = (b, fb, p)
+        return self._restore(uf, p, H, W), self._restore(ub, p, H, W)           # lazy: observe() evaluates them
 
 
 @dataclass
@@ -80,23 +111,37 @@ class Motion:
     H: int
     fps: float
     fits: list = field(default_factory=list)
+    stride: int = 1            # frames between analysed pairs
+    n_frames: int = 0          # frames seen
 
 
-def analyze(frames, flow_fn, cfg, W, H, fps, log=None, masks=None, on_step=None):
-    """Pass 1: motion fit for each consecutive pair. `frames` yields uint8 [H,W,3]; flow_fn(a, b, key) -> [H,W,2] mx."""
-    mot = Motion(W, H, fps); prev = None; rng = np.random.default_rng(cfg.seed)
+def analyze(frames, flow_fn, cfg, W, H, fps, log=None, masks=None, on_step=None, stride=1, threads=True):
+    """Pass 1: motion fit for each consecutive analysed pair (every `stride`-th frame). `frames` yields uint8 [H,W,3];
+    flow_fn(a, b, key) -> [H,W,2] mx, or flow_fn.bidir(a, b) -> (forward, backward). While the GPU computes the next flow, a worker
+    thread fits the previous pair on the CPU."""
+    from concurrent.futures import ThreadPoolExecutor
+    mot = Motion(W, H, fps, stride=stride); prev = None; rng = np.random.default_rng(cfg.seed)
     gc, gr = cfg.mesh
+    pool = ThreadPoolExecutor(1) if threads else None; pend = []
+    fit = lambda obs: MO.fit_motion(obs, (max(gc, 1), max(gr, 1)), cfg.rs_rows, rng=rng, model=cfg.model)
     pm = None
     for i, fr in enumerate(frames):
         cm = next(masks) if masks is not None else None
+        mot.n_frames = i + 1
+        if i % stride: continue
         if on_step: on_step(i)                 # hook for callers that share the GPU (e.g. release/re-acquire a lock between chunks)
         if prev is not None:
-            Ff = flow_fn(prev, fr, "f"); Bf = flow_fn(fr, prev, "b")
+            if hasattr(flow_fn, "bidir"): Ff, Bf = flow_fn.bidir(prev, fr)
+            else: Ff = flow_fn(prev, fr, "f"); Bf = flow_fn(fr, prev, "b")
             obs = MO.observe(Ff, Bf, cfg.step)
             if cm is not None: MO.exclude_masked(obs, pm, cm)
-            mot.fits.append(MO.fit_motion(obs, (max(gc, 1), max(gr, 1)), cfg.rs_rows, rng=rng, model=cfg.model))
+            if pool: pend.append(pool.submit(fit, obs))
+            else: mot.fits.append(fit(obs))
+            while len(pend) > 2: mot.fits.append(pend.pop(0).result())
             if log and i % 20 == 0: log(f"flow {i}")
         prev = fr; pm = cm
+    for f in pend: mot.fits.append(f.result())
+    if pool: pool.shutdown()
     return mot
 
 
@@ -110,12 +155,22 @@ class Plan:
     fallbacks: int = 0
 
 
-def plan(mot, cfg, roll=None):
-    W, H, T = mot.W, mot.H, len(mot.fits) + 1
+def _upsample_time(X, stride, T):
+    """Linear interpolation of a per-analysed-index series X [Ta,...] to T frames (hold after the last analysed one)."""
+    Ta = len(X); t = np.arange(T) / stride; i0 = np.minimum(t.astype(int), Ta - 1); i1 = np.minimum(i0 + 1, Ta - 1)
+    w = np.where(t >= Ta - 1, 0.0, t - i0).reshape((-1,) + (1,) * (X.ndim - 1))
+    return X[i0] * (1 - w) + X[i1] * w
+
+
+def plan(mot, cfg, roll=None, n_frames=None):
+    W, H = mot.W, mot.H; stride = getattr(mot, "stride", 1)
+    Ta = len(mot.fits) + 1; T = n_frames or (Ta - 1) * stride + 1
     cs = G.corners(W, H)
     Cs = [np.eye(3)]
-    for f in mot.fits: Cs.append(Cs[-1] @ np.linalg.inv(f.H))                 # frame t+1 -> reference
+    for f in mot.fits: Cs.append(Cs[-1] @ np.linalg.inv(f.H))                 # analysed frame -> reference
     quads = np.stack([G.apply_h(C, cs) for C in Cs])                           # camera path in corner space
+    if stride > 1 or T != Ta:                                                  # path analysed at a lower rate: interpolate it
+        quads = _upsample_time(quads, stride, T); Cs = [G.dlt(cs, q) for q in quads]
     rolls = roll_per_frame(roll, T, mot.fps) if roll is not None else None
     target = np.stack([G.rotate_quad(q, r) for q, r in zip(quads, rolls)]) if rolls is not None else quads.copy()
     centre = np.array([W / 2 - .5, H / 2 - .5]); base = cs - centre
@@ -140,10 +195,12 @@ def plan(mot, cfg, roll=None):
     mb = cfg.mesh_budget * W
     if gc > 0 and mot.fits:
         M = np.concatenate([np.zeros((1, gr + 1, gc + 1, 2)), np.cumsum([f.mesh for f in mot.fits], 0)])
+        if stride > 1 or T != Ta: M = _upsample_time(M, stride, T)
         Ms = SM.smooth_columns(M.reshape(T, -1), cfg.smooth, cfg.sigma, mb, cfg.l1_weights, cfg.fidelity).reshape(M.shape)
         mesh_corr = M - Ms
     if cfg.rs_rows > 0 and mot.fits:
         Rw = np.concatenate([np.zeros((1, cfg.rs_rows, 2)), np.cumsum([f.rows for f in mot.fits], 0)])
+        if stride > 1 or T != Ta: Rw = _upsample_time(Rw, stride, T)
         Rs = SM.smooth_columns(Rw.reshape(T, -1), cfg.smooth, cfg.sigma, mb, cfg.l1_weights, cfg.fidelity).reshape(Rw.shape)
         row_corr = Rw - Rs
     return Plan(Gs, mesh_corr, row_corr, quads, path, sum(f.fallback for f in mot.fits))
@@ -199,16 +256,16 @@ def stabilize(src, out, mask=None, weights=None, cfg=None, roll=None, start=None
     cfg = cfg or Config()
     info = media.probe(src)
     if flow_fn is None:
-        flow_fn = RaftFlow(weights, cfg.flow_iters, cfg.flow_downscale, cfg.warm_start)
-    frames, fps, (W, H) = media.decode(src, info, start, duration)
+        flow_fn = RaftFlow(weights, cfg.flow_iters, cfg.flow_downscale, cfg.warm_start, getattr(mx, cfg.corr_dtype), getattr(mx, cfg.flow_dtype), cfg.warm_iters or None)
+    frames, fps, (W, H) = media.decode(src, info, start, duration); frames = media.prefetch(frames)
     if info["interlaced"]: log(f"interlaced ({info['field_order']}): bwdif send_field -> {fps:.3f} fps")
     import time; t0 = time.perf_counter()
-    mot = analyze(frames, flow_fn, cfg, W, H, fps, log, on_step=on_step); t1 = time.perf_counter()
+    mot = analyze(frames, flow_fn, cfg, W, H, fps, log, on_step=on_step, stride=cfg.analysis_stride); t1 = time.perf_counter()
     if dump_motion:
         import pickle; Path(dump_motion).write_bytes(pickle.dumps(mot))
-    pl = plan(mot, cfg, load_roll(roll) if isinstance(roll, (str, Path)) else roll)
+    pl = plan(mot, cfg, load_roll(roll) if isinstance(roll, (str, Path)) else roll, n_frames=mot.n_frames)
     t2 = time.perf_counter()
-    frames, fps, _ = media.decode(src, info, start, duration)
+    frames, fps, _ = media.decode(src, info, start, duration); frames = media.prefetch(frames)
     enc = media.Encoder(out, W, H, fps, out_fps=fps_out)
     menc = media.Encoder(mask, W, H, fps, gray=True, out_fps=fps_out) if mask else None
     grid = None; borders = []; dist = []
