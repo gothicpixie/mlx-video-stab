@@ -201,8 +201,10 @@ def stabilize(src, out, mask=None, weights=None, cfg=None, roll=None, start=None
         flow_fn = RaftFlow(weights, cfg.flow_iters, cfg.flow_downscale, cfg.warm_start)
     frames, fps, (W, H) = media.decode(src, info, start, duration)
     if info["interlaced"]: log(f"interlaced ({info['field_order']}): bwdif send_field -> {fps:.3f} fps")
-    mot = analyze(frames, flow_fn, cfg, W, H, fps, log)
+    import time; t0 = time.perf_counter()
+    mot = analyze(frames, flow_fn, cfg, W, H, fps, log); t1 = time.perf_counter()
     pl = plan(mot, cfg, load_roll(roll) if isinstance(roll, (str, Path)) else roll)
+    t2 = time.perf_counter()
     frames, fps, _ = media.decode(src, info, start, duration)
     enc = media.Encoder(out, W, H, fps, out_fps=fps_out)
     menc = media.Encoder(mask, W, H, fps, gray=True, out_fps=fps_out) if mask else None
@@ -216,7 +218,9 @@ def stabilize(src, out, mask=None, weights=None, cfg=None, roll=None, start=None
         if t % 20 == 0: log(f"render {t}/{len(pl.G)}")
     enc.close()
     if menc: menc.close()
-    rep = {"frames": len(pl.G), "fps": fps, "interlaced": info["interlaced"], "fallback_frames": pl.fallbacks,
+    t3 = time.perf_counter(); n = len(pl.G)
+    rep = {"frames": n, "timing_s": {"analysis": t1 - t0, "plan": t2 - t1, "render": t3 - t2},
+           "fps_analysis": n / (t1 - t0), "fps_render": n / (t3 - t2), "fps_total": n / (t3 - t0), "fps": fps, "interlaced": info["interlaced"], "fallback_frames": pl.fallbacks,
            "mean_border_frac": float(np.mean(borders)), "max_border_frac": float(np.max(borders)),
            "cropping_ratio": float(1 - np.mean(borders)), "distortion_min": float(np.min(dist)), "distortion_mean": float(np.mean(dist))}
     if report: Path(report).write_text(json.dumps(rep, indent=1))

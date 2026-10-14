@@ -24,7 +24,7 @@ def dlt(src, dst, w=None):
     A = np.concatenate([np.stack([-a[:, 0], -a[:, 1], -o, z, z, z, b[:, 0] * a[:, 0], b[:, 0] * a[:, 1], b[:, 0]], 1),
                         np.stack([z, z, z, -a[:, 0], -a[:, 1], -o, b[:, 1] * a[:, 0], b[:, 1] * a[:, 1], b[:, 1]], 1)])
     if w is not None: sw = np.sqrt(np.asarray(w, np.float64)); A = A * np.concatenate([sw, sw])[:, None]
-    h = np.linalg.svd(A)[2][-1].reshape(3, 3)
+    h = np.linalg.eigh(A.T @ A)[1][:, 0].reshape(3, 3)          # smallest right singular vector via the 9x9 normal matrix
     Hm = np.linalg.inv(Td) @ h @ Ts
     return Hm / Hm[2, 2]
 

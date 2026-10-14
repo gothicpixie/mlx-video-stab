@@ -22,6 +22,8 @@ def decode(path, info=None, start=None, duration=None, deinterlace=True, vf=None
     if info["interlaced"] and deinterlace: filt.append("bwdif=mode=send_field:parity=auto:deint=all")
     if vf: filt.append(vf)
     fps = info["fps"] * (2 if info["interlaced"] and deinterlace else 1)
+    if vf and vf.startswith("fps="):
+        n_, _, d_ = vf[4:].partition("/"); fps = float(n_) / float(d_ or 1)
     cmd = ["ffmpeg", "-v", "error", "-nostdin"]
     if start is not None: cmd += ["-ss", str(start)]
     cmd += ["-i", str(path)]
