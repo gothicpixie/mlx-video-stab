@@ -7,6 +7,8 @@ video inpainter in a later round).
 
 Status: round 1 (RAFT, warp kernel, stabilizer, metrics, benchmarks). Not yet published.
 
+See the [development plan](PLAN.md) for the roadmap, experiment register, acceptance criteria, and Rust migration decision.
+
 ## What is in it
 
 | module | what |
