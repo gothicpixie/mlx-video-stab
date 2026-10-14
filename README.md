@@ -77,11 +77,22 @@ Note: the reference produces NaN when the coarsest correlation level is 1 px wid
 
 RAFT-things, 12 iterations, 1 pair, fp32, M-series Mac with 24 GB (median of 3; CPU at 1080p: 2). The torch backends run the reference code.
 
-BENCH_TABLE
+| resolution | MLX (GPU) | PyTorch MPS | PyTorch CPU |
+|---|---|---|---|
+| 960x544 (540p padded to 8) | 0.45 s | 0.39 s | 1.58 s |
+| 1920x1088 (1080p padded to 8) | 2.05 s | 2.47 s | 11.53 s |
+
+MLX is on par with PyTorch-MPS at 540p (0.45 s vs 0.39 s), about 20% faster at 1080p (2.05 s vs 2.47 s) and 5 to 6x faster than CPU. Speed was not optimised (fp32 everywhere, correlation volume materialised in full).
 
 Stabilizer throughput (whole pipeline incl. flow in both directions, planning, Lanczos render and x264 encode):
 
-STAB_TABLE
+| clip (synthetic) | flow | flow analysis | render + encode | whole pipeline |
+|---|---|---|---|---|
+| 640x360, 60 frames | 1/1 res, 12 iters | 2.01 fps | 110.4 fps | 1.89 fps |
+| 1920x1080, 30 frames | 1/2 res, 20 iters | 0.37 fps | 15.8 fps | 0.36 fps |
+| 1920x1080, 12 frames | 1/1 res, 12 iters | 0.14 fps | 6.4 fps | 0.14 fps |
+
+The flow analysis (RAFT forward + backward per pair, RANSAC, mesh fit) is the cost; planning (LP) takes seconds and rendering with Lanczos-3 is real-time-ish. A 10 s 1080i camcorder clip (600 field-frames after bwdif) at 1/2-resolution flow and 20 iterations took about 26 minutes end to end (0.39 fps). Throughput is deliberately secondary to quality in this round.
 
 ## Metrics
 
@@ -89,7 +100,27 @@ Measured on the videos themselves with the same RAFT-based analysis for input an
 stability and cropping/distortion as in Liu et al. 2013 (*Bundled camera paths*), residual jitter in px, and a rolling-shutter wobble
 measure (row-wise residual motion after removing its linear trend).
 
-METRICS_TABLE
+**Synthetic clip** (procedural, 640x360, 150 frames, parallax layers + moving subject + jitter + rolling shutter; RAFT 12 iterations; fidelity 1.0 as it was then):
+
+| | stability | jitter px | wobble px |
+|---|---|---|---|
+| input | 0.051 | 3.43 | 0.181 |
+| mlxstab | 0.917 | 0.12 | 0.062 |
+
+**Real handheld 1080i camcorder footage** (two private 10 s windows; bwdif to 59.94p, outputs taken at 29.97 fps; stabilizer flow at half resolution, 20 iterations; metrics measured with quarter-resolution flow, in 1080p pixels). The baseline is the OpenCV stabilizer of the author's own film pipeline (LK tracking at 640 px, similarity path, Gaussian sigma 15 frames, 6% crop-in, reflected borders):
+
+| clip | | stability | jitter px | wobble px |
+|---|---|---|---|---|
+| A | input | 0.841 | 1.43 | 0.061 |
+| A | OpenCV baseline (6% crop) | 0.756 | 0.86 | 0.064 |
+| A | mlxstab (fidelity 0.1) | 0.942 | 0.46 | 0.054 |
+| B | input | 0.496 | 4.97 | 0.081 |
+| B | OpenCV baseline (6% crop) | 0.692 | 3.22 | 0.091 |
+| B | mlxstab (fidelity 1.0, superseded) | 0.594 | 2.61 | 0.063 |
+
+mlxstab on clip A: mean border 1.7% of pixels (max 8.4% in one frame), cropping ratio 0.983, distortion score (min over frames) 1.000; the baseline crops 6% of every frame. Clip B was measured before the fidelity default was tuned (1.0 leaks residual jitter into the path) and has not been re-run: there mlxstab had lower jitter and wobble than the baseline but a lower stability score.
+
+How to read these. *Stability* (Liu et al.) is the share of path energy in the lowest frequency bins. It is scale-free, so an almost perfectly static path scores badly because the little energy left sits at the knots of the piecewise path; read it together with *jitter*, and treat it as noisy on short windows. Ablation on the planned paths of clip A: fidelity 0.1 gave stability 0.94 and high-pass jitter 1.5 px, Gaussian sigma 15 gave 0.87 and 2.3, fidelity 1.0 gave 0.87 and 3.8, and pure L1 (fidelity 0) gave a near-static path with stability 0.39. On a 4 s excerpt, the row-wise (rolling-shutter) plus mesh residuals lowered the wobble measure from 0.035 (global path only) to 0.030, against 0.037 for the input, and a lower fidelity lowered it further (0.023): the mesh/row stage helps modestly, the global L1 path is what moves jitter. Real public-domain footage was not downloaded in this round (it needs approval), so the synthetic clip is the reproducible public test.
 
 ## Credits and licenses
 
