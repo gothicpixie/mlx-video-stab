@@ -18,6 +18,7 @@ def main(argv=None):
     p.add_argument("--rs-rows", type=int, default=18, help="rolling-shutter row bands, 0 disables")
     p.add_argument("--iters", type=int, default=24); p.add_argument("--flow-downscale", type=int, default=1)
     p.add_argument("--kernel", choices=["bilinear", "bicubic", "lanczos3"], default="lanczos3")
+    p.add_argument("--fidelity", type=float, default=0.1, help="L1 pull of the smoothed path towards the raw path (0 = pure L1, larger = hugs the raw path)")
     p.add_argument("--zoom", type=float, default=1.0)
     p.add_argument("--start", type=float); p.add_argument("--duration", type=float)
     p.add_argument("--fps", type=float, help="output frame rate (default: processing rate; interlaced sources are 2x field rate)")
@@ -25,7 +26,7 @@ def main(argv=None):
     a = p.parse_args(argv)
     gc, gr = (int(v) for v in a.mesh.lower().split("x"))
     cfg = Config(smooth=a.smooth, sigma=a.sigma, budget=a.budget, mesh=(gc, gr), rs_rows=a.rs_rows, flow_iters=a.iters,
-                 flow_downscale=a.flow_downscale, kernel=a.kernel, zoom=a.zoom)
+                 flow_downscale=a.flow_downscale, kernel=a.kernel, zoom=a.zoom, fidelity=a.fidelity)
     rep = stabilize(a.input, a.output, a.mask, a.weights, cfg, a.roll, a.start, a.duration, a.fps, report=a.report,
                     log=lambda m: print(m, file=sys.stderr))
     print(json.dumps(rep, indent=1))

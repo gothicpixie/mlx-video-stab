@@ -27,7 +27,7 @@ class Config:
     zoom: float = 1.0              # optional output zoom composed into the same warp
     seed: int = 0
     model: str = "similarity"      # global camera model: similarity | affine | homography (residuals go to the mesh)
-    fidelity: float = 1.0          # L1 pull of the path towards the raw path (keeps the border mask small)
+    fidelity: float = 0.1          # L1 pull of the path towards the raw path (keeps the border small; 1.0 leaked jitter, 0 -> big border)
 
 
 def load_roll(path):
@@ -82,13 +82,14 @@ class Motion:
     fits: list = field(default_factory=list)
 
 
-def analyze(frames, flow_fn, cfg, W, H, fps, log=None, masks=None):
+def analyze(frames, flow_fn, cfg, W, H, fps, log=None, masks=None, on_step=None):
     """Pass 1: motion fit for each consecutive pair. `frames` yields uint8 [H,W,3]; flow_fn(a, b, key) -> [H,W,2] mx."""
     mot = Motion(W, H, fps); prev = None; rng = np.random.default_rng(cfg.seed)
     gc, gr = cfg.mesh
     pm = None
     for i, fr in enumerate(frames):
         cm = next(masks) if masks is not None else None
+        if on_step: on_step(i)                 # hook for callers that share the GPU (e.g. release/re-acquire a lock between chunks)
         if prev is not None:
             Ff = flow_fn(prev, fr, "f"); Bf = flow_fn(fr, prev, "b")
             obs = MO.observe(Ff, Bf, cfg.step)
@@ -194,7 +195,7 @@ def _distortion(Gm, W, H):
 
 
 def stabilize(src, out, mask=None, weights=None, cfg=None, roll=None, start=None, duration=None, fps_out=None,
-              flow_fn=None, log=print, report=None):
+              flow_fn=None, log=print, report=None, on_step=None, dump_motion=None):
     cfg = cfg or Config()
     info = media.probe(src)
     if flow_fn is None:
@@ -202,7 +203,9 @@ def stabilize(src, out, mask=None, weights=None, cfg=None, roll=None, start=None
     frames, fps, (W, H) = media.decode(src, info, start, duration)
     if info["interlaced"]: log(f"interlaced ({info['field_order']}): bwdif send_field -> {fps:.3f} fps")
     import time; t0 = time.perf_counter()
-    mot = analyze(frames, flow_fn, cfg, W, H, fps, log); t1 = time.perf_counter()
+    mot = analyze(frames, flow_fn, cfg, W, H, fps, log, on_step=on_step); t1 = time.perf_counter()
+    if dump_motion:
+        import pickle; Path(dump_motion).write_bytes(pickle.dumps(mot))
     pl = plan(mot, cfg, load_roll(roll) if isinstance(roll, (str, Path)) else roll)
     t2 = time.perf_counter()
     frames, fps, _ = media.decode(src, info, start, duration)
@@ -212,6 +215,7 @@ def stabilize(src, out, mask=None, weights=None, cfg=None, roll=None, start=None
     ys, xs = mx.meshgrid(mx.arange(H), mx.arange(W), indexing="ij"); grid = (xs.astype(mx.float32), ys.astype(mx.float32))
     for t, fr in enumerate(frames):
         if t >= len(pl.G): break
+        if on_step: on_step(t)
         img, bad, d = render_frame(fr, pl, t, cfg, grid)
         enc.write(img); borders.append(float(bad.mean())); dist.append(d)
         if menc: menc.write(bad.astype(np.uint8) * 255)
