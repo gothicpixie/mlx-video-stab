@@ -1,13 +1,24 @@
 # mlxstab
 
-Video stabilization on Apple Silicon with [MLX](https://github.com/ml-explore/mlx): a from-scratch MLX port of
-[RAFT](https://github.com/princeton-vl/RAFT) optical flow, a Metal image-resampling kernel, and a quality-first, no-crop
-stabilizer that renders to the full original frame and hands you a mask of the pixels that had no source (to be filled by a
-video inpainter in a later round).
+![mlxstab — Steady motion. Full frame. Experimental video stabilization for Apple Silicon.](marketing/assets/repo-banner.jpg)
 
-Status: round 1 (RAFT, warp kernel, stabilizer, metrics, benchmarks). Not yet published.
+**Steady motion. Full frame.**
 
-See the [development plan](PLAN.md) for the roadmap, experiment register, acceptance criteria, and Rust migration decision.
+Experimental, offline video stabilization for Apple Silicon. Built with [MLX](https://github.com/ml-explore/mlx), a from-scratch
+port of [RAFT](https://github.com/princeton-vl/RAFT) optical flow, and a custom Metal resampling kernel.
+
+mlxstab renders at the original frame dimensions without a crop-in by default. Use `--mask` to export a per-frame mask of
+pixels with no source coverage. Those pixels remain unfilled; border inpainting is future work.
+
+- **Estimate camera motion** with forward/backward optical flow, robust fitting, and moving-subject exclusion.
+- **Plan a smoother path** with L1 optimization, a border budget, and mesh and row residual corrections.
+- **Resample once** from the original frame with Lanczos-3 by default.
+
+Status: experimental research implementation; not yet published. Quality evaluation is ongoing, including reported shape
+distortion and floaty motion. See [current status](STATUS.md) for limitations and historical measurements.
+
+See the [development plan](PLAN.md) for the roadmap, experiment register, acceptance criteria, and Rust migration decision,
+or the [launch kit](marketing/README.md) for graphics and announcement copy.
 
 ## What is in it
 
