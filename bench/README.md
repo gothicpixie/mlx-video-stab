@@ -1241,6 +1241,37 @@ directory so the reviewer resolves both clips. Use `--out-video`, `--out-reverse
 `--panel-width`, and `--panel-height` to choose alternate paths or dimensions; both clips and the report must
 share one directory. Existing artifacts are never overwritten.
 
+#### Postprocess candidate mode (opt-in)
+
+When a run already has a postprocess candidate MP4 (for example the temporal border-fill diagnostic) that
+shares the stabilized output's frame count, rate, resolution and zero-origin CFR PTS, `--candidate-video`
+compares the manifest's existing stabilized `outputs.video` (the baseline) directly against that candidate.
+It decodes only those two **already-encoded output streams** and pairs them by verified frame index (early
+EOF, extra frames and shape mismatch are refused), so the comparison **isolates the postprocess effect
+against the exact same stabilized frames** instead of confounding it with stabilization quality as the
+default raw-vs-stabilized pairing does. Both inputs are validated independently against the manifest, the
+hidden panels use the generic `baseline`/`candidate` labels, the candidate must differ from the baseline and
+from the manifest/source inputs, and neither clip nor report is overwritten. Outputs default to
+`baseline_vs_candidate.mp4`, `baseline_vs_candidate_posrev.mp4` and `baseline_vs_candidate.json` in the run
+directory; building is local and makes no network call. The report keeps the
+`mlxstab.multiscale_real_review/1` schema and is valid input to `bench.gemini_blind_review` and
+`bench.gemini_position_bias_audit`; the position-reversal group embeds both input hashes so two different
+candidate/baseline pairs for the same source window stay distinct while the original and reversal still join.
+
+```bash
+.venv/bin/python -m bench.real_pair_review out/bench/RUN/manifest.json \
+    --candidate-video out/bench/RUN/temporal_fill_r3.mp4
+.venv/bin/python -m bench.gemini_blind_review out/bench/RUN/baseline_vs_candidate.json \
+    --out out/bench/RUN/gemini_review.json
+.venv/bin/python -m bench.gemini_position_bias_audit \
+    --paired-result out/bench/RUN/gemini_review.json \
+    --out out/bench/RUN/position_bias_audit.json
+```
+
+Focused tests: `tests/test_real_pair_review.py` (same-cadence pixel-to-panel assignment in both
+orientations, independent CFR/dimension/frame-count rejection for either input, non-overwrite and
+input-collision refusal, generic hidden mappings and paired position audit), all with cheap fakes.
+
 After `bench/multiscale_real_review.py` writes a `review.json` (the blinded A/B MP4s plus the hidden
 `blind_mapping`), `bench.gemini_blind_review` sends each short review MP4 inline (`video/mp4`, base64) to
 Vertex AI Gemini through the existing `gcloud` user login (project `phx-ai-billing`, default model
@@ -1294,7 +1325,8 @@ paired results; never on the clip name or digest, which a reversed control chang
 reports the screen-side choice and the hidden-method choice **separately** for each side. Derived fields are
 `side_following` (same raw side, non-tie), `method_agreement` (same mapped method, non-tie),
 `opposite_physical_sides` (opposite raw sides, non-tie) and `position_tracks_while_method_changes`. It emits raw
-side and mapped method counts (the method universe includes `multiscale`, `l1`, `raw`, `stabilized` and `tie`),
+side and mapped method counts (the method universe includes `multiscale`, `l1`, `raw`, `stabilized`,
+`baseline`, `candidate` and `tie`),
 complete-pair and non-tie-pair counts, side-following and method-agreement
 counts, opposite-side counts, the position-tracked/method-changed count and mapping-reversal counts, with input
 and report hashes and a scope note. It performs **no**

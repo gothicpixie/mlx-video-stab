@@ -250,3 +250,286 @@ def test_build_rejects_stabilized_file_with_bad_pts(tmp_path, monkeypatch):
                         if Path(path).name == "stabilized.mp4" else original(path))
     with pytest.raises(R.ReviewBuildError, match="stabilized video is not zero-based"):
         R.build(manifest_path, panel_width=40, panel_height=32)
+
+
+# --------------------------------------------------------------------------------------
+# opt-in candidate mode: stabilized baseline output vs an explicit postprocess candidate
+# --------------------------------------------------------------------------------------
+
+def _candidate_setup(monkeypatch, tmp_path, candidates, *, output_frames=2, source_frames=4):
+    """Set up the default fake run plus one or more candidate MP4s.
+
+    ``candidates`` maps a candidate filename to its base pixel value; each candidate decodes to constant
+    frames so panel assignment is exact. The default fake decodes the manifest's stabilized output to
+    values 200/210/... and the raw source to 0/30/...
+    """
+    manifest_path, _, baseline_frames = _setup(monkeypatch, tmp_path, source_frames=source_frames,
+                                               output_frames=output_frames)
+    frames_by_name = {}
+    for name, value in candidates.items():
+        (tmp_path / name).write_bytes(b"candidate-" + name.encode("ascii"))
+        frames_by_name[name] = [np.full((6, 8, 3), value + i * 5, np.uint8) for i in range(output_frames)]
+    decode = media.decode
+
+    def fake_decode(path, *args, **kwargs):
+        name = Path(path).name
+        if name in frames_by_name:
+            return iter(frames_by_name[name]), 30.0, (8, 6)
+        return decode(path, *args, **kwargs)
+
+    monkeypatch.setattr(media, "decode", fake_decode)
+    return manifest_path, frames_by_name
+
+
+def test_build_candidate_isolates_postprocess_and_assigns_panels_both_ways(tmp_path, monkeypatch):
+    manifest_path, _ = _candidate_setup(monkeypatch, tmp_path, {"candidate.mp4": 50})
+    candidate_path = tmp_path / "candidate.mp4"
+    report_path = tmp_path / "cand.json"
+    report = R.build(manifest_path, candidate_video=candidate_path, out_video=tmp_path / "cand.mp4",
+                     out_report=report_path, panel_width=40, panel_height=32)
+    assert len(FakeEncoder.instances) == 2
+    original, reversed_clip = FakeEncoder.instances
+    for encoder in (original, reversed_clip):
+        assert len(encoder.frames) == 2
+        assert encoder.frames[0].shape == (32, 80, 3)
+    # Original: baseline stabilized frame zero (200) left/A, candidate frame zero (50) right/B.
+    assert np.all(original.frames[0][28:, 30:40] == 200)
+    assert np.all(original.frames[0][28:, 75:] == 50)
+    # Position-reversed: the same exact paired output frames with the two panels exchanged.
+    assert np.all(reversed_clip.frames[0][28:, 30:40] == 50)
+    assert np.all(reversed_clip.frames[0][28:, 75:] == 200)
+    # Hidden mappings use the generic baseline/candidate labels in both orders.
+    assert report["pairs"][0]["blind_mapping"]["left_panel"] == "baseline"
+    assert report["pairs"][0]["blind_mapping"]["right_panel"] == "candidate"
+    assert report["pairs"][1]["blind_mapping"]["left_panel"] == "candidate"
+    assert report["pairs"][1]["blind_mapping"]["right_panel"] == "baseline"
+    # Evidence records both input hashes, exact cadence, frame-index identity, panel mappings and hashes.
+    evidence = report["evidence"]
+    assert evidence["mode"] == "candidate"
+    assert evidence["baseline"]["sha256"] == MF.sha256_file(tmp_path / "stabilized.mp4")
+    assert evidence["candidate"]["sha256"] == MF.sha256_file(candidate_path)
+    assert evidence["mapping"]["frame_indices"] == [0, 1]
+    assert evidence["mapping"]["unique"] is True
+    assert evidence["cadence"] == {"fps": [30, 1], "frames": 2, "measured_fps": 30.0,
+                                   "measured_frames": 2}
+    assert evidence["panels"]["original"] == {"clip": "cand.mp4", "left_panel": "baseline",
+                                              "right_panel": "candidate"}
+    assert evidence["panels"]["position_reversed"] == {"clip": "cand_posrev.mp4",
+                                                       "left_panel": "candidate",
+                                                       "right_panel": "baseline"}
+    assert [entry["role"] for entry in evidence["outputs"]] == ["original", "position_reversed"]
+    assert {entry["sha256"] for entry in evidence["outputs"]} == {
+        MF.sha256_file(tmp_path / "cand.mp4"), MF.sha256_file(tmp_path / "cand_posrev.mp4")}
+    assert report["provenance"]["baseline_sha256"] == evidence["baseline"]["sha256"]
+    assert report["provenance"]["candidate_sha256"] == evidence["candidate"]["sha256"]
+
+
+def test_candidate_default_output_name_differs_from_raw_mode(tmp_path, monkeypatch):
+    manifest_path, _ = _candidate_setup(monkeypatch, tmp_path, {"candidate.mp4": 50})
+    report = R.build(manifest_path, candidate_video=tmp_path / "candidate.mp4",
+                     panel_width=40, panel_height=32)
+    assert report["output"]["clips"] == ["baseline_vs_candidate.mp4",
+                                         "baseline_vs_candidate_posrev.mp4"]
+    for name in ("baseline_vs_candidate.mp4", "baseline_vs_candidate_posrev.mp4",
+                 "baseline_vs_candidate.json"):
+        assert (tmp_path / name).is_file()
+
+
+@pytest.mark.parametrize("bad_name, where", [("stabilized.mp4", "baseline"),
+                                             ("candidate.mp4", "candidate")])
+def test_build_candidate_independently_rejects_output_cfr(tmp_path, monkeypatch, bad_name, where):
+    manifest_path, _ = _candidate_setup(monkeypatch, tmp_path, {"candidate.mp4": 50})
+    current = media.frame_pts
+    monkeypatch.setattr(media, "frame_pts",
+                        lambda path: _pts(2, 25.0) if Path(path).name == bad_name else current(path))
+    with pytest.raises(R.ReviewBuildError, match=f"{where} is not zero-based"):
+        R.build(manifest_path, candidate_video=tmp_path / "candidate.mp4",
+                out_video=tmp_path / "x.mp4", out_report=tmp_path / "x.json",
+                panel_width=40, panel_height=32)
+
+
+@pytest.mark.parametrize("bad_name, where", [("stabilized.mp4", "baseline"),
+                                             ("candidate.mp4", "candidate")])
+def test_build_candidate_independently_rejects_dimensions(tmp_path, monkeypatch, bad_name, where):
+    manifest_path, _ = _candidate_setup(monkeypatch, tmp_path, {"candidate.mp4": 50})
+    current = media.probe
+
+    def fake_probe(path):
+        info = dict(current(path))
+        if Path(path).name == bad_name:
+            info["width"] = 9
+        return info
+
+    monkeypatch.setattr(media, "probe", fake_probe)
+    with pytest.raises(R.ReviewBuildError, match=f"{where} video probe disagrees"):
+        R.build(manifest_path, candidate_video=tmp_path / "candidate.mp4",
+                out_video=tmp_path / "x.mp4", out_report=tmp_path / "x.json",
+                panel_width=40, panel_height=32)
+
+
+@pytest.mark.parametrize("bad_name, delta, message", [
+    ("stabilized.mp4", 1, "baseline decoded frame count exceeds manifest"),
+    ("candidate.mp4", 1, "candidate decoded frame count exceeds manifest"),
+    ("stabilized.mp4", -1, "baseline decode ended before manifest frame count"),
+    ("candidate.mp4", -1, "candidate decode ended before manifest frame count"),
+])
+def test_build_candidate_independently_rejects_frame_count(tmp_path, monkeypatch, bad_name, delta, message):
+    manifest_path, _ = _candidate_setup(monkeypatch, tmp_path, {"candidate.mp4": 50})
+    current = media.decode
+
+    def fake_decode(path, *args, **kwargs):
+        frames, fps, size = current(path, *args, **kwargs)
+        if Path(path).name == bad_name:
+            frames = list(frames)
+            frames = frames + [frames[-1]] if delta > 0 else frames[:-1]
+        return frames, fps, size
+
+    monkeypatch.setattr(media, "decode", fake_decode)
+    with pytest.raises(R.ReviewBuildError, match=message):
+        R.build(manifest_path, candidate_video=tmp_path / "candidate.mp4",
+                out_video=tmp_path / "x.mp4", out_report=tmp_path / "x.json",
+                panel_width=40, panel_height=32)
+
+
+def test_build_candidate_rejects_shape_mismatch(tmp_path, monkeypatch):
+    manifest_path, _ = _candidate_setup(monkeypatch, tmp_path, {"candidate.mp4": 50})
+    current = media.decode
+
+    def fake_decode(path, *args, **kwargs):
+        frames, fps, size = current(path, *args, **kwargs)
+        if Path(path).name == "candidate.mp4":
+            frames = list(frames)
+            frames[0] = np.zeros((6, 8, 4), np.uint8)
+        return frames, fps, size
+
+    monkeypatch.setattr(media, "decode", fake_decode)
+    with pytest.raises(R.ReviewBuildError, match="shapes differ"):
+        R.build(manifest_path, candidate_video=tmp_path / "candidate.mp4",
+                out_video=tmp_path / "x.mp4", out_report=tmp_path / "x.json",
+                panel_width=40, panel_height=32)
+
+
+def test_build_candidate_refuses_collisions_missing_and_overwrite(tmp_path, monkeypatch):
+    manifest_path, _ = _candidate_setup(monkeypatch, tmp_path, {"candidate.mp4": 50})
+    with pytest.raises(R.ReviewBuildError, match="differ from the manifest baseline"):
+        R.build(manifest_path, candidate_video=tmp_path / "stabilized.mp4",
+                panel_width=40, panel_height=32)
+    with pytest.raises(R.ReviewBuildError, match="collides with a manifest/source input"):
+        R.build(manifest_path, candidate_video=tmp_path / "source.mts",
+                panel_width=40, panel_height=32)
+    with pytest.raises(R.ReviewBuildError, match="candidate video is missing"):
+        R.build(manifest_path, candidate_video=tmp_path / "nope.mp4",
+                panel_width=40, panel_height=32)
+    existing = tmp_path / "keep.mp4"
+    existing.write_bytes(b"keep")
+    with pytest.raises(FileExistsError, match="refusing to overwrite"):
+        R.build(manifest_path, candidate_video=tmp_path / "candidate.mp4", out_video=existing,
+                panel_width=40, panel_height=32)
+    assert existing.read_bytes() == b"keep"
+
+
+def test_candidate_review_groups_distinguish_inputs_and_join_roles(tmp_path, monkeypatch):
+    manifest_path, _ = _candidate_setup(monkeypatch, tmp_path, {"c1.mp4": 50, "c2.mp4": 60})
+    report_a = R.build(manifest_path, candidate_video=tmp_path / "c1.mp4",
+                       out_video=tmp_path / "a.mp4", out_report=tmp_path / "a.json",
+                       panel_width=40, panel_height=32)
+    report_b = R.build(manifest_path, candidate_video=tmp_path / "c2.mp4",
+                       out_video=tmp_path / "b.mp4", out_report=tmp_path / "b.json",
+                       panel_width=40, panel_height=32)
+    groups_a = {pair["position_reversal"]["group"] for pair in report_a["pairs"]}
+    groups_b = {pair["position_reversal"]["group"] for pair in report_b["pairs"]}
+    assert len(groups_a) == len(groups_b) == 1
+    assert report_a["position_reversal"]["group"] in groups_a
+    # Same source window, different candidate hash: the groups must stay distinct.
+    assert groups_a != groups_b
+    assert [pair["position_reversal"]["role"] for pair in report_a["pairs"]] == [
+        "original", "position_reversed"]
+
+
+class _FakeVertexResponse:
+    def __init__(self, preference):
+        judgment = {"preference": preference, "confidence": "medium",
+                    "visible_evidence": "visible", "artifacts": "none", "limitations": "short clip"}
+        self._payload = json.dumps({"candidates": [{"content": {"parts": [
+            {"text": json.dumps(judgment)}]}}]}).encode("utf-8")
+
+    def read(self):
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _RecordingOpener:
+    def __init__(self, preferences):
+        self.preferences = list(preferences)
+        self.bodies = []
+
+    def __call__(self, request, timeout=None):
+        self.bodies.append(json.loads(request.data.decode("utf-8")))
+        return _FakeVertexResponse(self.preferences.pop(0))
+
+
+def test_candidate_review_hidden_mapping_and_paired_position_audit(tmp_path, monkeypatch):
+    from bench import gemini_blind_review as G
+    from bench import gemini_position_bias_audit as A
+
+    manifest_path, _ = _candidate_setup(monkeypatch, tmp_path, {"candidate.mp4": 50})
+    report_path = tmp_path / "cand.json"
+    report = R.build(manifest_path, candidate_video=tmp_path / "candidate.mp4",
+                     out_video=tmp_path / "cand.mp4", out_report=report_path,
+                     panel_width=40, panel_height=32)
+    validated = G.load_review(report_path)
+    assert [G.map_preference(pair["blind_mapping"], side)
+            for pair in validated["pairs"] for side in ("A", "B")] == [
+        "baseline", "candidate", "candidate", "baseline"]
+    tasks = G.collect_tasks([report_path])
+    assert [task["position_reversal"]["role"] for task in tasks] == ["original", "position_reversed"]
+    assert {task["position_reversal"]["group"] for task in tasks} == \
+        {report["position_reversal"]["group"]}
+
+    # Give the two encoded clips distinct bytes so the fake reviewer's resume cache cannot collapse them.
+    original_clip, reversed_clip = report["output"]["clips"]
+    for name, marker in ((original_clip, b"-baseline"), (reversed_clip, b"-candidate")):
+        clip = tmp_path / name
+        clip.write_bytes(clip.read_bytes() + marker)
+
+    opener = _RecordingOpener(["A", "B"])  # original A -> baseline; reversal B -> baseline
+    out = tmp_path / "candidate_result.json"
+    document = G.run_review_set([report_path], out, token="tok", opener=opener,
+                                sleep=lambda _s: None)
+    # The Vertex request carries only the clip bytes and the fixed brief; no generic panel labels leak.
+    for body in opener.bodies:
+        assert body["contents"][0]["parts"][1]["text"] == G.REVIEW_BRIEF
+    assert [record["mapped_preference"] for record in document["judgments"]] == [
+        "baseline", "baseline"]
+
+    audit = A.audit([], [], [], [out])
+    assert audit["coverage"]["complete_pairs"] == 1
+    pair = audit["pairs"][0]
+    assert pair["identity"]["group"] == report["position_reversal"]["group"]
+    assert pair["original"]["mapped_method"] == "baseline"
+    assert pair["reversal"]["mapped_method"] == "baseline"
+    assert pair["original"]["blind_mapping"]["left_panel"] == "baseline"
+    assert pair["reversal"]["blind_mapping"]["left_panel"] == "candidate"
+    assert pair["derived"]["method_agreement"] is True
+    assert pair["derived"]["mapping_reversed"] is True
+    assert "baseline" in audit["aggregates"]["original_mapped_method_counts"]
+    assert audit["aggregates"]["original_mapped_method_counts"]["baseline"] == 1
+    assert audit["aggregates"]["reversal_mapped_method_counts"]["baseline"] == 1
+
+
+def test_cli_candidate_mode_builds_and_reports(tmp_path, monkeypatch, capsys):
+    manifest_path, _ = _candidate_setup(monkeypatch, tmp_path, {"candidate.mp4": 50})
+    video_path = tmp_path / "cli_cand.mp4"
+    report_path = tmp_path / "cli_cand.json"
+    assert R.main([str(manifest_path), "--candidate-video", str(tmp_path / "candidate.mp4"),
+                   "--out-video", str(video_path), "--out-report", str(report_path)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"status": "success", "output": str(video_path),
+                       "reversed": str(tmp_path / "cli_cand_posrev.mp4"),
+                       "report": str(report_path), "frames": 2}
+    assert len(FakeEncoder.instances) == 2

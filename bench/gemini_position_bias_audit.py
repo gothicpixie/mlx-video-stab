@@ -75,7 +75,9 @@ ORIGINAL_SCHEMA = G.OUTPUT_SCHEMA
 SOURCE_REVIEW_SCHEMA = G.INPUT_SCHEMA
 
 RAW_SIDES = ("A", "B", "tie")
-METHODS = ("multiscale", "l1", "raw", "stabilized", "tie")
+# Monitored hidden-method universe. Existing entries are preserved; ``baseline``/``candidate`` are the
+# generic labels :mod:`bench.real_pair_review` uses for its opt-in postprocess comparison.
+METHODS = ("multiscale", "l1", "raw", "stabilized", "baseline", "candidate", "tie")
 #: Roles carried by the optional per-pair ``position_reversal`` metadata emitted by
 #: :mod:`bench.real_pair_review` (and propagated through :mod:`bench.gemini_blind_review`).
 POSITION_REVERSAL_ROLES = ("original", "position_reversed")

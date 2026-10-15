@@ -78,9 +78,12 @@ RETRY_STATUS = (429, 500, 503)
 
 PREFERENCES = ("A", "B", "tie")
 CONFIDENCES = ("low", "medium", "high")
-# The reviewer also supports the direct raw-vs-stabilized diagnostic pair. The mapping stays hidden from
-# Gemini; only the A/B preference is sent, then mapped locally to one of these panel identities.
-PANEL_METHODS = ("multiscale", "l1", "raw", "stabilized")
+# The reviewer also supports the direct raw-vs-stabilized diagnostic pair and the opt-in
+# baseline-vs-candidate postprocess pair (both already-encoded stabilized streams). The mapping stays
+# hidden from Gemini; only the A/B preference is sent, then mapped locally to one of these panel
+# identities. Existing entries are preserved; ``baseline``/``candidate`` are the generic labels used so the
+# postprocess effect is isolated without naming the effect in the prompt or provenance.
+PANEL_METHODS = ("multiscale", "l1", "raw", "stabilized", "baseline", "candidate")
 #: Optional per-pair position-reversal metadata emitted by :mod:`bench.real_pair_review`. When present it is
 #: carried verbatim into the recorded judgment (never into the Vertex request) so the offline
 #: :mod:`bench.gemini_position_bias_audit` can pair an original clip with its position-reversed control.
