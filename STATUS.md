@@ -2139,6 +2139,19 @@ translation-only reduction of the composed homography, so the dark, low-resoluti
 and the translation-only model sharply constrain what could be judged. This is **weak subjective evidence,
 not a product-quality result**: it establishes nothing about a multiscale advantage and selects no winner.
 
+A second blind Gemini review over the same **Vertex API** path has now been recorded for a **second, distinct
+source file** (`00176.MTS`, current SHA
+`e4b1f80d54dfa9089741486be297c6fe74d754fe127ec04dfe5a7edcf8d9fbb3`), window start **800 s** / duration
+**1 s**, rendered the same way (1920x1080 interlaced source to `480x270` translation-only review clips). The
+results are in ignored, uncommitted `out/bench/gemini_review/t176_800_1s_multiscale_ab/gemini_api_review.json`.
+It returned **three ties and one medium-confidence preference for B**; for the single non-tie
+(`pair_02_ab.mp4`) that pair's `review.json` maps the B panel to **L1**. Gemini reported no apparent warping or
+artifacts and cited the short duration and low resolution as the limits of its judgment. Combined with the
+first-source `00177` API set (8 clips: 7 ties, one medium-confidence L1 preference), the recorded review now
+covers **12 clips across two distinct source files: 10 ties, 2 L1 preferences and zero multiscale
+preferences**. This remains **weak subjective evidence only**: the clips are short, low-resolution and
+translation-only, the count is limited, and Gemini's visual claims do not establish product quality.
+
 Limitations. The review is a **translation-only** approximation of the composed global homography (no
 rotation, scale, shear, perspective or depth), a single-layer warp of real frames (no occlusion/parallax
 handling), and a `480x270` visual aid, not a full-resolution render. It computes **no image-quality metric**
@@ -2146,9 +2159,9 @@ and selects no winner; the videos are for local human viewing only. The fixed mu
 are reported verbatim and nothing is tuned; nearest-crop pairing is descriptive. Errors here do not
 establish any multiscale advantage.
 
-Next gate: Gemini/human review of the eight clips from both windows, then repeat on a **different source**
-before treating any visible difference as repeatable; keep any claim out of scope until then. No production
-change.
+Next gate: human review of the twelve clips from both sources plus **more independent source windows** before
+treating any visible difference as repeatable or claiming any multiscale advantage; keep any advantage claim
+out of scope until then. No production change.
 
 ## What works
 
