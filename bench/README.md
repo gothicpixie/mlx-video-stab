@@ -868,6 +868,85 @@ depth/layer tests passed **59 tests**. The full `.claude/verify.sh` passed **766
 synced/up-to-date and `affected` found **no graph-linked tests** for the new module, so the direct tests were
 run. No production code changed.
 
+## E10 robustness controls on the depth-layer synthetic gate
+
+E10 adds **three opt-in, default-zero robustness controls** to the **same** isolated synthetic runner
+`bench/depth_layer_synthetic.py` (identical scene, checkerboard split, separate policy blocks and counterfactual
+pooled downstream; still no production wiring, no default change, not imported by `stabilize`, no media decode,
+no RAFT/MLX import, no weights, heavy lock untouched, path-free atomic JSON report). It answers the E09 next
+decision gate by re-measuring the same **frame-median held-out target flow error**, **target-layer residual
+jitter** and **inverse-warp coverage** tradeoff under corruption. Nothing is swept and **no winner is declared**.
+
+Zero-default controls (defaults preserve E09 exactly; the default spec is bit-for-bit the E09 fixture):
+
+- **`flow_noise_px`** adds zero-mean i.i.d. Gaussian **measurement noise** (sigma, pixels) under a fixed
+  named-offset seeded RNG to the **observed** flow only; the known `layer_flow` **ground truth is never
+  perturbed**, so noisy observations and exact scoring stay separable. Default `0.0`.
+- **`depth_error_frac`** (in `[0, 1]`) applies **deterministic flips** of that fraction of the **visible ranked**
+  binary depth labels between the two raw classes (fixed seeded permutation), and **only to `depth_mode="ranked"`**
+  (uninformative/shuffled left untouched). The **realized count/fraction is reported**. It changes the observed
+  per-pixel rank the fit consumes but **never** the ground-truth layer labels, transforms or flow. Default `0.0`.
+- **`fg_nonaffine_px`** adds a **deterministic smooth, spatially varying** (sinusoidal, frame-varying)
+  foreground displacement folded into **both** the known `layer_flow` and the observed flow; the affine
+  `layer_transform` is **kept separately** as the affine component. Default `0.0`.
+
+All three default to zero, so the E09 fixture is unchanged, and the **shuffled** and **uninformative**
+degenerate refusals (`rank_layer_association_destroyed`, `rank_ambiguous_uninformative_depth`) remain in force.
+
+Measured policy-vs-pooled values. One **deterministic fixture/seed** (T=10, W=48, H=36, depths `0.2,0.8`,
+`low_raw_low_rank`, `ranked`, lock rank 0 / preserve rank 1, seed 0). Each cell is
+**frame-median held-out target flow error px / target-layer residual jitter px / inverse-warp coverage**.
+**Synthetic only, no threshold search, no winner.**
+
+| corruption (fixed fixture, seed 0) | layer | policy | pooled counterfactual |
+|---|---|---|---|
+| ideal (all defaults) | background | 0.000000 / 0.000000 / 0.816667 | 0.420816 / 0.441816 / 0.821238 |
+| ideal (all defaults) | foreground | 0.000000 / 0.000000 / 0.838484 | 1.630723 / 1.226369 / 0.821238 |
+| flow noise sigma 0.5 px | background | 0.045862 / 0.189726 / 0.817361 | 0.397158 / 0.473539 / 0.821528 |
+| flow noise sigma 0.5 px | foreground | 0.080578 / 0.212981 / 0.840162 | 1.650267 / 1.238590 / 0.821528 |
+| 25% depth rank flips | background | 0.151815 / 0.155288 / 0.819039 | 0.435668 / 0.441816 / 0.821238 |
+| 25% depth rank flips | foreground | 1.471806 / 0.808365 / 0.826273 | 1.792963 / 1.226369 / 0.821238 |
+| fg non-affine amp 2 px | background | 0.000000 / 0.000000 / 0.816667 | 0.477180 / 0.444151 / 0.821875 |
+| fg non-affine amp 2 px | foreground | 0.645553 / 0.353022 / 0.797454 | 2.119175 / 1.370548 / 0.821875 |
+| combined sigma 0.5 / flip 0.25 / non-affine 2 | background | 0.168082 / 0.223581 / 0.819907 | 0.484729 / 0.476453 / 0.822049 |
+| combined sigma 0.5 / flip 0.25 / non-affine 2 | foreground | 2.075177 / 0.986376 / 0.825752 | 2.351953 / 1.381617 / 0.822049 |
+
+For the 25% depth-error row the fixture realized **432/1728 flipped pixels** (0.25).
+
+Interpretation (cautious): the **different corruption parameters must be interpreted separately** -- a higher
+policy error under one knob does not transfer to another, and **no aggregate score or winner** is claimed. In
+this construction **depth-label errors hurt the foreground much more than the background**, **non-affine
+foreground motion is model misspecification** (the fitted affine family cannot represent it), and **measurement
+noise perturbs the flow estimates** on both layers while truth stays exact. These are **synthetic
+coordinate-model corruptions, not calibrated sensor/depth/motion models**, and they **do not establish a robust
+real-video benefit**; the all-zero default still validates **plumbing, not benefit**.
+
+Explicit limitations: unchanged from E09 (synthetic, arbitrary depth labels, explicit rank orientation and no
+physical near/far or semantic foreground/background, spatially correlated checkerboard neighbours, coordinate
+model rather than rendered-pixel/perceptual metrics), plus the three controls are **synthetic corruptions of the
+coordinate model**, not calibrated models of real sensor noise, depth errors or non-rigid motion. No threshold is
+selected or swept, no winner declared, and no production wiring or default change. Nothing is proven or general,
+and no robust real-footage benefit is established.
+
+```bash
+python -m bench.depth_layer_synthetic --out out/bench/depth_layer_synthetic.json                                              # ideal defaults (E09)
+python -m bench.depth_layer_synthetic --flow-noise-px 0.5 --out out/bench/depth_layer_synthetic_noise.json                    # flow measurement noise
+python -m bench.depth_layer_synthetic --depth-error-frac 0.25 --out out/bench/depth_layer_synthetic_flip.json                  # 25% depth rank flips (ranked only)
+python -m bench.depth_layer_synthetic --fg-nonaffine-px 2.0 --out out/bench/depth_layer_synthetic_nonaffine.json              # non-affine foreground motion
+python -m bench.depth_layer_synthetic --flow-noise-px 0.5 --depth-error-frac 0.25 --fg-nonaffine-px 2.0 --out out/bench/depth_layer_synthetic_combined.json  # combined
+python -m bench.depth_layer_synthetic --depth-mode shuffled --out out/bench/depth_layer_synthetic_shuffled.json               # shuffled refusal (still)
+python -m bench.depth_layer_synthetic --depth-mode uninformative --out out/bench/depth_layer_synthetic_uninformative.json     # uninformative refusal (still)
+```
+
+Next decision gate (E11): E10 is one fixture and one seed with synthetic corruptions. Next **run multiple seeds
+and scene geometries**, then check **textured/rendered validity** and a **matched real-footage downstream
+crop/jitter/warp-validity** comparison. Do **not** wire production or choose a depth threshold until then.
+
+Tests: `bench/depth_layer_synthetic.py` (with the three controls) is covered by
+`tests/test_depth_layer_synthetic.py`; the focused depth/layer tests passed **78 tests**. The full
+`.claude/verify.sh` passed **785 tests in 28.11 s**. CodeGraph was synced and `affected` found **no graph-linked
+tests** for the module, so the direct tests were run. No production code changed.
+
 ## Tests
 
 `tests/test_bench_runner.py` covers configuration/experiment identity, change labelling against the fully
