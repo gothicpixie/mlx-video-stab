@@ -2127,11 +2127,17 @@ A second temporal window from the same source was also rendered: `out/bench/inde
 (`start 0.0 s`, `duration 1.0 s`, 60 frames) produced four more A/B clips under
 `out/bench/gemini_review/t177_00_1s_multiscale_ab/`. Its source hash also verified. The derived assignment is
 different from t060, but t000 and t060 are two windows of the **same source**, not independent scenes. Both
-windows remain local review material; no Gemini verdict has been recorded.
+windows remain local review material; the blind visual verdict recorded below is the only review so far.
 
-Review status. The Gemini visual review of the four clips is **still pending**: the Mac is locked, so the
-**user is requested to unlock it** before the blinded A/B comparison can be viewed. No visual verdict exists
-yet and nothing about visible quality has been established.
+Review status. A blind Gemini review over the **Vertex API** has been recorded for the eight existing clips
+(four per window); the results are in ignored, uncommitted
+`out/bench/gemini_review/vertex_api_blind_review.json`. It returned **seven ties and one medium-confidence
+preference for B**. For the single non-tie (`t177_00_1s`, `pair_03_ab.mp4`) that pair's `review.json` maps the
+B panel to **L1**, so across the eight clips the set contains **one L1 preference and zero multiscale
+preferences**. Both windows are drawn from the **same dark source**, and the review is a `480x270`,
+translation-only reduction of the composed homography, so the dark, low-resolution, sparse-feature footage
+and the translation-only model sharply constrain what could be judged. This is **weak subjective evidence,
+not a product-quality result**: it establishes nothing about a multiscale advantage and selects no winner.
 
 Limitations. The review is a **translation-only** approximation of the composed global homography (no
 rotation, scale, shear, perspective or depth), a single-layer warp of real frames (no occlusion/parallax
