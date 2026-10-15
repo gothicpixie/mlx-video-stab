@@ -2057,6 +2057,83 @@ subject-motion stress, and check whether the parallax/subject-region tradeoff is
 synthetic scene, before considering any multiscale advantage. Keep fractal scaling out of scope until the
 non-fractal results are repeatable.
 
+### E10.3 blinded real-footage A/B review clips (implemented; local, isolated)
+
+E10/E10.1/E10.2 are all synthetic. E10.3 adds a local, human-review path: `bench/multiscale_real_review.py`
+turns a **successful real run directory** (`manifest.json` + `motion_r0.npz`) into **four blinded two-panel
+A/B MP4s**. It validates the captured motion payload with `bench.real_composition_audit.load_motion_npz`
+(`allow_pickle=False`), cross-checks it against the sibling manifest (`source.sha256`, `source.window`,
+`source.decoded`, `source.preprocessing`, `outputs.motion` basename and
+`experiment_identity.capture.dump_motion`), probes/decodes the manifest source window with the **recorded**
+`bwdif=mode=send_field:parity=auto:deint=all` deinterlace, downscales every frame to a fixed `480x270`
+panel, composes the fitted global homographies with `bench.composition_candidate.global_homography` into a
+**translation path** `C_t = frame_center - Psi_t(frame_center)` (`frame_center = ((W-1)/2, (H-1)/2)`), scales
+the path into panel pixels, builds the same four fixed multiscale-retention candidates and the same fixed L1
+budget grid as E10, pairs each with the **nearest measured-crop** L1 (same `nearest_crop_index` tie rule) and
+backward-warps one frame at a time with `bench.multiscale_render_audit.backward_warp`, writing each
+comparison through `mlxstab.media.Encoder` as `A`/`B` bitmap-labelled side-by-side panels.
+
+The sign is explicit and tested: with a pure forward translation `H` of `(tx, ty)`, `C_t = -t*(tx, ty)`, so
+the path follows the scene shift and `delta = P - C` with `P = C` reproduces the observed panel. The
+reduction is **translation-only**: a rotation about the frame centre gives `C_t = 0` even though the composed
+map is not the identity, so rotation, scale, shear, perspective and depth are ignored. Side assignment is
+randomised from the fixed recorded seed `20240517`; the MP4s carry only `A`/`B` and the hidden mapping lives
+only in the JSON report. Manifest/provenance refusals are explicit: source-hash, window, dimension, fps,
+frame-count, interlace and deinterlace mismatches (plus a non-successful run or a manifest that does not name
+this motion) raise a stable `code`. The report contains path metrics, crop proxies, max correction and
+geometric-support mean/min only; it writes **no image-quality score, ranking or winner** and changes no
+production default.
+
+Run (default output is `RUN_DIR/review`, under ignored `out/`):
+
+```bash
+.venv/bin/python -m bench.multiscale_real_review out/bench/independent_00177_t060_2s_v4
+```
+
+Measured on the existing 00177 capture (`motion_r0.npz`, schema `mlxstab.motion/4`): manifest
+`status=success`, `source.sha256` verified **True** (247 MB source recomputed), window `start 60.0 s /
+duration 2.0 s`, decoded `1920x1080 @ 59.94005994005994 fps, 120 frames`; motion `1920x1080`, `n_frames 120`,
+`n_fits 119`, `stride 1`, fps `59.94005994005994`. Decode returned `1920x1080 @ 59.94`, 120 frames with the
+recorded bwdif deinterlace. Four clips written, each `960x270`, h264/yuv420p, `120` frames at
+`60000/1001 fps`, `0.44-0.53 MB`. Paths are in panel pixels (scale `x=0.25, y=0.25`); crop proxies and
+support from the report:
+
+| pair | multiscale ↔ paired L1 | crop proxy MS / L1 (px) | mismatch (px) | support mean/min MS | support min L1 | A side |
+| --- | --- | ---: | ---: | ---: | ---: | --- |
+| 0 | `drop_all_detail` ↔ `budget_0.8` | 0.8333 / 0.8000 | 0.0333 | 0.9942 / 0.9942 | 0.9942 | multiscale |
+| 1 | `drop_finest` ↔ `budget_0.2` | 0.1953 / 0.2000 | 0.0047 | 0.9942 / 0.9942 | 0.9942 | multiscale |
+| 2 | `drop_finest_and_medium` ↔ `budget_0.4` | 0.3754 / 0.4000 | 0.0246 | 0.9942 / 0.9942 | 0.9942 | multiscale |
+| 3 | `keep_all_detail` ↔ `budget_0` | 0.0000 / 0.0000 | 0.0000 | 1.0000 / 1.0000 | 1.0000 | L1 |
+
+All four crop-proxy mismatches are within the fixed `0.05` tolerance; the paired multiscale/L1 geometric
+support is identical here (both are small translations, `min 0.9942` = border loss) and the identity
+`keep_all_detail`/`budget_0` pair has full support. No quality number is computed and no side is declared
+better.
+
+Checks: `codegraph sync .` indexed the new source module and `codegraph affected bench/multiscale_real_review.py`
+reported no test files (dynamic test relationship), so the relevant tests were run directly. The focused
+suite `tests/test_multiscale_real_review.py` passed **17 tests**, and `.claude/verify.sh` passed **1054 tests
+in 63.44 s**. Generated clips
+and `review.json` were inspected: 4 MP4s at `960x270`/120 frames/`60000/1001`, both `A`/`B` labels inked and
+distinct, hidden mapping matching the recorded blinding draw, and the report JSON-safe, path-free, with no
+quality/winner/ranking field. Artifacts stay under ignored
+`out/bench/gemini_review/t177_60_2s_multiscale_ab/` and are not committed.
+
+Review status. The Gemini visual review of the four clips is **still pending**: the Mac is locked, so the
+**user is requested to unlock it** before the blinded A/B comparison can be viewed. No visual verdict exists
+yet and nothing about visible quality has been established.
+
+Limitations. The review is a **translation-only** approximation of the composed global homography (no
+rotation, scale, shear, perspective or depth), a single-layer warp of real frames (no occlusion/parallax
+handling), and a `480x270` visual aid, not a full-resolution render. It computes **no image-quality metric**
+and selects no winner; the videos are for local human viewing only. The fixed multiscale weights and L1 grid
+are reported verbatim and nothing is tuned; nearest-crop pairing is descriptive. Errors here do not
+establish any multiscale advantage.
+
+Next gate: human/Gemini review of the four clips on this and other **distinct real windows**, with
+crop-proxy-matched pairs, to see whether any visible difference is repeatable; keep any claim out of scope
+until then. No production change.
+
 ## What works
 
 - `mlxstab/warp.py`: Metal sampler (bilinear / Catmull-Rom / Lanczos-3, zeros/border, align_corners). `grid_sample` max abs error vs torch 1.2e-7 .. 2.4e-7. Forward only.
