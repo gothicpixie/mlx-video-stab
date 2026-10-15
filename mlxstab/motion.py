@@ -8,6 +8,27 @@ from .geometry import apply_h, ransac_homography, dlt, fit_model
 from .warp import sample
 
 
+# ``_fill`` diffuses under-observed mesh vertices / row bands from their observed neighbours. A location is
+# *directly supported* when its support mass is at least this value and *filled* when it is below it.
+SUPPORT_THRESHOLD = 3.0
+
+# Stable, ordered fallback reasons for ``fit_motion``. ``NONE`` means the fit succeeded; the other three name
+# the *first* gate that refused it, in the precedence order documented by :func:`fallback_reason`. These are
+# diagnostics only and never change a fit or render.
+FALLBACK_REASON_NONE = "none"
+FALLBACK_REASON_INSUFFICIENT_VALID_SAMPLES = "insufficient_valid_samples"
+FALLBACK_REASON_INSUFFICIENT_RANSAC_INLIERS = "insufficient_ransac_inliers"
+FALLBACK_REASON_LOW_RANSAC_INLIER_FRACTION = "low_ransac_inlier_fraction"
+FALLBACK_REASONS = (FALLBACK_REASON_NONE, FALLBACK_REASON_INSUFFICIENT_VALID_SAMPLES,
+                    FALLBACK_REASON_INSUFFICIENT_RANSAC_INLIERS, FALLBACK_REASON_LOW_RANSAC_INLIER_FRACTION)
+# Stable numeric codes for the serialized payload (the names above remain the public identifiers). The order is
+# the precedence order, so a smaller code is a stronger gate; -1 marks a fit whose metadata was not recorded.
+FALLBACK_REASON_CODES = {name: code for code, name in enumerate(FALLBACK_REASONS)}
+FALLBACK_REASON_BY_CODE = {code: name for code, name in enumerate(FALLBACK_REASONS)}
+FALLBACK_REASON_UNAVAILABLE_CODE = -1
+MIN_INLIER_FRACTION = 0.15   # the fraction gate ``fit_motion`` already applies; named for the diagnostics
+
+
 @dataclass
 class Obs:                       # flow samples for one frame pair (frame t -> t+1)
     pts: np.ndarray              # [N,2] pixel positions in frame t
@@ -15,6 +36,17 @@ class Obs:                       # flow samples for one frame pair (frame t -> t
     valid: np.ndarray            # [N] bool, forward-backward consistent and inside the frame
     W: int
     H: int
+    # Per-sample forward-backward cycle diagnostics recorded by ``observe`` for *every* sampled grid point,
+    # including points the consistency tolerance rejects (``valid`` is only a derived boolean). ``fb_err`` is
+    # the cycle error ``||f + sampled_b||`` in pixels, ``fb_tol`` the tolerance ``fb_abs + fb_rel*||f||`` it is
+    # compared against, and ``fb_inside`` whether the forward endpoint ``pts + flow`` lies inside the frame;
+    # ``valid = (fb_err < fb_tol) & fb_inside``. Keeping the two components (rather than only ``valid``) lets a
+    # spatial map count rejected-but-in-bounds samples too. This is a forward-backward **cycle-consistency**
+    # diagnostic only: not a true correspondence error, not a probability, not calibrated uncertainty. ``None``
+    # on observations built by hand.
+    fb_err: np.ndarray | None = None      # [N] pixels
+    fb_tol: np.ndarray | None = None      # [N] pixels
+    fb_inside: np.ndarray | None = None   # [N] bool
 
 
 @dataclass
@@ -25,6 +57,33 @@ class Fit:
     inlier_frac: float
     mover_frac: float
     fallback: bool
+    # Fit-gate diagnostics recorded by ``fit_motion``: the number of valid flow samples feeding the initial
+    # RANSAC solve, the number of RANSAC inliers it returned (both on the same all-valid solve whose
+    # ``inlier_frac`` above is stored), and the stable ``fallback_reason`` (one of ``FALLBACK_REASONS``, or
+    # ``FALLBACK_REASON_NONE`` for a successful fit). These are diagnostics only and never feed fitting,
+    # stabilization or rendering. ``None`` means the value was not recorded (a manually constructed Fit, or a
+    # legacy ``mlxstab.motion/1``/``/2``/``/3`` payload), not a count of zero.
+    n_valid_samples: int | None = None
+    n_ransac_inliers: int | None = None
+    fallback_reason: str | None = None
+    # Forward-backward **cycle-consistency** spatial maps on the mesh grid, built from every finite, in-bounds
+    # forward endpoint independently of the fit's valid/non-mover mask (a sample rejected by the consistency
+    # tolerance is still counted). ``cycle_err_rms`` is the Gaussian-spatially-weighted RMS of the per-sample
+    # cycle error ``||f + sampled_b||`` in pixels; ``cycle_inconsistency_frac`` the spatially-weighted fraction
+    # of in-bounds samples whose cycle error fails the existing tolerance ``fb_abs + fb_rel*||f||`` (in [0,1]);
+    # ``cycle_sample_mass`` the spatial sample mass/coverage. A vertex with zero sample mass has zero maps. These
+    # are diagnostics only -- NOT a true correspondence error, NOT a probability, NOT calibrated uncertainty --
+    # and do not feed stabilization or fitting. ``None`` for manually constructed / legacy Fits.
+    cycle_err_rms: np.ndarray | None = None            # [gr+1, gc+1] pixels
+    cycle_inconsistency_frac: np.ndarray | None = None # [gr+1, gc+1] in [0,1]
+    cycle_sample_mass: np.ndarray | None = None        # [gr+1, gc+1]
+    # Observation coverage, NOT a probability and NOT flow confidence: the non-robust kernel-weighted count of
+    # usable (valid, non-mover) flow samples contributing to each mesh vertex / row band, recorded *before*
+    # ``_fill`` diffuses under-observed locations. ``value >= SUPPORT_THRESHOLD`` marks a directly observed
+    # vertex/band, ``value < SUPPORT_THRESHOLD`` marks one filled by diffusion. ``None`` means the information
+    # is unavailable (e.g. a legacy ``mlxstab.motion/1`` payload) rather than zero support.
+    mesh_support_mass: np.ndarray | None = None   # [gr+1, gc+1]
+    row_support_mass: np.ndarray | None = None    # [nr]
 
 
 def observe(F, B, step=8, fb_abs=1.0, fb_rel=0.05):
@@ -39,8 +98,10 @@ def observe(F, B, step=8, fb_abs=1.0, fb_rel=0.05):
     err = mx.sqrt(mx.sum((f + b) ** 2, -1)); mag = mx.sqrt(mx.sum(f ** 2, -1))
     inside = (tgt[:, 0] >= 0) & (tgt[:, 0] <= W - 1) & (tgt[:, 1] >= 0) & (tgt[:, 1] <= H - 1)
     valid = (err < fb_abs + fb_rel * mag) & inside
-    mx.eval(f, valid)
-    return Obs(pts.astype(np.float64), np.array(f, np.float64), np.array(valid), W, H)
+    mx.eval(f, valid, err, mag)
+    return Obs(pts.astype(np.float64), np.array(f, np.float64), np.array(valid), W, H,
+               fb_err=np.array(err, np.float64), fb_tol=np.array(fb_abs + fb_rel * mag, np.float64),
+               fb_inside=np.array(inside, bool))
 
 
 def _kernel_field(pts, vals, w, centers, sig, iters=3, huber=1.5):
@@ -56,6 +117,48 @@ def _kernel_field(pts, vals, w, centers, sig, iters=3, huber=1.5):
         r = np.linalg.norm(vals - at, axis=1)
         rw = np.minimum(1.0, huber / np.maximum(r, 1e-9))
     return est, (K * w[:, None]).sum(0)
+
+
+def _cycle_maps(obs, gc, gr):
+    """Gaussian spatial aggregation of the per-sample forward-backward cycle diagnostics of ``obs``.
+
+    Uses every sample whose forward endpoint ``pts + flow`` is finite and in-bounds, **independent of
+    ``Obs.valid``**: a point rejected by the cycle tolerance must still be counted, otherwise the rejection
+    rate would vanish exactly where it matters. At each mesh vertex the Gaussian kernel ``exp(-0.5 d2)``
+    (``d2 < 9``) -- the same kernel/sigma ``_kernel_field`` uses -- weights the samples: ``cycle_err_rms`` is
+    the weighted RMS of ``fb_err`` (pixels), ``cycle_inconsistency_frac`` the weighted fraction with
+    ``fb_err >= fb_tol`` (in [0,1]) and ``cycle_sample_mass`` the weight sum. A vertex with zero sample mass
+    gets zeroes rather than a 0/0. Returns ``(None, None, None)`` when ``obs`` carries no cycle diagnostics
+    (an observation built by hand). This is a forward-backward **cycle-consistency** diagnostic only: it is
+    not a true correspondence error, not a probability and not a calibrated uncertainty."""
+    err = getattr(obs, "fb_err", None); tol = getattr(obs, "fb_tol", None)
+    inside = getattr(obs, "fb_inside", None)
+    if err is None or tol is None or inside is None:
+        return None, None, None
+    W, H = obs.W, obs.H
+    pts = np.asarray(obs.pts, np.float64); flow = np.asarray(obs.flow, np.float64)
+    endpoint = pts + flow
+    err = np.asarray(err, np.float64); tol = np.asarray(tol, np.float64)
+    sel = (np.isfinite(endpoint).all(1) & np.asarray(inside, bool) & np.isfinite(err) & np.isfinite(tol))
+    rms = np.zeros((gr + 1, gc + 1)); frac = np.zeros((gr + 1, gc + 1)); mass = np.zeros((gr + 1, gc + 1))
+    idx = np.flatnonzero(sel)
+    if idx.size == 0:
+        return rms, frac, mass
+    vx = -.5 + np.arange(gc + 1) * W / gc; vy = -.5 + np.arange(gr + 1) * H / gr
+    cx, cy = np.meshgrid(vx, vy)
+    centers = np.stack([cx.ravel(), cy.ravel()], 1)
+    sig = np.array([W / gc, H / gr])
+    d2 = (((pts[idx][:, None, :] - centers[None]) / sig) ** 2).sum(-1)         # [S, V]
+    K = np.exp(-0.5 * d2) * (d2 < 9.0)
+    w = K.sum(0)                                                              # [V]
+    e = err[idx]
+    num = (K * (e ** 2)[:, None]).sum(0)
+    bad = (K * (e >= tol[idx]).astype(float)[:, None]).sum(0)
+    nz = w > 0
+    rms.ravel()[nz] = np.sqrt(num[nz] / w[nz])
+    frac.ravel()[nz] = bad[nz] / w[nz]
+    mass.ravel()[nz] = w[nz]
+    return rms, frac, mass
 
 
 def _fill(field, mass, thr):
@@ -95,17 +198,55 @@ def _movers(obs, resid, inl, gate=6.0, cell=32):
     return keep[cy, cx], keep
 
 
+def fallback_reason(n_valid_samples, n_ransac_inliers, min_valid, min_inlier_frac=MIN_INLIER_FRACTION):
+    """Stable reason for the ``fit_motion`` fallback gates, with an explicit precedence.
+
+    Evaluated in order, the *first* failing gate names the reason, so a pair that fails several thresholds still
+    gets one deterministic label:
+
+    1. ``insufficient_valid_samples``: ``n_valid_samples < min_valid`` (the fit never reached RANSAC);
+    2. ``insufficient_ransac_inliers``: ``n_ransac_inliers < min_valid`` (too few inliers in absolute count);
+    3. ``low_ransac_inlier_fraction``: ``n_ransac_inliers / n_valid_samples < min_inlier_frac``.
+
+    Returns ``FALLBACK_REASON_NONE`` when every gate passes. This mirrors the existing
+    ``inl.sum() < min_valid or inlier_frac < 0.15`` refusal exactly, so it only *labels* the decision and does
+    not change it."""
+    if n_valid_samples < min_valid:
+        return FALLBACK_REASON_INSUFFICIENT_VALID_SAMPLES
+    if n_ransac_inliers < min_valid:
+        return FALLBACK_REASON_INSUFFICIENT_RANSAC_INLIERS
+    if n_valid_samples > 0 and n_ransac_inliers / n_valid_samples < min_inlier_frac:
+        return FALLBACK_REASON_LOW_RANSAC_INLIER_FRACTION
+    return FALLBACK_REASON_NONE
+
+
 def fit_motion(obs, mesh=(16, 9), rs_rows=18, thr=1.5, rng=None, min_valid=60, model="similarity"):
     """Global homography by RANSAC on valid flow samples, movers excluded, then row-wise and mesh residual fields."""
     gc, gr = mesh
     W, H = obs.W, obs.H
     v = obs.valid
-    zero = Fit(np.eye(3), np.zeros((gr + 1, gc + 1, 2)), np.zeros((max(rs_rows, 1), 2)), 0.0, 0.0, True)
-    if v.sum() < min_valid: return zero
+    nr = max(rs_rows, 1)
+    # Cycle diagnostics are computed from the raw samples before any geometric decision, so the fallback path
+    # below still carries them (the geometric fit may fail while the flow cycle diagnostics remain available).
+    c_rms, c_frac, c_mass = _cycle_maps(obs, gc, gr)
+
+    def _fallback(n_valid_samples, n_ransac_inliers, reason):
+        return Fit(np.eye(3), np.zeros((gr + 1, gc + 1, 2)), np.zeros((nr, 2)), 0.0, 0.0, True,
+                   n_valid_samples=int(n_valid_samples), n_ransac_inliers=int(n_ransac_inliers),
+                   fallback_reason=reason,
+                   mesh_support_mass=np.zeros((gr + 1, gc + 1)), row_support_mass=np.zeros(nr),
+                   cycle_err_rms=c_rms, cycle_inconsistency_frac=c_frac, cycle_sample_mass=c_mass)
+
+    n_valid = int(v.sum())
+    if n_valid < min_valid:
+        return _fallback(n_valid, 0, FALLBACK_REASON_INSUFFICIENT_VALID_SAMPLES)
     src = obs.pts[v]; dst = src + obs.flow[v]
     Hm, inl = ransac_homography(src, dst, thr=thr, rng=rng)
     inlier_frac = inl.mean()
-    if inl.sum() < min_valid or inlier_frac < 0.15: return zero
+    n_inliers = int(inl.sum())
+    reason = fallback_reason(n_valid, n_inliers, min_valid)
+    if reason != FALLBACK_REASON_NONE:
+        return _fallback(n_valid, n_inliers, reason)
     mv_last = np.zeros(len(v), bool)
     for _ in range(2):                                                  # re-fit with moving subjects removed
         resid_all = np.linalg.norm(obs.pts + obs.flow - apply_h(Hm, obs.pts), axis=1)
@@ -123,22 +264,28 @@ def fit_motion(obs, mesh=(16, 9), rs_rows=18, thr=1.5, rng=None, min_valid=60, m
     use = v & ~mv
     w = use.astype(float)
     # rolling shutter: x-independent residual per row band
-    rows = np.zeros((max(rs_rows, 1), 2))
+    rows = np.zeros((nr, 2))
+    row_support_mass = np.zeros(nr)                                 # zeros while rows are disabled (rs_rows<=0)
     if rs_rows > 0:
         cy = (np.arange(rs_rows) + .5) * H / rs_rows - .5
         est, mass = _kernel_field(obs.pts[:, 1:2], resid_vec, w, cy[:, None], np.array([H / rs_rows]))
-        rows = _fill(est[:, None], mass[:, None], 3.0)[:, 0]
+        row_support_mass = mass                                     # preserved before _fill diffuses bands
+        rows = _fill(est[:, None], mass[:, None], SUPPORT_THRESHOLD)[:, 0]
         row_at = np.stack([np.interp(obs.pts[:, 1], cy, rows[:, 0]), np.interp(obs.pts[:, 1], cy, rows[:, 1])], 1)
         resid_vec = resid_vec - row_at
     vx = -.5 + np.arange(gc + 1) * W / gc; vy = -.5 + np.arange(gr + 1) * H / gr
     cx, cy2 = np.meshgrid(vx, vy)
     centers = np.stack([cx.ravel(), cy2.ravel()], 1)
     est, mass = _kernel_field(obs.pts, resid_vec, w, centers, np.array([W / gc, H / gr]))
-    mesh_f = _fill(est.reshape(gr + 1, gc + 1, 2), mass.reshape(gr + 1, gc + 1), 3.0)
+    mesh_support_mass = mass.reshape(gr + 1, gc + 1)                # preserved before _fill diffuses vertices
+    mesh_f = _fill(est.reshape(gr + 1, gc + 1, 2), mesh_support_mass, SUPPORT_THRESHOLD)
     p = np.pad(mesh_f, ((1, 1), (1, 1), (0, 0)), mode="edge")                # light spatial regularisation [1 2 1]^2/16
     mesh_f = (p[:-2, 1:-1] + 2 * p[1:-1, 1:-1] + p[2:, 1:-1]) / 4
     p = np.pad(mesh_f, ((0, 0), (1, 1), (0, 0)), mode="edge"); mesh_f = (p[:, :-2] + 2 * p[:, 1:-1] + p[:, 2:]) / 4
-    return Fit(Hm, mesh_f, rows, float(inlier_frac), float(mv[v].mean()), False)
+    return Fit(Hm, mesh_f, rows, float(inlier_frac), float(mv[v].mean()), False,
+               n_valid_samples=n_valid, n_ransac_inliers=n_inliers, fallback_reason=FALLBACK_REASON_NONE,
+               mesh_support_mass=mesh_support_mass, row_support_mass=row_support_mass,
+               cycle_err_rms=c_rms, cycle_inconsistency_frac=c_frac, cycle_sample_mass=c_mass)
 
 
 def _dilate(mask, pad):

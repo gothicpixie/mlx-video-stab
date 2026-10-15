@@ -23,6 +23,12 @@ Full 10 s baseline window (bounded; run in the background and keep the printed h
 
 Every run writes an atomic JSON manifest under the run directory (default ``out/bench/<time>_<case>_<tag>``)
 and prints the manifest path on the last line.
+
+Residual-channel ablation (mesh and/or rows disabled; the remaining motion fields are refit per case, so this
+is a practical configuration ablation, not fixed-plan causal isolation)::
+
+    python -I bench/run_case.py --case global-only --source /path/to/local/clip.MTS --start 60 --duration 1 \
+        --diag-every 15 --lock on --out-dir out/bench/ablation_t060_global_1s
 """
 from __future__ import annotations
 
@@ -72,6 +78,10 @@ def build_parser():
     p.add_argument("--eval-corr-dtype", choices=["float32", "float16"], default="float32")
     p.add_argument("--diag-every", type=int, default=0,
                    help="sample complete-warp diagnostics every K rendered frames from the actual plan (0=off)")
+    p.add_argument("--dump-plan", action="store_true",
+                   help="write the retained repeat-0 Plan to <out-dir>/plan_r0.npz (compressed, non-pickle; private motion data)")
+    p.add_argument("--dump-motion", action="store_true",
+                   help="write the retained repeat-0 fitted Motion to <out-dir>/motion_r0.npz (compressed, non-pickle; private motion data)")
     p.add_argument("--lock", choices=["auto", "on", "off"], default="auto",
                    help="shared heavy lock: auto=on for file sources, off for synthetic")
     p.add_argument("--lock-chunk", type=int, default=0, help="release/re-acquire the lock every N on_step calls")
@@ -125,7 +135,8 @@ def main(argv=None):
         case=a.case, source=a.source, weights=a.weights, start=a.start, duration=a.duration, out_dir=a.out_dir,
         overwrite=a.overwrite, seed=a.seed, repeats=a.repeats, eval_iters=a.eval_iters, eval_downscale=a.eval_downscale,
         eval_flow_dtype=a.eval_flow_dtype, eval_corr_dtype=a.eval_corr_dtype, eval_vf=a.eval_vf, output_fps=a.output_fps,
-        diag_every=a.diag_every, lock=a.lock, lock_chunk=a.lock_chunk, lock_pause_s=a.lock_pause,
+        diag_every=a.diag_every, dump_plan=a.dump_plan, dump_motion=a.dump_motion, lock=a.lock,
+        lock_chunk=a.lock_chunk, lock_pause_s=a.lock_pause,
         synth_frames=a.synth_frames, synth_w=a.synth_w, synth_h=a.synth_h, synth_fps=a.synth_fps,
         selection_note=a.selection_note, overrides=overrides, command=[sys.executable, *sys.argv], log=log)
     try:

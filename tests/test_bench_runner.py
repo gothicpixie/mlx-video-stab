@@ -30,6 +30,9 @@ def test_baseline_is_historical_preset_and_variants_change_declared_variables_on
         "combined-fp16": {"flow_dtype", "corr_dtype"},
         "warm-8": {"warm_iters"},
         "stride-2": {"analysis_stride"},
+        "global-only": {"mesh", "rs_rows"},
+        "mesh-only": {"rs_rows"},
+        "row-only": {"mesh"},
     }
     for name, keys in expected.items():
         cfg = cases.get_case(name).config
@@ -66,6 +69,45 @@ def test_resolved_config_is_a_full_config():
     from dataclasses import fields
     resolved = cases.get_case("baseline").resolved_config()
     assert set(resolved) == {f.name for f in fields(Config)}
+
+
+def test_residual_ablation_resolved_config_vs_baseline():
+    base = cases.resolve_case("baseline").resolved_config()
+    assert base["mesh"] == (16, 9) and base["rs_rows"] == 18        # baseline keeps full mesh + rows
+    expected = {
+        "global-only": {"mesh", "rs_rows"},
+        "mesh-only": {"rs_rows"},
+        "row-only": {"mesh"},
+    }
+    for name, keys in expected.items():
+        resolved = cases.resolve_case(name).resolved_config()
+        diff = {k for k in resolved if resolved[k] != base[k]}
+        assert diff == keys, (name, diff)
+    assert cases.resolve_case("global-only").resolved_config()["mesh"] == (0, 0)
+    assert cases.resolve_case("global-only").resolved_config()["rs_rows"] == 0
+    assert cases.resolve_case("mesh-only").resolved_config()["mesh"] == (16, 9)
+    assert cases.resolve_case("mesh-only").resolved_config()["rs_rows"] == 0
+    assert cases.resolve_case("row-only").resolved_config()["mesh"] == (0, 0)
+    assert cases.resolve_case("row-only").resolved_config()["rs_rows"] == 18
+
+
+def test_residual_ablation_case_names_labels_and_descriptions():
+    for name in ("global-only", "mesh-only", "row-only"):
+        assert name in cases.case_names
+        spec = cases.get_case(name)
+        assert spec.changed and cases.resolve_case(name).changed == spec.changed
+        assert "refit" in spec.description.lower()
+    assert cases.get_case("global-only").changed == "mesh+rs_rows"   # two channels disabled
+    assert cases.get_case("mesh-only").changed == "rs_rows"         # one channel
+    assert cases.get_case("row-only").changed == "mesh"             # one channel
+
+
+def test_residual_ablation_config_digests_distinct_and_stable():
+    names = ("baseline", "global-only", "mesh-only", "row-only")
+    digests = {n: cases.config_digest(cases.resolve_case(n).resolved_config()) for n in names}
+    assert len(set(digests.values())) == len(names)
+    for n in names:
+        assert cases.config_digest(cases.resolve_case(n).resolved_config()) == digests[n]
 
 
 # --------------------------------------------------------------------------------------
@@ -128,6 +170,20 @@ def test_content_key_invalidates_window_code_seed_eval_and_diagnostics():
         cur[path[-1]] = value
         assert MF.content_key(ident) != base, path
     assert MF.content_key(_identity()) == base
+
+
+def test_experiment_identity_records_plan_capture():
+    """The plan/motion-dump options are part of the experiment identity, so toggling them invalidates the key."""
+    src = {"sha256": "s", "window": {}, "preprocessing": {}, "selection_note": None}
+    opts = runner.RunOptions()
+    off = runner._experiment_identity(opts, {"seed": 0}, src, "w", {}, {}, None, None, 0, False)
+    on = runner._experiment_identity(opts, {"seed": 0}, src, "w", {}, {}, None, None, 0, True)
+    assert off["capture"] == {"dump_plan": False, "dump_motion": False}
+    assert on["capture"] == {"dump_plan": True, "dump_motion": False}
+    assert MF.content_key(off) != MF.content_key(on)
+    motion = runner._experiment_identity(opts, {"seed": 0}, src, "w", {}, {}, None, None, 0, False, True)
+    assert motion["capture"] == {"dump_plan": False, "dump_motion": True}
+    assert MF.content_key(off) != MF.content_key(motion)
 
 
 def test_code_fingerprint_hashes_relevant_code_not_docs():
@@ -324,7 +380,7 @@ def test_run_case_failure_writes_valid_manifest(tmp_path, monkeypatch):
     man = runner.run_case(runner.RunOptions(case="baseline", source=str(src), weights=str(w),
                                             out_dir=str(run_dir), lock="off", command=["run_case"]))
     assert man["status"] == "failure"
-    assert man["error"]["stage"] == "stabilize" and man["error"]["type"] == "RuntimeError"
+    assert man["error"]["stage"] == "stabilize_r0" and man["error"]["type"] == "RuntimeError"
     on_disk = json.loads((run_dir / "manifest.json").read_text())
     assert on_disk["status"] == "failure" and on_disk["unavailable"]
 
@@ -412,6 +468,101 @@ def test_run_case_success_manifest_has_required_sections(tmp_path, monkeypatch):
     assert "NaN" not in text and "Infinity" not in text
 
 
+def _run_case_with_stage_spies(tmp_path, monkeypatch, spy_attr, predicate=None):
+    """Run a fully faked success case while a spy records the on-disk manifest stage.
+
+    ``spy_attr`` is the runner attribute to wrap (``evaluate_clip`` or ``media.probe``); the spy appends the
+    stage currently persisted in ``manifest.json`` each time the target runs (optionally only when ``predicate``
+    accepts the call), then delegates to the real object.
+    """
+    _patch_provenance(monkeypatch)
+    _patch_media(monkeypatch)
+    src = tmp_path / "in.mp4"; src.write_bytes(b"x")
+    w = tmp_path / "w.safetensors"; w.write_bytes(b"w")
+    monkeypatch.setattr(runner, "RaftFlow", _FakeFlow)
+    monkeypatch.setattr(runner, "stabilize", lambda *a, **k: {
+        "frames": 3, "decoded_frames": 3, "rendered_frames": 3,
+        "timing_s": {"analysis": 1.0, "plan": 0.1, "render": 0.2},
+        "fps": 30.0, "fallback_frames": 0, "diagnostics_total_s": 0.0, "observed_nondiag_render_s": 0.2})
+
+    run_dir = tmp_path / "stages"
+    man_path = run_dir / "manifest.json"
+    stages = []
+    target = runner
+    for part in spy_attr.split(".")[:-1]:
+        target = getattr(target, part)
+    attr = spy_attr.split(".")[-1]
+    real = getattr(target, attr)
+
+    def spy(*a, **k):
+        if predicate is None or predicate(*a, **k):
+            stages.append(json.loads(man_path.read_text())["stage"])
+        return real(*a, **k)
+    monkeypatch.setattr(target, attr, spy)
+
+    man = runner.run_case(runner.RunOptions(case="baseline", source=str(src), weights=str(w),
+                                            out_dir=str(run_dir), lock="off", command=["run_case"]))
+    return man, man_path, stages
+
+
+def test_run_case_persists_evaluate_stage_before_evaluate_clip_called(tmp_path, monkeypatch):
+    man, man_path, stages = _run_case_with_stage_spies(tmp_path, monkeypatch, "evaluate_clip")
+    assert man["status"] == "success", man.get("error")
+    # Both evaluate_clip calls observed an on-disk manifest already marked evaluate; the run still finishes.
+    assert stages == ["evaluate", "evaluate"]
+    on_disk = json.loads(man_path.read_text())
+    assert on_disk["status"] == "success"
+
+
+def test_run_case_persists_probe_output_stage_before_probing_outputs(tmp_path, monkeypatch):
+    encoded_video = lambda p: Path(p).name.startswith("stabilized_r")
+    man, man_path, stages = _run_case_with_stage_spies(tmp_path, monkeypatch, "media.probe",
+                                                       predicate=encoded_video)
+    assert man["status"] == "success", man.get("error")
+    # probe_output is persisted before the encoded video is probed; the manifest still ends success.
+    assert stages == ["probe_output"]
+    on_disk = json.loads(man_path.read_text())
+    assert on_disk["status"] == "success"
+
+
+def test_run_case_persists_model_construct_and_repeat_stages_before_long_calls(tmp_path, monkeypatch):
+    """The on-disk stage must already name the phase when RAFT loads or a repeat's stabilize begins."""
+    _patch_provenance(monkeypatch)
+    _patch_media(monkeypatch)
+    src = tmp_path / "in.mp4"; src.write_bytes(b"x")
+    w = tmp_path / "w.safetensors"; w.write_bytes(b"w")
+    run_dir = tmp_path / "phases"
+    man_path = run_dir / "manifest.json"
+
+    construct_stages = []
+
+    def raft_spy(*a, **k):
+        # RaftFlow is constructed once for stabilization and once during evaluation.
+        construct_stages.append(json.loads(man_path.read_text())["stage"])
+        return _FakeFlow(*a, **k)
+
+    stabilize_stages = []
+
+    def stabilize_spy(*a, **k):
+        stabilize_stages.append(json.loads(man_path.read_text())["stage"])
+        return {"frames": 3, "decoded_frames": 3, "rendered_frames": 3,
+                "timing_s": {"analysis": 1.0, "plan": 0.1, "render": 0.2},
+                "fps": 30.0, "fallback_frames": 0, "diagnostics_total_s": 0.0,
+                "observed_nondiag_render_s": 0.2}
+
+    monkeypatch.setattr(runner, "RaftFlow", raft_spy)
+    monkeypatch.setattr(runner, "stabilize", stabilize_spy)
+
+    man = runner.run_case(runner.RunOptions(case="baseline", source=str(src), weights=str(w),
+                                            out_dir=str(run_dir), lock="off", repeats=2, command=["run_case"]))
+    assert man["status"] == "success", man.get("error")
+    # At RAFT construction time the manifest already says model_construct (not lock).
+    assert construct_stages[0] == "model_construct"
+    # Each repeat's long stabilize call is entered with that repeat's stage already persisted.
+    assert stabilize_stages == ["stabilize_r0", "stabilize_r1"]
+    assert json.loads(man_path.read_text())["status"] == "success"
+
+
 def test_native_encoding_and_lower_rate_evaluation_use_separate_clocks(tmp_path, monkeypatch):
     _patch_provenance(monkeypatch)
     _patch_media(monkeypatch, source_fps=60.0, output_fps=60.0, frames=6)
@@ -483,6 +634,34 @@ def test_run_case_sampled_diagnostics_use_actual_plan_frames(tmp_path, monkeypat
 # CLI paths (list, dry-run parity)
 # --------------------------------------------------------------------------------------
 
+def test_cli_forwards_dump_plan_option(tmp_path, monkeypatch, capsys):
+    from bench import run_case as cli
+    captured = {}
+
+    def fake_run_case(opts):
+        captured["opts"] = opts
+        return {"status": "success", "case": {"name": opts.case}, "outputs": {"manifest": "m"}, "error": None}
+    monkeypatch.setattr(cli.runner, "run_case", fake_run_case)
+    assert cli.main(["--dump-plan", "--source", "synthetic", "--lock", "off", "--out-dir", str(tmp_path / "d")]) == 0
+    assert captured["opts"].dump_plan is True
+    assert cli.main(["--source", "synthetic", "--lock", "off", "--out-dir", str(tmp_path / "d2")]) == 0
+    assert captured["opts"].dump_plan is False
+
+
+def test_cli_forwards_dump_motion_option(tmp_path, monkeypatch, capsys):
+    from bench import run_case as cli
+    captured = {}
+
+    def fake_run_case(opts):
+        captured["opts"] = opts
+        return {"status": "success", "case": {"name": opts.case}, "outputs": {"manifest": "m"}, "error": None}
+    monkeypatch.setattr(cli.runner, "run_case", fake_run_case)
+    assert cli.main(["--dump-motion", "--source", "synthetic", "--lock", "off", "--out-dir", str(tmp_path / "dm")]) == 0
+    assert captured["opts"].dump_motion is True
+    assert cli.main(["--source", "synthetic", "--lock", "off", "--out-dir", str(tmp_path / "dm2")]) == 0
+    assert captured["opts"].dump_motion is False
+
+
 def test_cli_list_cases_and_dry_run_parity(capsys):
     from bench import run_case as cli
     assert cli.main(["--list-cases"]) == 0
@@ -498,6 +677,22 @@ def test_cli_list_cases_and_dry_run_parity(capsys):
     assert d["resolved_config"]["flow_downscale"] == 2
 
 
+def test_cli_lists_and_dry_runs_residual_ablation_cases(capsys):
+    from bench import run_case as cli
+    assert cli.main(["--list-cases"]) == 0
+    listed = capsys.readouterr().out
+    for name in ("global-only", "mesh-only", "row-only"):
+        assert name in listed
+    expected = {"global-only": ([0, 0], 0), "mesh-only": ([16, 9], 0), "row-only": ([0, 0], 18)}
+    for name, (mesh, rs) in expected.items():
+        assert cli.main(["--dry-run", "--case", name, "--seed", "0"]) == 0
+        d = json.loads(capsys.readouterr().out)
+        resolved = cases.resolve_case(name, {"seed": 0}).resolved_config()
+        assert d["config_digest"] == cases.config_digest(resolved)
+        assert d["resolved_config"]["mesh"] == mesh and d["resolved_config"]["rs_rows"] == rs
+        assert d["output_fps"] == "30000/1001" and d["eval_vf"] == "fps=30000/1001"
+
+
 # --------------------------------------------------------------------------------------
 # review-2 contract tests: change labels, run-dir uniqueness/overwrite, CLI failures,
 # distinct rendered/encoded counts, diag-mode conflict
@@ -509,6 +704,9 @@ def test_resolve_case_change_label_ignores_noop_seed():
     assert cases.resolve_case("fp16-network", {"seed": 0}).changed == "flow_dtype"
     assert cases.resolve_case("combined-fp16").changed == "flow_dtype+corr_dtype"
     assert cases.resolve_case("combined-fp16", {"seed": 0}).changed == "corr_dtype,flow_dtype"
+    assert cases.resolve_case("global-only", {"seed": 0}).changed == "mesh,rs_rows"
+    assert cases.resolve_case("mesh-only", {"seed": 0}).changed == "rs_rows"
+    assert cases.resolve_case("row-only", {"seed": 0}).changed == "mesh"
 
 
 def test_default_run_dir_is_unique_within_a_second():
@@ -562,6 +760,154 @@ def test_run_case_keeps_rendered_and_encoded_counts_distinct(tmp_path, monkeypat
     assert man["repeats"][0]["rendered_frames"] == 6
     assert man["repeats"][0]["encoded_frames"] == 3
     assert man["outputs"]["encoded_frames"] == 3
+
+
+def test_run_case_dump_plan_captures_only_retained_repeat(tmp_path, monkeypatch):
+    """With --dump-plan the runner forwards a run-dir plan path only for repeat 0 and records it in outputs."""
+    _patch_provenance(monkeypatch); _patch_media(monkeypatch)
+    src = tmp_path / "in.mp4"; src.write_bytes(b"x")
+    w = tmp_path / "w.safetensors"; w.write_bytes(b"w")
+    monkeypatch.setattr(runner, "RaftFlow", _FakeFlow)
+    seen = []
+
+    def fake_stabilize(*a, **k):
+        seen.append(k.get("dump_plan"))
+        if k.get("dump_plan"):
+            Path(k["dump_plan"]).write_bytes(b"npz")
+        return {"frames": 3, "decoded_frames": 3, "rendered_frames": 3,
+                "timing_s": {"analysis": 1.0, "plan": 0.1, "render": 0.2},
+                "fps": 30.0, "fallback_frames": 0, "diagnostics_total_s": 0.0, "observed_nondiag_render_s": 0.2}
+    monkeypatch.setattr(runner, "stabilize", fake_stabilize)
+
+    run_dir = tmp_path / "dump"
+    man = runner.run_case(runner.RunOptions(case="baseline", source=str(src), weights=str(w),
+                                            out_dir=str(run_dir), lock="off", repeats=3,
+                                            dump_plan=True, command=["run_case"]))
+    assert man["status"] == "success", man.get("error")
+    assert seen == [str(run_dir / "plan_r0.npz"), None, None]           # warm repeats never capture the plan
+    assert man["outputs"]["plan"] == str(run_dir / "plan_r0.npz")
+    assert man["outputs"]["retained_repeat"] == 0
+    assert man["experiment_identity"]["capture"] == {"dump_plan": True, "dump_motion": False}
+    assert (run_dir / "plan_r0.npz").read_bytes() == b"npz"
+
+
+def test_run_case_without_dump_plan_records_no_plan(tmp_path, monkeypatch):
+    _patch_provenance(monkeypatch); _patch_media(monkeypatch)
+    src = tmp_path / "in.mp4"; src.write_bytes(b"x")
+    w = tmp_path / "w.safetensors"; w.write_bytes(b"w")
+    monkeypatch.setattr(runner, "RaftFlow", _FakeFlow)
+    captured = {}
+
+    def fake_stabilize(*a, **k):
+        captured.update(k)
+        return {"frames": 3, "decoded_frames": 3, "rendered_frames": 3,
+                "timing_s": {"analysis": 1.0, "plan": 0.1, "render": 0.2},
+                "fps": 30.0, "fallback_frames": 0, "diagnostics_total_s": 0.0, "observed_nondiag_render_s": 0.2}
+    monkeypatch.setattr(runner, "stabilize", fake_stabilize)
+    run_dir = tmp_path / "nodump"
+    man = runner.run_case(runner.RunOptions(case="baseline", source=str(src), weights=str(w),
+                                            out_dir=str(run_dir), lock="off", command=["run_case"]))
+    assert man["status"] == "success", man.get("error")
+    assert captured["dump_plan"] is None and man["outputs"]["plan"] is None
+    assert not (run_dir / "plan_r0.npz").exists()
+    assert man["experiment_identity"]["capture"] == {"dump_plan": False, "dump_motion": False}
+
+
+def test_run_case_dump_motion_captures_only_retained_repeat(tmp_path, monkeypatch):
+    """With --dump-motion the runner forwards a run-dir motion path only for repeat 0 and records it in outputs."""
+    _patch_provenance(monkeypatch); _patch_media(monkeypatch)
+    src = tmp_path / "in.mp4"; src.write_bytes(b"x")
+    w = tmp_path / "w.safetensors"; w.write_bytes(b"w")
+    monkeypatch.setattr(runner, "RaftFlow", _FakeFlow)
+    seen = []
+
+    def fake_stabilize(*a, **k):
+        seen.append(k.get("dump_motion_npz"))
+        if k.get("dump_motion_npz"):
+            Path(k["dump_motion_npz"]).write_bytes(b"npz")
+        return {"frames": 3, "decoded_frames": 3, "rendered_frames": 3,
+                "timing_s": {"analysis": 1.0, "plan": 0.1, "render": 0.2},
+                "fps": 30.0, "fallback_frames": 0, "diagnostics_total_s": 0.0, "observed_nondiag_render_s": 0.2}
+    monkeypatch.setattr(runner, "stabilize", fake_stabilize)
+
+    run_dir = tmp_path / "dump_motion"
+    man = runner.run_case(runner.RunOptions(case="baseline", source=str(src), weights=str(w),
+                                            out_dir=str(run_dir), lock="off", repeats=3,
+                                            dump_motion=True, command=["run_case"]))
+    assert man["status"] == "success", man.get("error")
+    assert seen == [str(run_dir / "motion_r0.npz"), None, None]        # warm repeats never capture the motion
+    assert man["outputs"]["motion"] == str(run_dir / "motion_r0.npz")
+    assert man["outputs"]["plan"] is None
+    assert man["outputs"]["retained_repeat"] == 0
+    assert man["experiment_identity"]["capture"] == {"dump_plan": False, "dump_motion": True}
+    assert (run_dir / "motion_r0.npz").read_bytes() == b"npz"
+
+
+def test_run_case_without_dump_motion_records_no_motion(tmp_path, monkeypatch):
+    _patch_provenance(monkeypatch); _patch_media(monkeypatch)
+    src = tmp_path / "in.mp4"; src.write_bytes(b"x")
+    w = tmp_path / "w.safetensors"; w.write_bytes(b"w")
+    monkeypatch.setattr(runner, "RaftFlow", _FakeFlow)
+    captured = {}
+
+    def fake_stabilize(*a, **k):
+        captured.update(k)
+        return {"frames": 3, "decoded_frames": 3, "rendered_frames": 3,
+                "timing_s": {"analysis": 1.0, "plan": 0.1, "render": 0.2},
+                "fps": 30.0, "fallback_frames": 0, "diagnostics_total_s": 0.0, "observed_nondiag_render_s": 0.2}
+    monkeypatch.setattr(runner, "stabilize", fake_stabilize)
+    run_dir = tmp_path / "nodump_motion"
+    man = runner.run_case(runner.RunOptions(case="baseline", source=str(src), weights=str(w),
+                                            out_dir=str(run_dir), lock="off", command=["run_case"]))
+    assert man["status"] == "success", man.get("error")
+    assert captured["dump_motion_npz"] is None and man["outputs"]["motion"] is None
+    assert not (run_dir / "motion_r0.npz").exists()
+    assert man["experiment_identity"]["capture"] == {"dump_plan": False, "dump_motion": False}
+
+
+def test_run_case_refuses_to_overwrite_existing_motion_dump(tmp_path, monkeypatch):
+    _patch_provenance(monkeypatch)
+    run_dir = tmp_path / "existing_motion"; run_dir.mkdir()
+    (run_dir / "motion_r0.npz").write_bytes(b"old")
+    with pytest.raises(FileExistsError, match="motion dump"):
+        runner.run_case(runner.RunOptions(case="baseline", source="synthetic", out_dir=str(run_dir),
+                                          lock="off", dump_motion=True))
+    assert (run_dir / "motion_r0.npz").read_bytes() == b"old"          # untouched
+
+
+def test_run_case_dump_plan_without_dump_motion_keeps_plan_only_contract(tmp_path, monkeypatch):
+    """The plan-only capture contract is unchanged when dump_motion is false."""
+    _patch_provenance(monkeypatch); _patch_media(monkeypatch)
+    src = tmp_path / "in.mp4"; src.write_bytes(b"x")
+    w = tmp_path / "w.safetensors"; w.write_bytes(b"w")
+    monkeypatch.setattr(runner, "RaftFlow", _FakeFlow)
+    seen = []
+
+    def fake_stabilize(*a, **k):
+        seen.append((k.get("dump_plan"), k.get("dump_motion_npz")))
+        if k.get("dump_plan"):
+            Path(k["dump_plan"]).write_bytes(b"npz")
+        return {"frames": 3, "decoded_frames": 3, "rendered_frames": 3,
+                "timing_s": {"analysis": 1.0, "plan": 0.1, "render": 0.2},
+                "fps": 30.0, "fallback_frames": 0, "diagnostics_total_s": 0.0, "observed_nondiag_render_s": 0.2}
+    monkeypatch.setattr(runner, "stabilize", fake_stabilize)
+    run_dir = tmp_path / "plan_only"
+    man = runner.run_case(runner.RunOptions(case="baseline", source=str(src), weights=str(w),
+                                            out_dir=str(run_dir), lock="off", dump_plan=True, command=["run_case"]))
+    assert man["status"] == "success", man.get("error")
+    assert seen == [(str(run_dir / "plan_r0.npz"), None)]
+    assert man["outputs"]["plan"] == str(run_dir / "plan_r0.npz") and man["outputs"]["motion"] is None
+    assert man["experiment_identity"]["capture"] == {"dump_plan": True, "dump_motion": False}
+
+
+def test_run_case_refuses_to_overwrite_existing_plan_dump(tmp_path, monkeypatch):
+    _patch_provenance(monkeypatch)
+    run_dir = tmp_path / "existing"; run_dir.mkdir()
+    (run_dir / "plan_r0.npz").write_bytes(b"old")
+    with pytest.raises(FileExistsError, match="plan dump"):
+        runner.run_case(runner.RunOptions(case="baseline", source="synthetic", out_dir=str(run_dir),
+                                          lock="off", dump_plan=True))
+    assert (run_dir / "plan_r0.npz").read_bytes() == b"old"          # untouched
 
 
 def test_run_case_rejects_warp_diag_plus_sampled_diagnostics(tmp_path, monkeypatch):

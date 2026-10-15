@@ -3,15 +3,22 @@
 The historical *practical* preset (used by the saved camcorder reports) is fixed here: half-resolution
 flow, 20 iterations, fidelity 0.1, output at 30000/1001 fps, and metrics evaluated at 30000/1001 fps. It is
 deliberately **not** the literal current ``Config`` default (full-resolution flow, 24 iterations). Each
-named case below changes one variable relative to that preset so a comparison measures one thing;
-``combined-fp16`` intentionally changes two and is only interpretable alongside the two isolated fp16 cases:
+named case below changes one variable relative to that preset so a comparison measures one thing; the two
+intentional multi-field cases are ``combined-fp16`` (two precision fields) and ``global-only`` (two residual
+channels), and each must be read alongside its isolated counterpart. The residual-channel cases are practical
+configuration ablations, **not** fixed-plan causal isolation: disabling a channel makes the fit re-estimate the
+remaining motion fields, so the comparison measures the configuration's output rather than the isolated effect
+of a frozen plan:
 
-- ``baseline``         the historical preset unchanged
+- ``baseline``         the historical preset unchanged (full mesh + rows)
 - ``fp16-network``     baseline + fp16 network/encoders (correlation stays fp32)
 - ``fp16-corr``        baseline + fp16 correlation pyramid (network stays fp32)
 - ``combined-fp16``    baseline + fp16 network **and** fp16 correlation (two variables)
 - ``warm-8``           baseline + 8 warm-start iterations (cold first pair still uses 20)
 - ``stride-2``         baseline + analysis every second frame
+- ``global-only``      baseline with both residual channels disabled (``mesh=(0,0)``, ``rs_rows=0``)
+- ``mesh-only``        baseline with rolling-shutter rows disabled (``rs_rows=0``)
+- ``row-only``         baseline with the residual mesh disabled (``mesh=(0,0)``)
 
 Config identity is canonical JSON of the resolved config (sorted keys, tuples as lists) under SHA-256, so a
 manifest can be invalidated when any field changes.
@@ -90,6 +97,19 @@ _CASES = {
         "stride-2", {**HISTORICAL_PRESET, "analysis_stride": 2},
         "Baseline analysing every second frame and interpolating the path.",
         "analysis_stride"),
+    "global-only": _spec(
+        "global-only", {**HISTORICAL_PRESET, "mesh": (0, 0), "rs_rows": 0},
+        "Historical preset with both residual channels disabled (mesh=(0,0), rs_rows=0); the global model is "
+        "refit.",
+        "mesh+rs_rows"),
+    "mesh-only": _spec(
+        "mesh-only", {**HISTORICAL_PRESET, "rs_rows": 0},
+        "Historical preset with rolling-shutter rows disabled (rs_rows=0); global + mesh are refit.",
+        "rs_rows"),
+    "row-only": _spec(
+        "row-only", {**HISTORICAL_PRESET, "mesh": (0, 0)},
+        "Historical preset with the residual mesh disabled (mesh=(0,0)); global + rows are refit.",
+        "mesh"),
 }
 
 case_names = tuple(_CASES)

@@ -5,3 +5,4 @@ __pycache__/
 *.safetensors
 out/
 .pytest_cache/
+.codegraph/

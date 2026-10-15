@@ -50,6 +50,8 @@ class RunOptions:
     eval_vf: str | None = None
     output_fps: str | None = None
     diag_every: int = 0
+    dump_plan: bool = False            # capture the retained repeat's Plan as a compressed, non-pickle NPZ
+    dump_motion: bool = False          # capture the retained repeat's fitted Motion as a compressed, non-pickle NPZ
     lock: str = "auto"                 # auto | on | off
     lock_chunk: int = 0
     lock_pause_s: float = 0.0
@@ -219,7 +221,8 @@ def _empty_manifest(opts, run_dir):
         "metrics": {"definitions_version": None, "input": None, "output": None,
                     "cadence": None, "reliability": None},
         "diagnostics": None,
-        "outputs": {"video": None, "mask": None, "report": None, "retained_repeat": 0, "manifest": None,
+        "outputs": {"video": None, "mask": None, "report": None, "plan": None, "motion": None,
+                    "retained_repeat": 0, "manifest": None,
                     "encoded_frames": None, "encoded_pts": None, "mask_pts": None},
         "repeats": [],
         "lock": None,
@@ -245,7 +248,8 @@ def _checkpoint(man, path, stage, required=False):
 # runner
 # --------------------------------------------------------------------------------------
 
-def _experiment_identity(opts, cfg_kwargs, source_hashes, weights_sha, code, eval_cfg, output_fps, eval_vf, diag_every):
+def _experiment_identity(opts, cfg_kwargs, source_hashes, weights_sha, code, eval_cfg, output_fps, eval_vf, diag_every,
+                         dump_plan=False, dump_motion=False):
     return {
         "source": {"sha256": source_hashes.get("sha256"), "window": source_hashes.get("window"),
                    "preprocessing": source_hashes.get("preprocessing"),
@@ -256,6 +260,7 @@ def _experiment_identity(opts, cfg_kwargs, source_hashes, weights_sha, code, eva
         "evaluation": eval_cfg,
         "seed_policy": {"config_seed": cfg_kwargs.get("seed"), "synthetic_seed": opts.seed},
         "diagnostics": {"every": int(diag_every)},
+        "capture": {"dump_plan": bool(dump_plan), "dump_motion": bool(dump_motion)},
         "code": {"revision": (code or {}).get("revision"), "files": (code or {}).get("files"),
                  "dirty_relevant": (code or {}).get("dirty_relevant")},
     }
@@ -264,8 +269,14 @@ def _experiment_identity(opts, cfg_kwargs, source_hashes, weights_sha, code, eva
 def run_case(opts: RunOptions) -> dict:
     run_dir = Path(opts.out_dir) if opts.out_dir else default_run_dir(opts.case, opts.source, opts.start, opts.duration)
     man_path = run_dir / "manifest.json"
+    plan_path = run_dir / "plan_r0.npz" if opts.dump_plan else None
+    motion_path = run_dir / "motion_r0.npz" if opts.dump_motion else None
     if not opts.overwrite and man_path.exists():
         raise FileExistsError(f"refusing to overwrite existing evidence {man_path}; pass --overwrite to reuse it")
+    if plan_path is not None and not opts.overwrite and plan_path.exists():
+        raise FileExistsError(f"refusing to overwrite existing plan dump {plan_path}; pass --overwrite to reuse it")
+    if motion_path is not None and not opts.overwrite and motion_path.exists():
+        raise FileExistsError(f"refusing to overwrite existing motion dump {motion_path}; pass --overwrite to reuse it")
     run_dir.mkdir(parents=True, exist_ok=True)
     man = _empty_manifest(opts, run_dir)
     man["outputs"]["manifest"] = str(man_path)
@@ -343,7 +354,8 @@ def run_case(opts: RunOptions) -> dict:
         man["weights"]["size_bytes"] = Path(opts.weights).stat().st_size
 
         identity = _experiment_identity(opts, cfg_kwargs, man["source"], man["weights"]["sha256"], man["code"],
-                                        man["evaluation"], output_fps, eval_vf, opts.diag_every)
+                                        man["evaluation"], output_fps, eval_vf, opts.diag_every, opts.dump_plan,
+                                        opts.dump_motion)
         man["experiment_identity"] = identity
         man["content_key"] = MF.content_key(identity)
         _checkpoint(man, man_path, "source")
@@ -354,6 +366,7 @@ def run_case(opts: RunOptions) -> dict:
         _checkpoint(man, man_path, "lock")
 
         stage = "model_construct"
+        _checkpoint(man, man_path, "model_construct")   # persist before the long RAFT construction
         tmc = time.perf_counter()
         flow = RaftFlow(opts.weights, cfg.flow_iters, cfg.flow_downscale, cfg.warm_start,
                         getattr(mx, cfg.corr_dtype), getattr(mx, cfg.flow_dtype), cfg.warm_iters or None)
@@ -381,10 +394,15 @@ def run_case(opts: RunOptions) -> dict:
             t0 = time.perf_counter()
             flow.reset()
             cb = diag_cb if (opts.diag_every and r == 0) else None
+            # Only the retained repeat (0) captures the plan; warm repeats must never clobber plan_r0.npz.
+            rep_dump_plan = str(plan_path) if (plan_path is not None and r == 0) else None
+            rep_dump_motion = str(motion_path) if (motion_path is not None and r == 0) else None
+            stage = f"stabilize_r{r}"
+            _checkpoint(man, man_path, stage)          # persist the precise repeat phase before the long pass
             rep = stabilize(str(src), str(out_video), str(out_mask), opts.weights, cfg, flow_fn=flow,
                             start=opts.start, duration=opts.duration, fps_out=output_fps,
                             report=str(rep_path), on_step=gate, diag_every=opts.diag_every if cb else 0,
-                            diag_callback=cb,
+                            diag_callback=cb, dump_motion_npz=rep_dump_motion, dump_plan=rep_dump_plan,
                             log=(lambda m: opts.log(f"[{case.name}] {m}")) if opts.log else (lambda m: None))
             wall = time.perf_counter() - t0
             repeat_walls.append(wall)
@@ -402,6 +420,10 @@ def run_case(opts: RunOptions) -> dict:
                 man["outputs"]["video"] = str(out_video)
                 man["outputs"]["mask"] = str(out_mask)
                 man["outputs"]["report"] = str(rep_path)
+                if plan_path is not None:
+                    man["outputs"]["plan"] = str(plan_path)
+                if motion_path is not None:
+                    man["outputs"]["motion"] = str(motion_path)
                 man["outputs"]["retained_repeat"] = 0
             _checkpoint(man, man_path, f"stabilize_r{r}")
         man["runtime_s"]["stabilize_wall"] = sum(repeat_walls)
@@ -412,6 +434,7 @@ def run_case(opts: RunOptions) -> dict:
                                        "lock.acquire_wait_s/pause_total_s and are not subtracted from stabilization")
 
         stage = "probe_output"
+        _checkpoint(man, man_path, "probe_output")     # persist before probing/decoding the encoded outputs
         out_video = Path(man["outputs"]["video"])
         out_mask = Path(man["outputs"]["mask"])
         out_info = media.probe(out_video)
@@ -435,6 +458,7 @@ def run_case(opts: RunOptions) -> dict:
         man["repeats"][0]["encoded_frames"] = out_meta.get("frames")
 
         stage = "evaluate"
+        _checkpoint(man, man_path, "evaluate")         # persist before evaluation waits on HeavyLock
         ev_t0 = time.perf_counter()
         eval_flow = RaftFlow(opts.weights, opts.eval_iters, opts.eval_downscale, True,
                              getattr(mx, opts.eval_corr_dtype), getattr(mx, opts.eval_flow_dtype), None)

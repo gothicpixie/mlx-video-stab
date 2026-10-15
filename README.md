@@ -39,7 +39,14 @@ or the [launch kit](marketing/README.md) for graphics and announcement copy.
 3. **Motion model, spatially varying**: a robust global similarity (affine / homography selectable) fitted by RANSAC on flow samples
    with forward-backward-inconsistent samples masked out, plus a *residual mesh* (16x9 cells by default, robust kernel regression of
    the flow left over after the global model) and per-row-band residuals for the **rolling shutter**. A frame that is too low-texture
-   falls back to "no global motion" and zero mesh (reported as `fallback_frames`).
+   falls back to "no global motion" and zero mesh (reported as `fallback_frames`). The forward-backward
+   cycle error and the tolerance it is compared against are retained per sample as a diagnostic -- a
+   forward-backward **cycle-consistency** signal, not a true correspondence error and not calibrated
+   uncertainty -- and are dumped as mesh-grid cycle maps (schema `mlxstab.motion/4`) for the offline
+   captured-motion audit; a small per-fit gate record (`n_valid_samples`, `n_ransac_inliers`, and a numeric
+   `fallback_reason_code` mapped back to the stable `fallback_reason` label) records why a fit fell back to
+   "no global motion". These diagnostics never change the fit
+   or the rendered pixels.
 4. **Subject vs camera**: samples on independently moving things (coherent blobs whose flow disagrees with the dominant motion, found
    after the first fit) are excluded from the camera fit and from the mesh.
 5. **Camera path**: the global path is accumulated in corner space and decomposed into translation, rotation, log-scale and a small
