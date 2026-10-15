@@ -1,11 +1,24 @@
-# mlxstab status (parked after round 1b)
+# mlxstab status
+
+## Stage 0 progress: trustworthy measurements (first slice)
+
+Implemented the evaluator-reset and mask-coordinate fixes from the plan, with regression tests.
+
+- `RaftFlow.reset()` clears the legacy `prev` cache, the bidirectional warm flows (`prev_f`, `prev_b`), the cached frame features (`_last`) and the `syncs` diagnostic. `bench/evaluate.py` now calls it at each clip boundary instead of `flow.prev.clear()`, so one clip cannot warm-start or reuse features from another. Feature reuse and warm starts are unchanged inside a sequence.
+- `motion.exclude_masked` samples the source mask at `obs.pts` and the target mask at `obs.pts + obs.flow`. Dilation semantics are preserved; fractional positions are sampled conservatively (any non-zero bilinear weight on an invalid pixel rejects the correspondence), exact pixel centres are not rejected by rounding, out-of-image and non-finite positions are rejected, and `valid` is only ever reduced.
+- `analyze` no longer skips exclusion when the target mask is absent but a source mask is available.
+- `tests/test_evaluation_correctness.py`: 25 tests covering source-vs-destination mask positions, horizontal/vertical/diagonal fractional target sampling plus an exact-integer zero-weight guard, independent optional masks, dilation, bounds/non-finite inputs, invalidity preservation, the `analyze` source-only-mask caller, a fake-RAFT reset lifecycle, and a `bench/evaluate.py` integration test that runs its real input/output loop with fake media and asserts each clip starts cold. The initial 15-test version produced 9 failures against the pre-fix code (checked then); the expanded suite was not re-run against the old code.
+
+Check: `.claude/verify.sh` -> 40 passed (offline; the 15 pre-existing tests still pass).
+
+Remaining Stage 0 work, not started here: whole-warp distortion/coverage metrics with an identity-global bent-line counterexample; combined fp16 network + fp16 correlation coverage; rerun the current defaults and the unfinished camcorder configurations; reproduce the reported tree deformation and floaty motion with global/mesh/row ablations; audit residual accumulation under rotation and parallax.
 
 ## What works
 
 - `mlxstab/warp.py`: Metal sampler (bilinear / Catmull-Rom / Lanczos-3, zeros/border, align_corners). `grid_sample` max abs error vs torch 1.2e-7 .. 2.4e-7. Forward only.
 - `mlxstab/raft/`: RAFT-things in MLX + `.pth` -> safetensors converter. Final flow EPE vs PyTorch at 12 iterations: 2.2e-3 px (reference demo frames), 2.4e-3 px (synthetic); batch-2 bidirectional path: 2.2e-3 px fp32, 2.7e-3 px fp16. Gate is < 0.01 px for the fp32 path.
 - `mlxstab/stabilize.py`, `python -m mlxstab`: no-crop stabilizer (similarity global fit by RANSAC with forward-backward masking and mover exclusion, residual mesh + rolling-shutter row bands, L1-optimal paths with border budget, roll levelling, one Lanczos resample, border mask video). Interlaced sources deinterlaced first (bwdif send_field).
-- `.claude/verify.sh`: 15 tests, offline, no weights needed (weight tests skip), green.
+- `.claude/verify.sh`: 40 tests pass locally, offline; weight-dependent tests skip when weights are unavailable.
 
 ### Benchmarks (RAFT-things, 12 iterations; one pair unless noted; MLX fp32 unless noted)
 

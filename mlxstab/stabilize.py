@@ -81,6 +81,21 @@ class RaftFlow:
             f = sample(f[None], c, "bilinear", "border")[0] * self.ds
         return f
 
+    def reset(self):
+        """Start a new independent sequence (new clip, cut, or changed shape/preprocessing).
+
+        Drops every piece of temporal state that could leak across a boundary: the legacy warm-start
+        cache (`prev`), the bidirectional low-resolution warm-start flows (`prev_f`, `prev_b`) and the
+        cached frame features (`_last`) that let consecutive pairs of one sequence share encoders. Call
+        this exactly at sequence boundaries; never between frames of one sequence, which would discard
+        feature reuse and warm starts. The diagnostic `syncs` counter is reset too, so it reports host
+        syncs for the new sequence rather than the process lifetime.
+        """
+        self.prev = {}
+        self.prev_f = self.prev_b = None
+        self._last = None
+        self.syncs = 0
+
     def __call__(self, a, b, key="f"):
         """One direction (legacy API): flow a -> b at full resolution, lazily evaluated by the caller."""
         from .raft.model import pad8
@@ -134,7 +149,7 @@ def analyze(frames, flow_fn, cfg, W, H, fps, log=None, masks=None, on_step=None,
             if hasattr(flow_fn, "bidir"): Ff, Bf = flow_fn.bidir(prev, fr)
             else: Ff = flow_fn(prev, fr, "f"); Bf = flow_fn(fr, prev, "b")
             obs = MO.observe(Ff, Bf, cfg.step)
-            if cm is not None: MO.exclude_masked(obs, pm, cm)
+            if cm is not None or pm is not None: MO.exclude_masked(obs, pm, cm)
             if pool: pend.append(pool.submit(fit, obs))
             else: mot.fits.append(fit(obs))
             while len(pend) > 2: mot.fits.append(pend.pop(0).result())

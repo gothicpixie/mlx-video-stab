@@ -19,7 +19,7 @@ for name, path in (("input", a.inp), ("output", a.out)):
     masks = None
     if name == "output" and a.mask:
         mi = media.probe(a.mask); mf, _, _ = media.decode(a.mask, mi, vf=a.vf); masks = (m[..., 0] > 127 for m in mf)
-    flow.prev.clear()
+    flow.reset()                        # each clip is an independent sequence: no warm start or feature carry-over
     res[name] = metrics.measure(fr, flow, W, H, fps, masks, keep_frames=False)
     print(name, json.dumps(res[name]), file=sys.stderr)
 if a.json: open(a.json, "w").write(json.dumps(res, indent=1))

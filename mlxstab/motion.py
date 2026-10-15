@@ -141,18 +141,49 @@ def fit_motion(obs, mesh=(16, 9), rs_rows=18, thr=1.5, rng=None, min_valid=60, m
     return Fit(Hm, mesh_f, rows, float(inlier_frac), float(mv[v].mean()), False)
 
 
+def _dilate(mask, pad):
+    """Invalid-mask dilation: True within `pad` pixels (Chebyshev) of any invalid pixel. pad<=0 is a no-op."""
+    mask = np.asarray(mask, bool)
+    if pad <= 0: return mask
+    from scipy.ndimage import maximum_filter
+    return maximum_filter(mask, size=2 * pad + 1, mode="constant", cval=False)
+
+
+def _sample_invalid(mask, px, py, H, W):
+    """True where a correspondence must be rejected for one (already dilated) invalid mask.
+
+    `px`, `py` are float pixel-centre coordinates of the observation in the mask's frame. A position is
+    unsafe when it is non-finite, outside [0, W-1] x [0, H-1], or its bilinear support touches an invalid
+    pixel with non-zero weight. At an exact pixel centre only that single tap has weight, so a valid pixel
+    edge is not rejected by rounding alone. Conservative by construction: any non-zero weight on an invalid
+    neighbour rejects the sample."""
+    px = np.asarray(px, np.float64); py = np.asarray(py, np.float64)
+    inside = np.isfinite(px) & np.isfinite(py) & (px >= 0) & (px <= W - 1) & (py >= 0) & (py <= H - 1)
+    bad = ~inside
+    idx = np.flatnonzero(inside)
+    if idx.size:
+        x = px[idx]; y = py[idx]
+        x0 = np.floor(x).astype(np.int64); y0 = np.floor(y).astype(np.int64)
+        fx = x - x0; fy = y - y0
+        x1 = x0 + (fx > 0); y1 = y0 + (fy > 0)                     # duplicate taps at integer coords cancel via weights
+        w00 = (1 - fx) * (1 - fy); w01 = (1 - fx) * fy; w10 = fx * (1 - fy); w11 = fx * fy
+        acc = (mask[y0, x0] * w00 + mask[y1, x0] * w01 + mask[y0, x1] * w10 + mask[y1, x1] * w11)
+        bad[idx] = acc > 0.0
+    return bad
+
+
 def exclude_masked(obs, m0, m1, pad=12):
-    """Drop samples near invalid (no-source / border) pixels of either frame. m0, m1: bool [H,W], True = invalid."""
-    for m in (m0, m1):
+    """Drop samples near invalid (no-source / border) pixels of the source or destination frame.
+
+    `m0` and `m1` are bool [H,W] invalid masks (True = no source) of frame t (source) and t+1
+    (destination), or None when a mask is unavailable. `m0` is sampled at `obs.pts`; `m1` is sampled at
+    `obs.pts + obs.flow`, because the destination mask lives in the destination frame's coordinates. Each
+    mask is first dilated by `pad` pixels, then sampled conservatively bilinearly (see `_sample_invalid`).
+    Out-of-image and non-finite positions are rejected. `valid` is only ever ANDed, so an observation that
+    was already invalid is never reactivated."""
+    if m0 is None and m1 is None: return
+    dst = obs.pts + obs.flow
+    for m, pts in ((m0, obs.pts), (m1, dst)):
         if m is None: continue
-        mm = mx.array(m.astype(np.float32))[None, :, :, None]
-        H, W = m.shape
-        k = 2 * pad + 1
-        # separable max filter (cheap): rows then columns
-        a = mx.pad(mm, [(0, 0), (pad, pad), (0, 0), (0, 0)]); r = a[:, :H]
-        for d in range(1, k): r = mx.maximum(r, a[:, d:d + H])
-        b = mx.pad(r, [(0, 0), (0, 0), (pad, pad), (0, 0)]); c = b[:, :, :W]
-        for d in range(1, k): c = mx.maximum(c, b[:, :, d:d + W])
-        pts = obs.pts.astype(int)
-        bad = np.array(c[0, :, :, 0])[pts[:, 1], pts[:, 0]] > 0
+        bad = _sample_invalid(_dilate(m, pad), pts[:, 0], pts[:, 1], obs.H, obs.W)
         obs.valid &= ~bad
