@@ -292,7 +292,8 @@ class SyntheticSpec:
                  lock_rank: int = 0, preserve_rank: int = 1, jitter_px: float = 3.0, drift_px: float = 10.0,
                  rot_deg: float = 0.4, zoom: float = 0.02, fg_amp: float = 0.25, border: int = 3,
                  occlusion_hole: bool = True, seed: int = 0, flow_noise_px: float = 0.0,
-                 depth_error_frac: float = 0.0, fg_nonaffine_px: float = 0.0):
+                 depth_error_frac: float = 0.0, fg_nonaffine_px: float = 0.0,
+                 fg_rect: Sequence[float] = (0.56, 0.52, 0.20, 0.20)):
         if T < 3:
             raise ValueError("T must be >= 3 so a residual second difference is defined")
         if W < 8 or H < 8:
@@ -315,6 +316,21 @@ class SyntheticSpec:
             raise ValueError("depth_error_frac must be finite and in [0, 1]")
         if not np.isfinite(fg_nonaffine_px) or fg_nonaffine_px < 0.0:
             raise ValueError("fg_nonaffine_px must be finite and >= 0")
+        # Foreground rectangle as normalized fractions of the frame: (cx, cy, half_w, half_h). Validated as
+        # four finite values with positive half-extents whose rectangle lies fully inside [0, 1] in both axes.
+        fg_rect = tuple(float(v) for v in fg_rect)
+        if len(fg_rect) != 4:
+            raise ValueError("fg_rect must list exactly four values (cx, cy, half_w, half_h)")
+        if not all(np.isfinite(v) for v in fg_rect):
+            raise ValueError("fg_rect values must be finite")
+        fcx, fcy, fhw, fhh = fg_rect
+        if fhw <= 0.0 or fhh <= 0.0:
+            raise ValueError("fg_rect half-extents (half_w, half_h) must be positive")
+        if not (0.0 <= fcx - fhw and fcx + fhw <= 1.0):
+            raise ValueError("fg_rect must lie fully inside [0, 1] horizontally (cx +/- half_w)")
+        if not (0.0 <= fcy - fhh and fcy + fhh <= 1.0):
+            raise ValueError("fg_rect must lie fully inside [0, 1] vertically (cy +/- half_h)")
+        self.fg_rect = fg_rect
         self.T, self.W, self.H = int(T), int(W), int(H)
         self.depths = depths
         self.rank_orientation = rank_orientation
@@ -343,7 +359,7 @@ class SyntheticSpec:
             "zoom": self.zoom, "fg_amp": self.fg_amp, "border": self.border,
             "occlusion_hole": self.occlusion_hole, "seed": self.seed,
             "flow_noise_px": self.flow_noise_px, "depth_error_frac": self.depth_error_frac,
-            "fg_nonaffine_px": self.fg_nonaffine_px,
+            "fg_nonaffine_px": self.fg_nonaffine_px, "fg_rect": list(self.fg_rect),
         }
 
 
@@ -405,7 +421,8 @@ class Sequence:
 
         # Scene z-order: layer 0 full-frame background, layer 1 a rectangular foreground overlay drawn on
         # top (occluding). This is a synthetic z-order, not a semantic foreground claim.
-        fg = _rect_mask(W, H, 0.56 * W, 0.52 * H, max(2.0, 0.20 * W), max(2.0, 0.20 * H))
+        fcx, fcy, fhw, fhh = spec.fg_rect
+        fg = _rect_mask(W, H, fcx * W, fcy * H, max(2.0, fhw * W), max(2.0, fhh * H))
         self.layer_masks = np.stack([np.ones((H, W), bool), fg], 0)
         visible = np.zeros((H, W), np.int64)
         visible[fg] = 1
@@ -1002,6 +1019,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="fraction in [0,1] of visible ranked pixel labels flipped between raw depth classes")
     p.add_argument("--fg-nonaffine-px", type=float, default=0.0,
                    help="peak amplitude of the deterministic non-affine foreground displacement (>= 0)")
+    p.add_argument("--fg-rect", default="0.56,0.52,0.20,0.20",
+                   help="normalized foreground rectangle cx,cy,half_w,half_h (fractions in [0,1])")
     p.add_argument("--border", type=int, default=3)
     p.add_argument("--no-occlusion-hole", action="store_true", help="omit the rectangular invalid-support hole")
     p.add_argument("--seed", type=int, default=0)
@@ -1023,6 +1042,19 @@ def parse_depths(text) -> tuple:
     return tuple(vals)
 
 
+def parse_fg_rect(text) -> tuple:
+    """Parse ``"cx,cy,half_w,half_h"`` into four finite normalized foreground-rectangle values."""
+    if isinstance(text, (list, tuple)):
+        vals = [float(v) for v in text]
+    else:
+        vals = [float(v) for v in str(text).split(",") if str(v).strip()]
+    if len(vals) != 4:
+        raise ValueError("--fg-rect must list exactly four values (cx,cy,half_w,half_h)")
+    if not all(np.isfinite(v) for v in vals):
+        raise ValueError("--fg-rect values must be finite")
+    return tuple(vals)
+
+
 def spec_from_args(a: argparse.Namespace) -> SyntheticSpec:
     """Build a validated :class:`SyntheticSpec` from parsed CLI arguments."""
     return SyntheticSpec(
@@ -1031,7 +1063,7 @@ def spec_from_args(a: argparse.Namespace) -> SyntheticSpec:
         jitter_px=a.jitter_px, drift_px=a.drift_px, rot_deg=a.rot_deg, zoom=a.zoom, fg_amp=a.fg_amp,
         border=a.border, occlusion_hole=not a.no_occlusion_hole, seed=a.seed,
         flow_noise_px=a.flow_noise_px, depth_error_frac=a.depth_error_frac,
-        fg_nonaffine_px=a.fg_nonaffine_px)
+        fg_nonaffine_px=a.fg_nonaffine_px, fg_rect=parse_fg_rect(a.fg_rect))
 
 
 def run(opts: argparse.Namespace, log=print) -> dict:
