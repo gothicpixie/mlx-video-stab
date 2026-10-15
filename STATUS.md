@@ -1793,6 +1793,26 @@ input immutability, path non-leakage and output-path collision rejection. The co
 **889 tests in 30.89 s**. CodeGraph was synced; it found no linked tests, so the focused modules were run directly.
 No production code or default changed.
 
+### E16 fourth distinct source-window sweep
+
+The `stream00025` window was decoded from a fourth source and depth-cached independently (30 frames sampled at
+four-frame intervals). One RAFT pass at 24 iterations and downscale 2 supplied all 16 combinations of
+`bin_counts=(1,2,4,8)` and `smooth_sigmas=(0,0.5,1,2)`. The table reports the pooled affine path's jitter /
+rendered-valid coverage and the envelope over relative-depth rank policies at 2, 4 and 8 bins. It is one window,
+not an aggregate score:
+
+| window | sigma (pairs) | pooled jitter / valid | rank-policy jitter range | rank-policy valid range |
+|---|---:|---:|---:|---:|
+| stream00025 | 0 | 0.00000 / 1.00000 | 0.00000–0.00000 | 1.00000–1.00000 |
+| stream00025 | 0.5 | 0.08672 / 0.97687 | 0.06279–0.45795 | 0.97517–0.98086 |
+| stream00025 | 1 | 0.26622 / 0.97747 | 0.18457–1.34030 | 0.97248–0.97794 |
+| stream00025 | 2 | 0.49200 / 0.97502 | 0.31211–2.15227 | 0.96336–0.97596 |
+
+The rank-policy envelope includes both lower- and higher-jitter outcomes, while its coverage also changes with
+rank resolution. This adds evidence of scene and parameter sensitivity, not a depth-rank advantage. Model-derived
+flow and monocular depth remain proxies; these metrics are not rendered perceptual quality. The full path-free
+report is local-only under ignored `out/bench/flow_prediction_real/`. No production code or default changed.
+
 Reports are under ignored `out/bench/flow_prediction_real/`; no source clips or dense flow maps are committed.
 Focused tests for the core and cache runner passed **35 tests** (including the sweep grid validation, the
 one-bin rank-equals-pooled sanity check and a fake-runner check that one RAFT pass feeds every requested
