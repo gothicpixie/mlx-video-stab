@@ -307,6 +307,78 @@ def test_collect_tasks_records_provenance_and_digest(tmp_path):
         assert task["blind_mapping"]["left_panel"] == "multiscale"
 
 
+# --------------------------------------------------------------------------------------
+# optional position-reversal metadata: validated, propagated, never sent
+# --------------------------------------------------------------------------------------
+
+def test_validate_position_reversal_accepts_none_and_valid():
+    assert G.validate_position_reversal(None) is None
+    assert G.validate_position_reversal({"group": "g", "role": "position_reversed"}) == {
+        "group": "g", "role": "position_reversed"}
+    normalized = G.validate_position_reversal(
+        {"schema": G.POSITION_REVERSAL_SCHEMA, "group": "g", "role": "original"})
+    assert normalized == {"group": "g", "role": "original", "schema": G.POSITION_REVERSAL_SCHEMA}
+
+
+@pytest.mark.parametrize("bad", [
+    [],
+    {},
+    {"group": "", "role": "original"},
+    {"group": 5, "role": "original"},
+    {"group": "g"},
+    {"group": "g", "role": "control"},
+])
+def test_validate_position_reversal_rejects_bad_shapes(bad):
+    with pytest.raises(G.GeminiReviewError) as exc:
+        G.validate_position_reversal(bad)
+    assert exc.value.code == "position_reversal_invalid"
+
+
+def test_load_review_rejects_malformed_position_reversal(tmp_path):
+    review_path, document = _write_review(tmp_path / "badrole")
+    document["pairs"][0]["position_reversal"] = {"group": "g", "role": "control"}
+    review_path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(G.GeminiReviewError) as exc:
+        G.load_review(review_path)
+    assert exc.value.code == "position_reversal_invalid"
+
+
+def test_position_reversal_propagates_into_judgment_but_not_the_request(tmp_path):
+    review_path, document = _write_review(tmp_path / "r", pairs=1)
+    document["pairs"][0]["position_reversal"] = {
+        "schema": G.POSITION_REVERSAL_SCHEMA, "group": "grp-1", "role": "original"}
+    review_path.write_text(json.dumps(document), encoding="utf-8")
+
+    tasks = G.collect_tasks([review_path])
+    assert tasks[0]["position_reversal"] == {
+        "group": "grp-1", "role": "original", "schema": G.POSITION_REVERSAL_SCHEMA}
+
+    captured = {}
+
+    class _Recorder:
+        def __call__(self, request, timeout=None):
+            captured["body"] = json.loads(request.data.decode("utf-8"))
+            return _FakeResponse(_vertex_response(_vertex_judgment()))
+
+    result = G.run_review_set([review_path], tmp_path / "out.json", token="tok", opener=_Recorder(),
+                              sleep=lambda _s: None)
+    assert result["judgments"][0]["position_reversal"] == {
+        "group": "grp-1", "role": "original", "schema": G.POSITION_REVERSAL_SCHEMA}
+    encoded = json.dumps(captured["body"])
+    for token in ["position_reversal", "grp-1", "original", "position_reversed"]:
+        assert token not in encoded
+
+
+def test_position_reversal_absent_is_recorded_as_none(tmp_path):
+    review_path, _ = _write_review(tmp_path / "r", pairs=1)
+    tasks = G.collect_tasks([review_path])
+    assert tasks[0]["position_reversal"] is None
+    opener = _SequenceOpener([_vertex_response(_vertex_judgment())])
+    result = G.run_review_set([review_path], tmp_path / "out.json", token="tok", opener=opener,
+                              sleep=lambda _s: None)
+    assert result["judgments"][0]["position_reversal"] is None
+
+
 def test_collect_tasks_clip_validation_refusals(tmp_path):
     review_path, _ = _write_review(tmp_path / "missing")
     (review_path.parent / "pair_00_ab.mp4").unlink()

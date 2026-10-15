@@ -31,11 +31,17 @@ significance test or quality score, selects no method and calls no method better
 
 Join and refusal rules
 ----------------------
-Original and reversal records are joined only on stable identity: ``run_id``, ``source_sha256``, the source
-window ``start_s``/``duration_s``, and ``pair_index``. Clip name and clip digest are deliberately excluded
-because a reversed control changes them. Preferences and hidden mappings are normalized and validated;
-duplicate, malformed, missing-mapping and (unless ``--allow-unmatched`` is given) unmatched identity keys fail
-clearly instead of silently dropping records. The report is written atomically and carries input/report hashes.
+Original and reversal records are joined only on stable identity. When the two roles are supplied separately
+(``--original-result``/``--reversal-result``) the join key is ``run_id``, ``source_sha256``, the source window
+``start_s``/``duration_s`` and ``pair_index``. ``--paired-result`` instead accepts a single
+``gemini_blind_review`` result that carries both roles and the per-pair ``position_reversal`` metadata
+(shared ``group`` plus ``role``); the roles are validated to be exactly one ``original`` and one
+``position_reversed`` per source/window/group identity and split **before** joining, so a paired file can
+never create a self-pair or contribute two records to one join identity. Clip name and clip digest are
+deliberately excluded because a reversed control changes them. Preferences and hidden mappings are
+normalized and validated; duplicate, malformed, missing-role, missing-mapping and (unless
+``--allow-unmatched`` is given) unmatched identity keys fail clearly instead of silently dropping records. The
+report is written atomically and carries input/report hashes.
 
 Usage::
 
@@ -43,6 +49,10 @@ Usage::
         --original-result ORIG.json [--original-result ...] \\
         --reversal-result REV.json [--reversal-result ...] \\
         --source-review REVIEW.json [--source-review ...] \\
+        --out OUT.json [--allow-unmatched]
+
+    python -m bench.gemini_position_bias_audit \\
+        --paired-result PAIRED.json [--paired-result ...] \\
         --out OUT.json [--allow-unmatched]
 """
 from __future__ import annotations
@@ -65,14 +75,18 @@ ORIGINAL_SCHEMA = G.OUTPUT_SCHEMA
 SOURCE_REVIEW_SCHEMA = G.INPUT_SCHEMA
 
 RAW_SIDES = ("A", "B", "tie")
-METHODS = ("multiscale", "l1", "tie")
+METHODS = ("multiscale", "l1", "raw", "stabilized", "tie")
+#: Roles carried by the optional per-pair ``position_reversal`` metadata emitted by
+#: :mod:`bench.real_pair_review` (and propagated through :mod:`bench.gemini_blind_review`).
+POSITION_REVERSAL_ROLES = ("original", "position_reversed")
 
 SCOPE_NOTE = (
     "Read-only, deterministic audit of already-recorded Vertex Gemini positional-counterbalance review JSON. "
     "It performs no network or model call, decodes no video and changes no default. It joins each original and "
-    "position-reversed judgment on stable identity (run_id, source_sha256, source window start/duration, "
-    "pair_index) and reports what each recorded judgment selected: its raw A/B screen side and the hidden "
-    "method that side mapped to. Derived booleans compare the two: side_following means the same raw side "
+    "position-reversed judgment on stable identity (run_id, source_sha256, source window start/duration and "
+    "either pair_index for separate results or the shared position_reversal.group for paired results) and "
+    "reports what each recorded judgment selected: its raw A/B screen side and the hidden method that side "
+    "mapped to. Derived booleans compare the two: side_following means the same raw side "
     "(non-tie), method_agreement means the same mapped method (non-tie), and opposite_physical_sides means the "
     "two raw sides differ (non-tie), which a correctly reversed mapping pairs with method agreement. "
     "Observational evidence only: the sample is small and dependent, the reviewer is a single model over short "
@@ -182,24 +196,59 @@ def _normalize_sha256(value, where):
     return value.lower()
 
 
+def _normalize_position_reversal(value, where, *, required=False):
+    """Validate optional per-judgment ``position_reversal`` metadata; return a copy or ``None``.
+
+    ``required`` is set for ``--paired-result`` inputs, which must carry the shared ``group`` and the
+    ``role`` so the two roles can be validated one-to-one and split before joining.
+    """
+    if value is None:
+        if required:
+            raise PositionBiasAuditError(
+                "paired_role_missing",
+                f"{where}: a paired result judgment must carry position_reversal.group and .role")
+        return None
+    _require(isinstance(value, dict), "position_reversal_invalid",
+             f"{where}: position_reversal must be a JSON object when present")
+    group = value.get("group")
+    role = value.get("role")
+    _require(isinstance(group, str) and group.strip(), "position_reversal_invalid",
+             f"{where}: position_reversal.group must be a non-empty string")
+    _require(role in POSITION_REVERSAL_ROLES, "position_reversal_invalid",
+             f"{where}: position_reversal.role must be one of {list(POSITION_REVERSAL_ROLES)}")
+    return {"group": group, "role": role}
+
+
 # --------------------------------------------------------------------------------------
 # stable identity
 # --------------------------------------------------------------------------------------
 
+def _identity_component(record):
+    """Join component: the shared position-reversal group for paired inputs, else the pair index."""
+    if record.get("source_kind") == "paired":
+        return "group", record["position_reversal"]["group"]
+    return "pair", record["pair_index"]
+
+
 def _identity(record):
     return (record["run_id"], record["source_sha256"],
             record["source_window"]["start_s"], record["source_window"]["duration_s"],
-            record["pair_index"])
+            _identity_component(record))
 
 
 def _key_dict(key):
-    run_id, source_sha256, start, duration, pair_index = key
-    return {
+    run_id, source_sha256, start, duration, component = key
+    identity = {
         "run_id": run_id,
         "source_sha256": source_sha256,
         "source_window": {"start_s": start, "duration_s": duration},
-        "pair_index": pair_index,
     }
+    kind, value = component
+    if kind == "group":
+        identity["group"] = value
+    else:
+        identity["pair_index"] = value
+    return identity
 
 
 def _index(records, which):
@@ -241,6 +290,7 @@ def _record_from_standard(judgment, where, *, source_result):
         "source_window": source_window,
         "pair_index": pair_index,
         "blind_mapping": mapping,
+        "position_reversal": _normalize_position_reversal(judgment.get("position_reversal"), where),
         "raw_side": side,
         "mapped_method": mapped,
         "confidence": confidence,
@@ -297,6 +347,55 @@ def _collect_reversals(paths):
             "judgments": len(entries),
         })
     return records, inputs
+
+
+def _collect_paired(paths):
+    """Load paired results that carry both roles and split them before joining.
+
+    Each ``--paired-result`` file is one ``gemini_blind_review`` result whose judgments carry the
+    ``position_reversal`` metadata emitted by :mod:`bench.real_pair_review`. For every stable
+    source/window/group identity there must be exactly one ``original`` and one ``position_reversed`` record.
+    The roles are validated and split into two separate record lists before any join, so a paired file can
+    never produce a self-pair and cannot contribute two records to the same join identity.
+    """
+    originals = []
+    reversals = []
+    inputs = []
+    for path in paths:
+        document, _raw = _read_json(path, kind="paired result")
+        _require(document.get("schema") == ORIGINAL_SCHEMA, "schema_unsupported",
+                 f"paired result {path}: schema {document.get('schema')!r} must be {ORIGINAL_SCHEMA!r}")
+        entries = document.get("judgments")
+        _require(isinstance(entries, list), "input_malformed", f"{path}: judgments must be a JSON list")
+        grouped = {}
+        for index, judgment in enumerate(entries):
+            where = f"paired {path} judgment {index}"
+            record = _record_from_standard(judgment, where, source_result=str(path))
+            metadata = _normalize_position_reversal(record.get("position_reversal"), where, required=True)
+            record["position_reversal"] = metadata
+            record["source_kind"] = "paired"
+            group_key = (record["run_id"], record["source_sha256"],
+                         record["source_window"]["start_s"], record["source_window"]["duration_s"],
+                         metadata["group"])
+            bucket = grouped.setdefault(group_key, {})
+            _require(metadata["role"] not in bucket, "paired_duplicate_role",
+                     f"{where}: group {metadata['group']!r} already has a {metadata['role']!r} record")
+            bucket[metadata["role"]] = record
+        for group_key, bucket in grouped.items():
+            missing = [role for role in POSITION_REVERSAL_ROLES if role not in bucket]
+            _require(not missing, "paired_missing_role",
+                     f"paired result {path}: group {group_key[4]!r} is missing role(s) {missing}")
+            originals.append(bucket["original"])
+            reversals.append(bucket["position_reversed"])
+        inputs.append({
+            "path": str(path),
+            "sha256": sha256_file(path),
+            "kind": "paired",
+            "schema": document.get("schema"),
+            "judgments": len(entries),
+            "groups": len(grouped),
+        })
+    return originals, reversals, inputs
 
 
 def _classify(document, path):
@@ -476,6 +575,11 @@ def _aggregate(pairs):
     }
 
 
+def _preview_component(component):
+    kind, value = component
+    return f"#group={value}" if kind == "group" else f"#{value}"
+
+
 def _side_record(record):
     """Project one normalized record onto the reported per-side fields."""
     return {
@@ -492,7 +596,8 @@ def _side_record(record):
 
 def _unmatched_message(unmatched_originals, unmatched_reversals):
     def _preview(keys):
-        shown = [f"{key[0]}#{key[4]}@{key[2]}/{key[3]}:{key[1][:12]}" for key in keys[:3]]
+        shown = [f"{key[0]}{_preview_component(key[4])}@{key[2]}/{key[3]}:{key[1][:12]}"
+                 for key in keys[:3]]
         joined = ", ".join(shown)
         if len(keys) > len(shown):
             joined += f", +{len(keys) - len(shown)} more"
@@ -511,11 +616,15 @@ def _unmatched_message(unmatched_originals, unmatched_reversals):
 # audit
 # --------------------------------------------------------------------------------------
 
-def audit(original_paths, reversal_paths, source_review_paths=(), *, allow_unmatched=False, out_path=None):
+def audit(original_paths, reversal_paths, source_review_paths=(), paired_paths=(), *,
+          allow_unmatched=False, out_path=None):
     """Audit a positional-counterbalance review and return the deterministic report document.
 
     ``original_paths``/``reversal_paths`` are result JSONs joined on stable identity;
-    ``source_review_paths`` recover legacy (schema-less) originals. With ``allow_unmatched`` false (the
+    ``source_review_paths`` recover legacy (schema-less) originals. ``paired_paths`` are single
+    ``gemini_blind_review`` results that carry both roles plus the per-pair ``position_reversal`` metadata:
+    each is validated to have exactly one ``original`` and one ``position_reversed`` record per
+    source/window/group identity and the roles are split before joining. With ``allow_unmatched`` false (the
     default) any identity key present on only one side raises :class:`PositionBiasAuditError`; with it true the
     unmatched keys are recorded in ``coverage`` and the complete pairs are still audited. ``out_path`` is only
     used to refuse a write that would overwrite an input.
@@ -523,16 +632,23 @@ def audit(original_paths, reversal_paths, source_review_paths=(), *, allow_unmat
     original_paths = list(original_paths)
     reversal_paths = list(reversal_paths)
     source_review_paths = list(source_review_paths)
-    _require(original_paths, "no_inputs", "at least one --original-result is required")
-    _require(reversal_paths, "no_inputs", "at least one --reversal-result is required")
+    paired_paths = list(paired_paths)
+    _require(original_paths or paired_paths, "no_inputs",
+             "at least one --original-result or --paired-result is required")
+    _require(reversal_paths or paired_paths, "no_inputs",
+             "at least one --reversal-result or --paired-result is required")
     if out_path is not None:
-        protected = {Path(path).resolve() for path in original_paths + reversal_paths + source_review_paths}
+        protected = {Path(path).resolve()
+                     for path in original_paths + reversal_paths + source_review_paths + paired_paths}
         _require(Path(out_path).resolve() not in protected, "input_collision",
                  f"--out {out_path} would overwrite an input file")
 
     reviews, source_inputs = _load_source_reviews(source_review_paths)
     originals, original_inputs = _collect_originals(original_paths, reviews)
     reversals, reversal_inputs = _collect_reversals(reversal_paths)
+    paired_originals, paired_reversals, paired_inputs = _collect_paired(paired_paths)
+    originals = originals + paired_originals
+    reversals = reversals + paired_reversals
 
     original_index = _index(originals, "original")
     reversal_index = _index(reversals, "reversal")
@@ -559,19 +675,26 @@ def audit(original_paths, reversal_paths, source_review_paths=(), *, allow_unmat
         "scope_note": SCOPE_NOTE,
         "no_quality_score_note": NO_QUALITY_SCORE_NOTE,
         "identity": {
-            "join_key": ["run_id", "source_sha256", "source_window.start_s", "source_window.duration_s",
-                         "pair_index"],
-            "note": "Original and reversal records are joined only on this stable identity. Clip name and "
-                    "clip digest are excluded because a position-reversed control changes them.",
+            "join_key": ["run_id", "source_sha256", "source_window.start_s",
+                         "source_window.duration_s",
+                         "pair_index (separate results) or position_reversal.group (paired results)"],
+            "note": "Original and reversal records are joined only on this stable identity. Separate "
+                    "--original-result/--reversal-result records join on pair_index; --paired-result "
+                    "records are split by their validated position_reversal.role and join on the shared "
+                    "position_reversal.group. Clip name and clip digest are excluded because a "
+                    "position-reversed control changes them.",
         },
         "inputs": {
             "original_results": sorted(original_inputs, key=lambda item: item["path"]),
             "reversal_results": sorted(reversal_inputs, key=lambda item: item["path"]),
+            "paired_results": sorted(paired_inputs, key=lambda item: item["path"]),
             "source_reviews": sorted(source_inputs, key=lambda item: item["path"]),
         },
         "coverage": {
             "original_records": len(originals),
             "reversal_records": len(reversals),
+            "paired_original_records": len(paired_originals),
+            "paired_reversal_records": len(paired_reversals),
             "complete_pairs": len(pairs),
             "unmatched_original_count": len(unmatched_originals),
             "unmatched_reversal_count": len(unmatched_reversals),
@@ -602,12 +725,18 @@ def build_parser():
                     "review. It joins original and position-reversed blind-review results on stable identity, "
                     "reports screen-side choices separately from hidden-method choices, and computes no winner, "
                     "ranking, score or significance claim. No network, no model call, no video decoding.")
-    parser.add_argument("--original-result", action="append", required=True, metavar="JSON",
+    parser.add_argument("--original-result", action="append", default=[], metavar="JSON",
                         dest="original_results",
                         help="original gemini_blind_review result (repeatable; standard or legacy shape)")
-    parser.add_argument("--reversal-result", action="append", required=True, metavar="JSON",
+    parser.add_argument("--reversal-result", action="append", default=[], metavar="JSON",
                         dest="reversal_results",
                         help="position-reversed gemini_blind_review result (repeatable)")
+    parser.add_argument("--paired-result", action="append", default=[], metavar="JSON",
+                        dest="paired_results",
+                        help="one gemini_blind_review result carrying both the original and the "
+                             "position-reversed judgments tagged with position_reversal roles "
+                             "(repeatable; roles are validated one-to-one per group and split before "
+                             "joining)")
     parser.add_argument("--source-review", action="append", default=[], metavar="REVIEW.json",
                         dest="source_reviews",
                         help="multiscale_real_review review.json used to recover legacy originals (repeatable)")
@@ -623,7 +752,7 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     try:
         report = audit(args.original_results, args.reversal_results, args.source_reviews,
-                       allow_unmatched=args.allow_unmatched, out_path=args.out)
+                       args.paired_results, allow_unmatched=args.allow_unmatched, out_path=args.out)
     except PositionBiasAuditError as exc:
         print(json.dumps({"schema": SCHEMA, "ok": False,
                           "error": {"code": exc.code, "message": str(exc)}}, sort_keys=True), file=sys.stderr)
@@ -644,6 +773,7 @@ __all__ = [
     "SOURCE_REVIEW_SCHEMA",
     "RAW_SIDES",
     "METHODS",
+    "POSITION_REVERSAL_ROLES",
     "SCOPE_NOTE",
     "NO_QUALITY_SCORE_NOTE",
     "PositionBiasAuditError",

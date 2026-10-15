@@ -1188,13 +1188,19 @@ left/A = stabilized, right/B = raw), and the A/B preference is only mapped back 
 after the response. The report keeps the exact same source-frame pairing for both clips and refuses to
 generate either clip if the generated MP4 would exceed Gemini's 15 MiB (15,728,640-byte) inline cap. A nested
 `evidence` object records the source-frame mapping, both panel orders and both output hashes, and a top-level
-`position_reversal` block records the swap. The report is compatible with the existing Gemini API reviewer;
-the panel mappings stay local while Gemini receives only the clip bytes and the fixed A/B review brief.
+`position_reversal` block records the swap. Each pair also carries a per-item `position_reversal` block with a
+shared `group` identifier and its `role` (`original` or `position_reversed`), so one review over this report
+produces a single paired result the position-bias audit can split and rejoin. The report is compatible with
+the existing Gemini API reviewer; the panel mappings stay local while Gemini receives only the clip bytes and
+the fixed A/B review brief.
 Building the clips is local and makes no API call.
 
 ```bash
 .venv/bin/python -m bench.real_pair_review out/bench/RUN/manifest.json
 .venv/bin/python -m bench.gemini_blind_review out/bench/RUN/raw_vs_stabilized.json --out out/bench/RUN/gemini_review.json
+.venv/bin/python -m bench.gemini_position_bias_audit \
+    --paired-result out/bench/RUN/gemini_review.json \
+    --out out/bench/RUN/position_bias_audit.json
 ```
 
 The original MP4, the position-reversed MP4 and the report default to the run directory
@@ -1212,7 +1218,10 @@ The request carries only the clip bytes and one fixed review brief: no source pa
 identifier or candidate mapping is included, and the access token is never printed or stored. The response is
 a per-clip judgment (side preference, confidence, visible evidence, artifacts, limitations); the tool records
 no winner, ranking, aggregate or quality score, and it consults each `review.json`'s hidden `blind_mapping`
-**only after the response** to map the A/B/tie call back to a method. Keep results in the ignored `out/` tree.
+**only after the response** to map the A/B/tie call back to a method. Any per-pair `position_reversal`
+metadata in the input report (shared `group` + `role`) is copied into the recorded judgment so the offline
+position-bias audit can split and rejoin the two roles; it is never placed in the Vertex request. Keep
+results in the ignored `out/` tree.
 
 ```bash
 .venv/bin/python -m bench.gemini_blind_review out/bench/gemini_review/RUN/review.json --out out/bench/gemini_review/RUN/gemini_api_review.json
@@ -1248,11 +1257,13 @@ every pair).
 review. It reads the already-recorded `gemini_blind_review` JSON results (and, for the oldest schema-less
 original report, the matching `multiscale_real_review.py` `review.json` via `--source-review`), joins each
 original and reversal judgment on **stable identity** (`run_id`, `source_sha256`, source window
-`start_s`/`duration_s`, `pair_index`; never on the clip name or digest, which a reversed control changes), and
+`start_s`/`duration_s`, and `pair_index` for separate results or the shared `position_reversal.group` for
+paired results; never on the clip name or digest, which a reversed control changes), and
 reports the screen-side choice and the hidden-method choice **separately** for each side. Derived fields are
 `side_following` (same raw side, non-tie), `method_agreement` (same mapped method, non-tie),
 `opposite_physical_sides` (opposite raw sides, non-tie) and `position_tracks_while_method_changes`. It emits raw
-side and mapped method counts, complete-pair and non-tie-pair counts, side-following and method-agreement
+side and mapped method counts (the method universe includes `multiscale`, `l1`, `raw`, `stabilized` and `tie`),
+complete-pair and non-tie-pair counts, side-following and method-agreement
 counts, opposite-side counts, the position-tracked/method-changed count and mapping-reversal counts, with input
 and report hashes and a scope note. It performs **no**
 network or model call, decodes no video, computes **no** winner, ranking or score and calls no method better.
@@ -1268,8 +1279,21 @@ The report is written atomically with schema `mlxstab.gemini_position_bias_audit
     --out out/bench/gemini_review/RUN/position_bias_audit.json
 ```
 
-Run `--help` for the CLI (repeatable `--original-result`, `--reversal-result`, `--source-review`; required
-`--out`; `--allow-unmatched`). Tests: `tests/test_gemini_position_bias_audit.py`.
+Pass one **`--paired-result`** file (repeatable) instead of the two separate files when a single
+`gemini_blind_review` result carries both roles. The auditor requires exactly one `original` and one
+`position_reversed` judgment per stable source/window/group identity, refuses missing, malformed or duplicate
+roles, and splits the roles **before** joining so a paired file can never produce a self-pair or contribute two
+records to one join identity. The original `--original-result`/`--reversal-result` inputs keep their existing
+behavior and can be combined with `--paired-result`.
+
+```bash
+.venv/bin/python -m bench.gemini_position_bias_audit \
+    --paired-result out/bench/RUN/gemini_review.json \
+    --out out/bench/RUN/position_bias_audit.json
+```
+
+Run `--help` for the CLI (repeatable `--original-result`, `--reversal-result`, `--paired-result`,
+`--source-review`; required `--out`; `--allow-unmatched`). Tests: `tests/test_gemini_position_bias_audit.py`.
 
 ## Tests
 

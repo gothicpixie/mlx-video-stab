@@ -538,13 +538,16 @@ def test_main_writes_atomically_and_rejects_unmatched(tmp_path, capsys):
     assert not (tmp_path / "nope.json").exists()
 
 
-def test_cli_requires_original_reversal_and_out():
-    with pytest.raises(SystemExit):
-        A.build_parser().parse_args(["--out", "x.json"])
-    with pytest.raises(SystemExit):
-        A.build_parser().parse_args(["--original-result", "a.json", "--out", "x.json"])
+def test_cli_requires_out_and_an_input_source():
     with pytest.raises(SystemExit):
         A.build_parser().parse_args(["--original-result", "a.json", "--reversal-result", "b.json"])
+    # With --paired-result available, original/reversal are no longer parse-time required; the audit still
+    # refuses a run that supplies no input at all.
+    args = A.build_parser().parse_args(["--out", "x.json"])
+    assert args.original_results == [] and args.paired_results == []
+    with pytest.raises(A.PositionBiasAuditError) as exc:
+        A.audit([], [], [], [], out_path="x.json")
+    assert exc.value.code == "no_inputs"
 
 
 def test_allow_unmatched_cli_records_coverage(tmp_path, capsys):
@@ -558,3 +561,231 @@ def test_allow_unmatched_cli_records_coverage(tmp_path, capsys):
     report = json.loads(out.read_text(encoding="utf-8"))
     assert report["coverage"]["complete_pairs"] == 0
     assert report["coverage"]["unmatched_original_count"] == 1
+
+
+# --------------------------------------------------------------------------------------
+# paired results: one file carrying the original and its position-reversed control
+# --------------------------------------------------------------------------------------
+
+def _paired_judgment(*, group, role, **kwargs):
+    judgment = _standard_judgment(**kwargs)
+    judgment["position_reversal"] = {"schema": G.POSITION_REVERSAL_SCHEMA, "group": group, "role": role}
+    return judgment
+
+
+def _write_paired_result(path, judgments):
+    return _write_standard_result(path, judgments)
+
+
+def test_paired_result_requires_role_metadata(tmp_path):
+    path = _write_paired_result(tmp_path / "paired.json", [_standard_judgment(run_id="r", pair_index=0)])
+    with pytest.raises(A.PositionBiasAuditError) as exc:
+        A.audit([], [], [], [path])
+    assert exc.value.code == "paired_role_missing"
+
+
+def test_paired_result_rejects_invalid_role(tmp_path):
+    path = _write_paired_result(
+        tmp_path / "paired.json",
+        [_paired_judgment(group="g", role="control", run_id="r", pair_index=0),
+         _paired_judgment(group="g", role="position_reversed", run_id="r", pair_index=1,
+                          raw="B", mapping=_mapping("stabilized", "raw"))])
+    with pytest.raises(A.PositionBiasAuditError) as exc:
+        A.audit([], [], [], [path])
+    assert exc.value.code == "position_reversal_invalid"
+
+
+def test_paired_result_rejects_duplicate_role(tmp_path):
+    path = _write_paired_result(
+        tmp_path / "paired.json",
+        [_paired_judgment(group="g", role="original", run_id="r", pair_index=0),
+         _paired_judgment(group="g", role="original", run_id="r", pair_index=1)])
+    with pytest.raises(A.PositionBiasAuditError) as exc:
+        A.audit([], [], [], [path])
+    assert exc.value.code == "paired_duplicate_role"
+
+
+def test_paired_result_rejects_missing_role(tmp_path):
+    path = _write_paired_result(
+        tmp_path / "paired.json",
+        [_paired_judgment(group="g", role="original", run_id="r", pair_index=0)])
+    with pytest.raises(A.PositionBiasAuditError) as exc:
+        A.audit([], [], [], [path])
+    assert exc.value.code == "paired_missing_role"
+
+
+def test_paired_result_rejects_group_split(tmp_path):
+    # An original and a reversal under different groups leave both groups one-sided.
+    path = _write_paired_result(
+        tmp_path / "paired.json",
+        [_paired_judgment(group="g1", role="original", run_id="r", pair_index=0),
+         _paired_judgment(group="g2", role="position_reversed", run_id="r", pair_index=1,
+                          raw="B", mapping=_mapping("stabilized", "raw"))])
+    with pytest.raises(A.PositionBiasAuditError) as exc:
+        A.audit([], [], [], [path])
+    assert exc.value.code == "paired_missing_role"
+
+
+def test_paired_result_cannot_self_pair(tmp_path):
+    # Splitting by role means a single original record cannot join itself; strict mode reports the unmatched
+    # reversal side rather than fabricating a pair.
+    path = _write_paired_result(
+        tmp_path / "paired.json",
+        [_paired_judgment(group="g", role="original", run_id="r", pair_index=0)])
+    with pytest.raises(A.PositionBiasAuditError) as exc:
+        A.audit([], [], [], [path])
+    assert exc.value.code == "paired_missing_role"
+
+
+def test_paired_result_audit_maps_raw_in_both_orders(tmp_path):
+    # Build a paired result outright (no Gemini call is made by the audit) with the reviewer choosing the
+    # raw panel behind A in the original and behind B in the reversal: two screen-side preferences that both
+    # map to raw.
+    path = _write_paired_result(
+        tmp_path / "paired.json",
+        [_paired_judgment(group="grp", role="original", run_id="r", source_sha256="a" * 64,
+                          pair_index=0, raw="A", mapping=_mapping("raw", "stabilized")),
+         _paired_judgment(group="grp", role="position_reversed", run_id="r", source_sha256="a" * 64,
+                          pair_index=1, raw="B", mapping=_mapping("stabilized", "raw"))])
+    report = A.audit([], [], [], [path])
+    assert report["coverage"]["complete_pairs"] == 1
+    assert report["coverage"]["paired_original_records"] == 1
+    assert report["coverage"]["paired_reversal_records"] == 1
+    pair = report["pairs"][0]
+    assert pair["identity"]["group"] == "grp"
+    assert pair["identity"].get("pair_index") is None
+    assert pair["original"]["raw_side"] == "A" and pair["original"]["mapped_method"] == "raw"
+    assert pair["reversal"]["raw_side"] == "B" and pair["reversal"]["mapped_method"] == "raw"
+    assert pair["derived"]["method_agreement"] is True
+    assert pair["derived"]["opposite_physical_sides"] is True
+    assert pair["derived"]["side_following"] is False
+    assert pair["derived"]["mapping_reversed"] is True
+    aggregates = report["aggregates"]
+    assert aggregates["original_mapped_method_counts"]["raw"] == 1
+    assert aggregates["reversal_mapped_method_counts"]["raw"] == 1
+    # raw/stabilized are part of the mapped-method universe now.
+    assert set(aggregates["original_mapped_method_counts"]) == set(A.METHODS)
+    assert set(aggregates["reversal_mapped_method_counts"]) == set(A.METHODS)
+
+
+def test_paired_result_cli_round_trip(tmp_path, capsys):
+    path = _write_paired_result(
+        tmp_path / "paired.json",
+        [_paired_judgment(group="grp", role="original", run_id="r", pair_index=0,
+                          raw="A", mapping=_mapping("raw", "stabilized")),
+         _paired_judgment(group="grp", role="position_reversed", run_id="r", pair_index=1,
+                          raw="B", mapping=_mapping("stabilized", "raw"))])
+    out = tmp_path / "audit.json"
+    assert A.main(["--paired-result", str(path), "--out", str(out)]) == 0
+    written = json.loads(out.read_text(encoding="utf-8"))
+    assert written["coverage"]["complete_pairs"] == 1
+    assert "pairs=1" in capsys.readouterr().out
+
+
+# --------------------------------------------------------------------------------------
+# end-to-end: paired review JSON -> Gemini tasks/judgments (fake API) -> audit
+# --------------------------------------------------------------------------------------
+
+class _FakeVertexResponse:
+    def __init__(self, preference):
+        judgment = {"preference": preference, "confidence": "medium",
+                    "visible_evidence": "visible", "artifacts": "none", "limitations": "short clip"}
+        self._payload = json.dumps({"candidates": [{"content": {"parts": [
+            {"text": json.dumps(judgment)}]}}]}).encode("utf-8")
+
+    def read(self):
+        return self._payload
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+class _RecordingOpener:
+    """Return one fake Vertex response per call and record every request body."""
+
+    def __init__(self, preferences):
+        self.preferences = list(preferences)
+        self.bodies = []
+
+    def __call__(self, request, timeout=None):
+        self.bodies.append(json.loads(request.data.decode("utf-8")))
+        return _FakeVertexResponse(self.preferences.pop(0))
+
+
+def _write_paired_review(root, *, group="grp"):
+    """A real_pair_review-style review.json with both roles and their position_reversal metadata."""
+    root.mkdir(parents=True, exist_ok=True)
+    out_dir = root / "review"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    original = "raw_vs_stabilized.mp4"
+    reversed_clip = "raw_vs_stabilized_posrev.mp4"
+    (out_dir / original).write_bytes(b"original clip bytes")
+    (out_dir / reversed_clip).write_bytes(b"reversed clip bytes")
+    document = {
+        "schema": G.INPUT_SCHEMA,
+        "ok": True,
+        "output": {"dir": "review", "clips": [original, reversed_clip]},
+        "provenance": {"run": "run-pair", "run_id": "run-pair", "case": "case-pair",
+                       "source_sha256": "e" * 64,
+                       "source_window": {"start_s": 1.0, "duration_s": 2.0}},
+        "pairs": [
+            {"pair_index": 0, "clip": original,
+             "blind_mapping": _mapping("raw", "stabilized"),
+             "position_reversal": {"schema": G.POSITION_REVERSAL_SCHEMA, "group": group,
+                                   "role": "original"}},
+            {"pair_index": 1, "clip": reversed_clip,
+             "blind_mapping": _mapping("stabilized", "raw"),
+             "position_reversal": {"schema": G.POSITION_REVERSAL_SCHEMA, "group": group,
+                                   "role": "position_reversed"}},
+        ],
+    }
+    review_path = out_dir / "review.json"
+    review_path.write_text(json.dumps(document), encoding="utf-8")
+    return review_path, document
+
+
+def test_end_to_end_paired_review_raw_in_both_orders(tmp_path):
+    review_path, _ = _write_paired_review(tmp_path / "pair")
+
+    # collect_tasks carries the per-item metadata without placing it in any Vertex request.
+    tasks = G.collect_tasks([review_path])
+    assert [task["position_reversal"]["role"] for task in tasks] == ["original", "position_reversed"]
+    assert {task["position_reversal"]["group"] for task in tasks} == {"grp"}
+
+    opener = _RecordingOpener(["A", "B"])  # original A -> raw; reversal B -> raw
+    out = tmp_path / "paired_result.json"
+    document = G.run_review_set([review_path], out, token="tok", opener=opener, sleep=lambda _s: None)
+
+    # The request bodies carry only the clip bytes and the fixed brief: no role/group/mapping metadata.
+    for body in opener.bodies:
+        text = body["contents"][0]["parts"][1]["text"]
+        assert text == G.REVIEW_BRIEF
+        assert "position_reversal" not in text
+        assert "grp" not in json.dumps(body)
+        assert "raw" not in json.dumps(body) and "stabilized" not in json.dumps(body)
+
+    # The recorded judgments preserve the roles; mapping stays local.
+    assert [record["position_reversal"]["role"] for record in document["judgments"]] == [
+        "original", "position_reversed"]
+    assert [record["mapped_preference"] for record in document["judgments"]] == ["raw", "raw"]
+
+    report = A.audit([], [], [], [out])
+    assert report["coverage"]["complete_pairs"] == 1
+    pair = report["pairs"][0]
+    assert pair["identity"]["group"] == "grp"
+    assert pair["original"]["raw_side"] == "A" and pair["original"]["mapped_method"] == "raw"
+    assert pair["reversal"]["raw_side"] == "B" and pair["reversal"]["mapped_method"] == "raw"
+    assert pair["derived"] == {
+        "both_non_tie": True,
+        "side_following": False,
+        "method_agreement": True,
+        "opposite_physical_sides": True,
+        "position_tracks_while_method_changes": False,
+        "mapping_reversed": True,
+    }
+    aggregates = report["aggregates"]
+    assert aggregates["original_mapped_method_counts"]["raw"] == 1
+    assert aggregates["reversal_mapped_method_counts"]["raw"] == 1

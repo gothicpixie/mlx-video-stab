@@ -81,6 +81,11 @@ CONFIDENCES = ("low", "medium", "high")
 # The reviewer also supports the direct raw-vs-stabilized diagnostic pair. The mapping stays hidden from
 # Gemini; only the A/B preference is sent, then mapped locally to one of these panel identities.
 PANEL_METHODS = ("multiscale", "l1", "raw", "stabilized")
+#: Optional per-pair position-reversal metadata emitted by :mod:`bench.real_pair_review`. When present it is
+#: carried verbatim into the recorded judgment (never into the Vertex request) so the offline
+#: :mod:`bench.gemini_position_bias_audit` can pair an original clip with its position-reversed control.
+POSITION_REVERSAL_SCHEMA = "mlxstab.real_pair_review.position_reversal/1"
+POSITION_REVERSAL_ROLES = ("original", "position_reversed")
 
 PROVIDER = "Vertex AI REST, authenticated via gcloud user login"
 
@@ -175,6 +180,33 @@ def validate_blind_mapping(mapping):
     return mapping
 
 
+def validate_position_reversal(metadata):
+    """Validate optional per-pair position-reversal metadata; return a normalized copy or ``None``.
+
+    The metadata is emitted by :mod:`bench.real_pair_review` on each paired review item so a single blinded
+    review covers both the original (raw-left/stabilized-right) and the position-reversed control. It is
+    metadata only: it is never placed in a Vertex request and never influences the A/B review brief. A
+    missing value is allowed (the multiscale review reports and legacy results do not carry it); a present
+    value must be a JSON object with a non-empty ``group`` string shared by the two roles and a ``role`` in
+    :data:`POSITION_REVERSAL_ROLES`.
+    """
+    if metadata is None:
+        return None
+    _require(isinstance(metadata, dict), "position_reversal_invalid",
+             "position_reversal must be a JSON object when present")
+    group = metadata.get("group")
+    role = metadata.get("role")
+    _require(isinstance(group, str) and group.strip(), "position_reversal_invalid",
+             "position_reversal.group must be a non-empty string")
+    _require(role in POSITION_REVERSAL_ROLES, "position_reversal_invalid",
+             f"position_reversal.role must be one of {list(POSITION_REVERSAL_ROLES)}")
+    normalized = {"group": group, "role": role}
+    schema = metadata.get("schema")
+    if schema is not None:
+        normalized["schema"] = schema
+    return normalized
+
+
 def map_preference(blind_mapping, side):
     """Map a raw A/B/tie reviewer call to the hidden panel identity or ``tie``."""
     mapping = validate_blind_mapping(blind_mapping)
@@ -250,6 +282,7 @@ def load_review(review_path):
         _require(_plain_mp4_basename(pair["clip"]), UNSAFE_PATH,
                  f"review pair {index} clip must be a plain .mp4 basename")
         validate_blind_mapping(pair.get("blind_mapping"))
+        validate_position_reversal(pair.get("position_reversal"))
     return document
 
 
@@ -319,6 +352,7 @@ def collect_tasks(review_paths, *, limit_bytes=MAX_INLINE_BYTES):
                 "clip_bytes": int(size),
                 "clip_sha256": sha256_file(clip_path),
                 "blind_mapping": validate_blind_mapping(pair["blind_mapping"]),
+                "position_reversal": validate_position_reversal(pair.get("position_reversal")),
                 "run": provenance["run"],
                 "run_id": provenance["run_id"],
                 "source_sha256": provenance["source_sha256"],
@@ -506,6 +540,8 @@ def _judgment(task, raw, timestamp, model):
         "clip_sha256": task["clip_sha256"],
         "clip_bytes": task["clip_bytes"],
         "blind_mapping": dict(task["blind_mapping"]),
+        "position_reversal": (dict(task["position_reversal"])
+                              if task.get("position_reversal") is not None else None),
         "raw_side_preference": raw["preference"],
         "mapped_preference": map_preference(task["blind_mapping"], raw["preference"]),
         "confidence": raw["confidence"],
@@ -642,6 +678,8 @@ __all__ = [
     "PREFERENCES",
     "CONFIDENCES",
     "PANEL_METHODS",
+    "POSITION_REVERSAL_SCHEMA",
+    "POSITION_REVERSAL_ROLES",
     "PROVIDER",
     "NO_QUALITY_SCORE_NOTE",
     "REVIEW_BRIEF",
@@ -651,6 +689,7 @@ __all__ = [
     "vertex_url",
     "build_request",
     "validate_blind_mapping",
+    "validate_position_reversal",
     "map_preference",
     "load_review",
     "resolve_clip_path",

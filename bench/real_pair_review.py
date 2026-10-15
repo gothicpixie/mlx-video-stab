@@ -279,6 +279,9 @@ def build(manifest_path, *, out_video=None, out_report=None, out_reversed=None,
         run_id = str(manifest.get("run_id") or manifest_path.parent.name)
         pairing_rule = "same source window; nearest normalized presentation timestamp"
         video_labels = {"left": "A", "right": "B"}
+        # Shared stable identifier for the paired original/position-reversed items: both roles carry the same
+        # group so the offline position-bias audit can pair them without relying on the clip name or index.
+        group_id = (f"{run_id}|{source_sha}|{float(window['start_s'])}|{float(window['duration_s'])}")
         report = {
             "schema": Gemini.INPUT_SCHEMA,
             "ok": True,
@@ -288,13 +291,20 @@ def build(manifest_path, *, out_video=None, out_report=None, out_reversed=None,
                 {"pair_index": 0, "clip": output_path.name,
                  "blind_mapping": {"left_panel": "raw", "right_panel": "stabilized",
                                    "video_labels": dict(video_labels)},
-                 "pairing": {"rule": pairing_rule}},
+                 "pairing": {"rule": pairing_rule},
+                 "position_reversal": {
+                     "schema": Gemini.POSITION_REVERSAL_SCHEMA,
+                     "group": group_id, "role": "original"}},
                 {"pair_index": 1, "clip": reversed_path.name,
                  "blind_mapping": {"left_panel": "stabilized", "right_panel": "raw",
                                    "video_labels": dict(video_labels)},
-                 "pairing": {"rule": pairing_rule}},
+                 "pairing": {"rule": pairing_rule},
+                 "position_reversal": {
+                     "schema": Gemini.POSITION_REVERSAL_SCHEMA,
+                     "group": group_id, "role": "position_reversed"}},
             ],
             "position_reversal": {
+                "group": group_id,
                 "original_clip": output_path.name,
                 "reversed_clip": reversed_path.name,
                 "panel_swap": (

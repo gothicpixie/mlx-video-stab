@@ -112,6 +112,12 @@ def test_build_writes_original_and_position_reversed_clips_with_provenance(tmp_p
     api_input = json.loads(report_path.read_text())
     assert api_input["output"]["clips"] == ["paired.mp4", "paired_posrev.mp4"]
     from bench import gemini_blind_review as G
+    roles = [pair["position_reversal"]["role"] for pair in api_input["pairs"]]
+    assert roles == ["original", "position_reversed"]
+    groups = {pair["position_reversal"]["group"] for pair in api_input["pairs"]}
+    assert len(groups) == 1 and all(group for group in groups)
+    assert all(pair["position_reversal"]["schema"] == G.POSITION_REVERSAL_SCHEMA
+               for pair in api_input["pairs"])
     validated = G.load_review(report_path)
     assert [pair["clip"] for pair in validated["pairs"]] == ["paired.mp4", "paired_posrev.mp4"]
     assert G.map_preference(validated["pairs"][0]["blind_mapping"], "A") == "raw"
@@ -124,6 +130,8 @@ def test_build_writes_original_and_position_reversed_clips_with_provenance(tmp_p
     assert tasks[0]["blind_mapping"]["left_panel"] == "raw"
     assert tasks[1]["blind_mapping"]["left_panel"] == "stabilized"
     assert tasks[1]["blind_mapping"]["right_panel"] == "raw"
+    assert [task["position_reversal"]["role"] for task in tasks] == ["original", "position_reversed"]
+    assert {task["position_reversal"]["group"] for task in tasks} == groups
 
 
 def test_build_enforces_inline_cap_for_each_clip(tmp_path, monkeypatch):
