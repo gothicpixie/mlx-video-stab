@@ -1128,9 +1128,18 @@ policies at 2, 4 and 8 bins, jitter ranges over the full sigma sweep are `0.5347
 ranges show scene and parameter sensitivity and do not identify a winner. Full per-window values are in
 `STATUS.md`.
 
+The optional `--preview-out` mode creates a geometry-only contact sheet: original RGB frames beside pooled and
+all rank-bin affine warps for up to six sampled frames. The report schema is `/2` and includes the per-frame
+feature-grid correction matrices used by the preview. Pixel-coordinate conversion accounts for RAFT downscale
+and pad; Pillow's output-to-input affine is the inverse of the source-to-stabilized correction. The preview has
+no depth-aware occlusion handling or image-quality score, and its output path cannot overwrite an input cache or
+the JSON report. Local previews were generated for stream00000 and stream00016 under ignored
+`out/bench/flow_prediction_real/`.
+
 ```bash
 python -m bench.depth_layer_real_runner --frames-npz out/bench/flow_prediction_real/stream00000_t25_frames.npz --depth-npz out/bench/flow_prediction_real/stream00000_t25_depth_v2base_30frames.npz --weights vendor/weights/conv/raft-things.safetensors --out out/bench/flow_prediction_real/stream00000_t25_depth_layer_real.json --iters 24 --downscale 2 --bins 4 --smooth-sigma 1
 python -m bench.depth_layer_real_runner --frames-npz out/bench/flow_prediction_real/00176_t60_frames.npz --depth-npz out/bench/flow_prediction_real/00176_t60_depth_v2base_every4.npz --weights vendor/weights/conv/raft-things.safetensors --out out/bench/flow_prediction_real/00176_t60_depth_layer_real.json --iters 24 --downscale 2 --bins 4 --smooth-sigma 1
+python -m bench.depth_layer_real_runner --frames-npz out/bench/flow_prediction_real/stream00000_t25_frames.npz --depth-npz out/bench/flow_prediction_real/stream00000_t25_depth_v2base_30frames.npz --weights vendor/weights/conv/raft-things.safetensors --out out/bench/flow_prediction_real/stream00000_t25_depth_layer_real_preview.json --iters 24 --downscale 2 --bins 4 --smooth-sigma 1 --preview-out out/bench/flow_prediction_real/stream00000_t25_depth_layer_preview.png --preview-bins 4 --preview-sigma 1
 ```
 
 Re-run the same windows with the sensitivity grid:
@@ -1142,9 +1151,9 @@ python3 -m bench.depth_cache --frames-npz out/bench/flow_prediction_real/stream0
 python -m bench.depth_layer_real_runner --frames-npz out/bench/flow_prediction_real/stream00016_t130_frames.npz --depth-npz out/bench/flow_prediction_real/stream00016_t130_depth_v2base_every4.npz --weights vendor/weights/conv/raft-things.safetensors --out out/bench/flow_prediction_real/stream00016_t130_depth_layer_real_sweep.json --iters 24 --downscale 2 --sweep-bins 1,2,4,8 --sweep-sigmas 0,0.5,1,2
 ```
 
-Focused core/runner tests passed **35 tests**; the synthetic, multi-seed and rendered depth-layer suites plus
+Focused core/runner tests passed **49 tests**; the synthetic, multi-seed and rendered depth-layer suites plus
 depth-motion audit passed another **168 tests**. CodeGraph found no graph-linked tests, so these tests were run
-directly. The full `.claude/verify.sh` passed **875 tests in 34.42 s**. No production code or default changed.
+directly. The full `.claude/verify.sh` passed **889 tests in 30.89 s**. No production code or default changed.
 The next gate is more distinct source windows plus a
 human-reviewed rendered-quality comparison before any production wiring.
 

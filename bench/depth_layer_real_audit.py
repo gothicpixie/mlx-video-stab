@@ -14,8 +14,8 @@ from typing import Sequence
 
 import numpy as np
 
-SCHEMA = "mlxstab.depth_layer_real_audit/1"
-SWEEP_SCHEMA = "mlxstab.depth_layer_real_audit_sweep/1"
+SCHEMA = "mlxstab.depth_layer_real_audit/2"
+SWEEP_SCHEMA = "mlxstab.depth_layer_real_audit_sweep/2"
 LIMITATIONS = [
     "flow and monocular depth are model-derived; neither is ground truth",
     "depth strata are per-frame relative-rank bins, not metric depth or near/far labels",
@@ -77,7 +77,12 @@ def _rank_bins(depth, support, n_bins):
 
 
 def _path_summary(transforms, h, w, sigma):
-    """Return component-smoothed path jitter and geometric inverse-warp coverage."""
+    """Return component-smoothed path jitter, geometric inverse-warp coverage and per-frame corrections.
+
+    Every per-frame entry carries ``correction``, the source-to-stabilized affine matrix in
+    feature-grid coordinates (``smooth @ inv(raw)``). It is ``None`` when the per-frame matrix
+    is unavailable (singular raw path) or non-finite, so the report stays JSON-safe.
+    """
     if any(t is None for t in transforms):
         return {"available": False, "reason": "at least one pair transform is unavailable",
                 "jitter_px": None, "frames": []}
@@ -117,10 +122,13 @@ def _path_summary(transforms, h, w, sigma):
             inbounds = finite & (x >= -0.5) & (x <= w - 0.5) & (y >= -0.5) & (y <= h - 0.5)
             # A conservative bilinear render requires every contributing source tap in the image.
             rendered = finite & (x >= 0.0) & (x <= w - 1.0) & (y >= 0.0) & (y <= h - 1.0)
-            frames.append({"inbounds_coverage": float(inbounds.mean()),
+            correction_list = correction.tolist() if np.isfinite(correction).all() else None
+            frames.append({"correction": correction_list,
+                           "inbounds_coverage": float(inbounds.mean()),
                            "rendered_valid_coverage": float(rendered.mean())})
         except np.linalg.LinAlgError:
-            frames.append({"inbounds_coverage": None, "rendered_valid_coverage": None})
+            frames.append({"correction": None, "inbounds_coverage": None,
+                           "rendered_valid_coverage": None})
     if len(deviations) > 1:
         jitter = float(np.mean(np.abs(np.diff(np.stack(deviations), axis=0))))
     else:

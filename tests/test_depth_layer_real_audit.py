@@ -170,11 +170,74 @@ def test_zero_sigma_is_exact_identity_correction_even_for_affine_motion():
     assert pooled["mean_rendered_valid_coverage"] == 1
 
 
+def test_schema_suffixes_are_bumped_for_correction_matrices():
+    from bench.depth_layer_real_audit import SCHEMA, SWEEP_SCHEMA
+
+    assert SCHEMA == "mlxstab.depth_layer_real_audit/2"
+    assert SWEEP_SCHEMA == "mlxstab.depth_layer_real_audit_sweep/2"
+    obs = observation(np.ones((8, 8)), np.zeros((8, 8, 2)))
+    assert audit_depth_layer_window([obs])["schema"] == SCHEMA
+
+
+def test_every_per_frame_policy_summary_carries_a_feature_grid_correction():
+    h, w = 9, 11
+    moving = np.zeros((h, w, 2), np.float64)
+    moving[..., 0] = 1.25
+    still = np.zeros_like(moving)
+    depth = np.ones((h, w))
+    result = audit_depth_layer_window([observation(depth, moving), observation(depth, still)],
+                                      smooth_sigma=0.8)
+    for name, policy in result["policies"].items():
+        if not policy["available"]:
+            assert policy["frames"] == [], name
+            continue
+        assert len(policy["frames"]) == 3, name
+        for frame in policy["frames"]:
+            correction = np.asarray(frame["correction"], np.float64)
+            assert correction.shape == (3, 3)
+            assert np.isfinite(correction).all()
+            assert correction[2].tolist() == [0.0, 0.0, 1.0]
+    json.dumps(result, allow_nan=False)
+
+
+def test_zero_sigma_correction_is_the_identity_matrix():
+    h, w = 9, 11
+    flow = np.zeros((h, w, 2), np.float64)
+    flow[..., 0] = 1.25
+    result = audit_depth_layer_window([observation(np.ones((h, w)), flow)], smooth_sigma=0)
+    for frame in result["policies"]["pooled"]["frames"]:
+        assert frame["correction"] == [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
+
+
+def test_unavailable_policy_has_no_per_frame_corrections():
+    h, w = 8, 8
+    result = audit_depth_layer_window([observation(np.ones((h, w)), np.zeros((h, w, 2)))],
+                                      n_bins=4)
+    unavailable = result["policies"]["relative_depth_rank_1"]
+    assert not unavailable["available"]
+    assert unavailable["frames"] == []
+
+
+def test_sweep_variants_propagate_correction_matrices():
+    h, w = 8, 10
+    yy, xx = np.mgrid[:h, :w]
+    depth = (xx >= w // 2).astype(np.float64)
+    flow = np.stack((0.2 * xx + depth, -0.1 * yy + 2 * depth), axis=-1)
+    result = audit_depth_layer_sweep([observation(depth, flow)], bin_counts=(2,), smooth_sigmas=(1,))
+    variant = result["variants"]["bins_2__sigma_1"]
+    for name, policy in variant["policies"].items():
+        if not policy["available"]:
+            continue
+        for frame in policy["frames"]:
+            assert np.asarray(frame["correction"], np.float64).shape == (3, 3)
+    json.dumps(result, allow_nan=False)
+
+
 def test_sweep_enumerates_every_combination_without_selecting_one():
     h, w = 8, 8
     obs = observation(np.ones((h, w)), np.zeros((h, w, 2)))
     result = audit_depth_layer_sweep([obs], bin_counts=(1, 2), smooth_sigmas=(0, 0.5, 1))
-    assert result["schema"] == "mlxstab.depth_layer_real_audit_sweep/1"
+    assert result["schema"] == "mlxstab.depth_layer_real_audit_sweep/2"
     assert result["bin_counts"] == [1, 2]
     assert result["smooth_sigmas"] == [0.0, 0.5, 1.0]
     assert result["feature_grid"] == [h, w]

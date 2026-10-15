@@ -142,3 +142,106 @@ def test_sweep_runner_rejects_bad_grid_before_loading_model(tmp_path):
     with pytest.raises(ValueError, match="bin_counts"):
         runner.run_cached_audit(frames, depth, weights, None, runner_factory=FakeRunner,
                                 lock_factory=FakeLock, sweep_bins=(0,), write=False, log=None)
+
+
+def test_feature_grid_correction_conjugates_into_pixel_translation():
+    pad = (3, 5, 7, 11)  # top, bottom, left, right
+    downscale = 2
+    scale = runner.FEATURE_STRIDE * downscale
+    correction = np.array([[1.0, 0.0, 2.5], [0.0, 1.0, -1.25], [0.0, 0.0, 1.0]])
+    pixel = runner._correction_to_pixel_matrix(correction, pad, downscale)
+    assert pixel[0, 0] == pytest.approx(1.0)
+    assert pixel[1, 1] == pytest.approx(1.0)
+    assert pixel[0, 2] == pytest.approx(scale * 2.5)
+    assert pixel[1, 2] == pytest.approx(scale * -1.25)
+    feature_from_pixel = runner._feature_to_pixel_matrix(pad, downscale)
+    expected = np.linalg.inv(feature_from_pixel) @ correction @ feature_from_pixel
+    np.testing.assert_allclose(pixel, expected)
+
+
+def test_preview_renders_contact_sheet_without_leaking_paths(tmp_path):
+    frames, depth, weights = write_caches(tmp_path)
+    before = sha256_file(frames)
+    preview = tmp_path / "preview dir" / "sheet.png"
+    result = runner.run_cached_audit(frames, depth, weights, None, runner_factory=FakeRunner,
+                                     lock_factory=FakeLock, n_bins=2, smooth_sigma=1.0,
+                                     preview_out=preview, preview_bins=2, preview_sigma=1.0,
+                                     write=False, log=None)
+    assert preview.is_file()
+    assert preview.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    from PIL import Image
+    with Image.open(preview) as sheet:
+        assert sheet.width > 0 and sheet.height > 0
+    # The input frame cache is only read, and no output/input path is written into the report.
+    assert sha256_file(frames) == before
+    payload = json.dumps(result, allow_nan=False)
+    assert str(preview) not in payload
+    assert str(tmp_path) not in payload
+    assert "preview_out" not in result
+
+
+def test_preview_renders_requested_sweep_variant(tmp_path):
+    frames, depth, weights = write_caches(tmp_path)
+    preview = tmp_path / "sweep.png"
+    result = runner.run_cached_audit(frames, depth, weights, None, runner_factory=FakeRunner,
+                                     lock_factory=FakeLock, sweep_bins=(1, 2),
+                                     sweep_sigmas=(0, 1), preview_out=preview,
+                                     preview_bins=2, preview_sigma=1.0, write=False, log=None)
+    assert preview.is_file()
+    assert set(result["variants"]) == {
+        "bins_1__sigma_0", "bins_1__sigma_1", "bins_2__sigma_0", "bins_2__sigma_1"}
+    json.dumps(result, allow_nan=False)
+
+
+def test_preview_rejects_missing_sweep_variant_before_raft(tmp_path):
+    frames, depth, weights = write_caches(tmp_path)
+    created = []
+
+    def factory(*args):
+        created.append(1)
+        return FakeRunner(*args)
+
+    preview = tmp_path / "missing.png"
+    with pytest.raises(ValueError, match="preview"):
+        runner.run_cached_audit(frames, depth, weights, None, runner_factory=factory,
+                                lock_factory=FakeLock, sweep_bins=(1, 2), sweep_sigmas=(0, 1),
+                                preview_out=preview, preview_bins=4, preview_sigma=1.0,
+                                write=False, log=None)
+    assert created == []
+    assert not preview.exists()
+
+
+def test_preview_rejects_ambiguous_single_mode_before_raft(tmp_path):
+    frames, depth, weights = write_caches(tmp_path)
+    created = []
+
+    def factory(*args):
+        created.append(1)
+        return FakeRunner(*args)
+
+    with pytest.raises(ValueError, match="preview"):
+        runner.run_cached_audit(frames, depth, weights, None, runner_factory=factory,
+                                lock_factory=FakeLock, n_bins=4, smooth_sigma=1.0,
+                                preview_out=tmp_path / "mismatch.png", preview_bins=2,
+                                preview_sigma=1.0, write=False, log=None)
+    assert created == []
+
+
+@pytest.mark.parametrize("collision", ["frames", "depth", "weights", "report"])
+def test_preview_cannot_overwrite_an_input_or_json_report(tmp_path, collision):
+    frames, depth, weights = write_caches(tmp_path)
+    paths = {"frames": frames, "depth": depth, "weights": weights,
+             "report": tmp_path / "report.json"}
+    created = []
+
+    def factory(*args):
+        created.append(1)
+        return FakeRunner(*args)
+
+    report_path = paths["report"] if collision == "report" else None
+    with pytest.raises(ValueError, match="preview_out must not overwrite"):
+        runner.run_cached_audit(frames, depth, weights, report_path, runner_factory=factory,
+                                lock_factory=FakeLock, n_bins=4, smooth_sigma=1.0,
+                                preview_out=paths[collision], preview_bins=4, preview_sigma=1.0,
+                                write=False, log=None)
+    assert created == []

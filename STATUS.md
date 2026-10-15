@@ -1771,6 +1771,28 @@ lower jitter scale than the first. More bins produce larger jitter in some rank 
 results show parameter and scene sensitivity, not a robust depth-rank advantage. No combination is selected.
 Full per-pair reports are local-only under ignored `out/bench/flow_prediction_real/`.
 
+### E15 geometry-only real-frame preview
+
+The audit report is now schema `/2` and carries each frame's source-to-stabilized affine correction in feature
+coordinates. The runner conjugates that correction into original-pixel coordinates and offers optional
+`--preview-out`, `--preview-bins` and `--preview-sigma` flags. The contact sheet shows the original plus pooled
+and all rank-bin warps for up to six evenly sampled frames. Preview selection must resolve to an explicitly
+requested variant before RAFT runs; output paths may not collide with the input caches, weights or JSON report.
+The preview resamples actual RGB pixels, but it does not use depth-aware occlusion handling or compute an image
+quality score.
+
+Local contact sheets for stream00000 and stream00016 are under ignored
+`out/bench/flow_prediction_real/*_depth_layer_preview.png`. The stream00016 columns are nearly identical,
+matching that window's small path estimates; stream00000 shows modest frame shifts, but the policy differences
+remain subtle at this contact-sheet scale. This is a geometry diagnostic for visual inspection, not a human
+quality verdict or production evidence. No input cache was modified and the preview path is not written into the
+JSON report.
+
+Focused core/runner tests passed **49 tests**, including feature-to-pixel transform conversion, preview creation,
+input immutability, path non-leakage and output-path collision rejection. The complete `.claude/verify.sh` passed
+**889 tests in 30.89 s**. CodeGraph was synced; it found no linked tests, so the focused modules were run directly.
+No production code or default changed.
+
 Reports are under ignored `out/bench/flow_prediction_real/`; no source clips or dense flow maps are committed.
 Focused tests for the core and cache runner passed **35 tests** (including the sweep grid validation, the
 one-bin rank-equals-pooled sanity check and a fake-runner check that one RAFT pass feeds every requested
