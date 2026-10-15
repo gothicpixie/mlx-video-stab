@@ -113,3 +113,46 @@ def test_real_weights_bidir_and_fp16():
     _, uf, _, ub = mh.flow_bidir(x, y, 12)
     e16 = max(_epe(uf[0], tf), _epe(ub[0], tb)); print("bidir fp16 EPE vs torch", e16)
     assert e16 < 0.05
+
+
+@pytest.mark.skipif(not ref.WEIGHTS.exists(), reason="raft-things weights absent")
+def test_real_weights_bidir_fp16_correlation(monkeypatch):
+    """fp16 correlation storage alone and combined with an fp16 network in the bidirectional path.
+
+    `test_real_weights_bidir_and_fp16` covers an fp16 network with fp32 correlation; this covers the
+    correlation-only and combined-fp16 settings, and spies on the CorrBlock instances that `flow_bidir`
+    actually creates (forward and backward) to check the keyword is not ignored.
+    """
+    from PIL import Image
+    tm = ref.torch_raft(); mm = ref.convert_in_memory(tm)
+    ims = [np.array(Image.open(ref.DEMO / f"frame_00{n}.png").convert("RGB"))[:432, :1024].astype(np.float32) for n in (16, 17)]
+    ta = [torch.from_numpy(i.transpose(2, 0, 1).copy())[None] for i in ims]
+    with torch.no_grad():
+        _, tf = tm(ta[0], ta[1], iters=12, test_mode=True); _, tb = tm(ta[1], ta[0], iters=12, test_mode=True)
+    tf, tb = tf[0].numpy().transpose(1, 2, 0), tb[0].numpy().transpose(1, 2, 0)
+    A, B = mx.array(ims[0])[None], mx.array(ims[1])[None]
+
+    # record the dtype actually stored by the CorrBlock instances flow_bidir creates (forward and backward)
+    real_corr = M.CorrBlock
+    stored = []
+
+    def spy(f1, f2, levels=4, radius=4, dtype=mx.float32):
+        cb = real_corr(f1, f2, levels, radius, dtype)
+        stored.append(tuple(p.dtype for p in cb.pyr))
+        return cb
+
+    monkeypatch.setattr(M, "CorrBlock", spy)
+
+    x, y = mm.frame_features(A), mm.frame_features(B)
+    _, uf, _, ub = mm.flow_bidir(x, y, 12, corr_dtype=mx.float16)          # fp32 network, fp16 correlation
+    assert stored == [(mx.float16,) * 4, (mx.float16,) * 4]               # forward and backward, every level
+    e_corr = max(_epe(uf[0], tf), _epe(ub[0], tb)); print("bidir fp32-net fp16-corr EPE vs torch", e_corr)
+    assert e_corr < 0.05
+
+    stored.clear()
+    mh = ref.convert_in_memory(tm).to_dtype(mx.float16)
+    x, y = mh.frame_features(A), mh.frame_features(B)
+    _, uf, _, ub = mh.flow_bidir(x, y, 12, corr_dtype=mx.float16)          # fp16 network and fp16 correlation
+    assert stored == [(mx.float16,) * 4, (mx.float16,) * 4]
+    e_both = max(_epe(uf[0], tf), _epe(ub[0], tb)); print("bidir fp16-net fp16-corr EPE vs torch", e_both)
+    assert e_both < 0.05

@@ -1,6 +1,8 @@
 # mlxstab status
 
-## Stage 0 progress: trustworthy measurements (first slice)
+## Stage 0 progress
+
+### Slice 1: evaluator reset and mask coordinates
 
 Implemented the evaluator-reset and mask-coordinate fixes from the plan, with regression tests.
 
@@ -9,16 +11,25 @@ Implemented the evaluator-reset and mask-coordinate fixes from the plan, with re
 - `analyze` no longer skips exclusion when the target mask is absent but a source mask is available.
 - `tests/test_evaluation_correctness.py`: 25 tests covering source-vs-destination mask positions, horizontal/vertical/diagonal fractional target sampling plus an exact-integer zero-weight guard, independent optional masks, dilation, bounds/non-finite inputs, invalidity preservation, the `analyze` source-only-mask caller, a fake-RAFT reset lifecycle, and a `bench/evaluate.py` integration test that runs its real input/output loop with fake media and asserts each clip starts cold. The initial 15-test version produced 9 failures against the pre-fix code (checked then); the expanded suite was not re-run against the old code.
 
-Check: `.claude/verify.sh` -> 40 passed (offline; the 15 pre-existing tests still pass).
+### Slice 2: complete-warp diagnostics and fp16 correlation coverage
 
-Remaining Stage 0 work, not started here: whole-warp distortion/coverage metrics with an identity-global bent-line counterexample; combined fp16 network + fp16 correlation coverage; rerun the current defaults and the unfinished camcorder configurations; reproduce the reported tree deformation and floaty motion with global/mesh/row ablations; audit residual accumulation under rotation and parallax.
+- `mlxstab/warpmetrics.py` measures the complete source-coordinate field (global homography + residual mesh + row correction). Each output cell is a bilinear patch and is checked at all **four corner Jacobians** (forward differences), so an opposite-corner fold, a concave cell and a non-finite corner are detected rather than missed by a single top-left Jacobian. It reports anisotropy/stretch/shear, signed determinant (corner min/mean, foldover and collapse fractions), a cell-count partition (`nonfinite_cells` / `overflow_cells` / `usable_cells`), and `center_valid` versus full-kernel-support coverage for bilinear, bicubic and Lanczos3 with a documented `|weight| <= 1e-6` zero-tap rule. Singular values use a scale-normalised 2x2 SVD (`s2 = |det|/s1`) so high-shear matrices do not suffer cancellation, and finite-but-overflowing coordinates are counted as unusable instead of scoring as perfect. Non-finite/degenerate inputs return explicit `None` values and every result, including cross-frame aggregation, is JSON-safe. Semantics and conventions are in `docs/warp_diagnostics.md`.
+- Wired into the report path: `Config(warp_diag=True)`, CLI `--warp-diag`, and `render_frame(..., diagnose=True)`, which reuses the source field already computed for rendering (no second warp pass). The historical global-only `distortion_min`/`distortion_mean` are unchanged and now labelled `distortion_scope = "global_homography_only"`; when the option is off, `warp_diag` is `null`.
+- Tests: `tests/test_warpmetrics.py` (15 analytic/integration cases: identity, similarity, anisotropic scale versus shear, reflection, half-collapse, an alternating fold that centred differences would cancel, the reviewed opposite-corner fold and concave-cell counterexamples, a missing finite corner, stable singular values against `numpy.linalg.svd` including the `[[1,1e4],[0,1]]` high-shear matrix, overflow accounting and JSON safety, the `scale=1e154` representable-determinant mean, scaled `_stats` reductions for large equal and opposite-sign values, non-finite/degenerate behaviour, translated borders and filter support, and bent row/mesh through the real `source_coords`/`render_frame` path); `tests/test_stabilize.py` adds a monkeypatched `stabilize` report integration plus a `_distortion` invalid-mapping guard test.
+- fp16 precision: `tests/test_raft.py::test_real_weights_bidir_fp16_correlation` runs the bidirectional path with fp32-network/fp16-correlation and fp16-network/fp16-correlation against the PyTorch reference, and spies on the `CorrBlock` instances `flow_bidir` actually creates (forward and backward, every pyramid level) so the keyword cannot be silently ignored. Measured on the local raft-things demo frames (both directions): fp32 0.00222 px, fp16 net/fp32 corr 0.00269 px, fp32 net/fp16 corr 0.00224 px, fp16 net + fp16 corr 0.00260 px (existing gates: fp32 < 0.01 px, fp16 < 0.05 px).
+- Measured overhead at 1920x1080 (one frame, minimum of 3 runs): render-only ~17 ms, render + diagnostics ~755 ms (coverage ~432 ms, four-corner shape ~245 ms). Complete-warp diagnostics are therefore opt-in.
+- Review repairs on the same branch: four-corner Jacobians; stable 2x2 SVD; explicit corner overflow accounting; scaled mean/quantile/cross-cell reductions so representable finite values (e.g. four corner determinants of 1e308, or opposite-sign extrema) never become `inf`; `_distortion` input guards; the `CorrBlock` spy over every pyramid level; and documentation corrected so `det_collapse_frac` is a corner-collapse fraction (mixed-sign cells are caught by `det_negative_frac`) and anisotropy drops collapsed corners rather than whole cells.
+
+Check: `.claude/verify.sh` -> 58 passed (offline; the earlier 40 still pass).
+
+Remaining Stage 0 work: rerun the current defaults and the unfinished camcorder configurations; reproduce the reported tree deformation and floaty motion with global-only, mesh-only, row-only and combined ablations; audit motion-field accumulation under rotation and parallax. Real-footage baselines and the deformation diagnosis remain outstanding, so Stage 0 is not complete. Fixture parity (fp32/fp16) does not establish full-clip quality of the approximations.
 
 ## What works
 
 - `mlxstab/warp.py`: Metal sampler (bilinear / Catmull-Rom / Lanczos-3, zeros/border, align_corners). `grid_sample` max abs error vs torch 1.2e-7 .. 2.4e-7. Forward only.
 - `mlxstab/raft/`: RAFT-things in MLX + `.pth` -> safetensors converter. Final flow EPE vs PyTorch at 12 iterations: 2.2e-3 px (reference demo frames), 2.4e-3 px (synthetic); batch-2 bidirectional path: 2.2e-3 px fp32, 2.7e-3 px fp16. Gate is < 0.01 px for the fp32 path.
 - `mlxstab/stabilize.py`, `python -m mlxstab`: no-crop stabilizer (similarity global fit by RANSAC with forward-backward masking and mover exclusion, residual mesh + rolling-shutter row bands, L1-optimal paths with border budget, roll levelling, one Lanczos resample, border mask video). Interlaced sources deinterlaced first (bwdif send_field).
-- `.claude/verify.sh`: 40 tests pass locally, offline; weight-dependent tests skip when weights are unavailable.
+- `.claude/verify.sh`: 58 tests pass locally, offline; weight-dependent tests skip when weights are unavailable.
 
 ### Benchmarks (RAFT-things, 12 iterations; one pair unless noted; MLX fp32 unless noted)
 

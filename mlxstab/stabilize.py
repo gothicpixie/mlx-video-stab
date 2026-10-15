@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import numpy as np
 import mlx.core as mx
-from . import geometry as G, motion as MO, smooth as SM, media
+from . import geometry as G, motion as MO, smooth as SM, media, warpmetrics
 from .warp import sample, valid_mask
 from .raft.model import load_raft, raft_flow
 
@@ -32,6 +32,7 @@ class Config:
     warm_iters: int = 0            # iterations once warm-started (0 = same as flow_iters)
     model: str = "similarity"      # global camera model: similarity | affine | homography (residuals go to the mesh)
     fidelity: float = 0.1          # L1 pull of the path towards the raw path (keeps the border small; 1.0 leaked jitter, 0 -> big border)
+    warp_diag: bool = False        # opt-in: complete-warp shape/coverage diagnostics in the report (extra host math per frame)
 
 
 def load_roll(path):
@@ -244,26 +245,56 @@ def source_coords(pl, t, W, H, grid=None):
     return src
 
 
-def render_frame(frame, pl, t, cfg, grid=None):
-    """-> (stabilized uint8 [H,W,3], border mask bool [H,W] (True = no source), distortion)."""
+def render_frame(frame, pl, t, cfg, grid=None, diagnose=False):
+    """-> (stabilized uint8 [H,W,3], border mask bool [H,W] (True = no source), distortion[, warp_diag]).
+
+    ``distortion`` is the historical global-homography-only score. With ``diagnose=True`` a fourth item
+    holds complete-warp diagnostics computed from the very source field used for rendering (no second warp pass)."""
     H, W = frame.shape[:2]
     src = source_coords(pl, t, W, H, grid)
     img = sample(mx.array(frame).astype(mx.float32)[None], src, cfg.kernel, "zeros")
     bad = ~valid_mask(src, H, W)
     img = mx.where(bad[..., None], 0.0, mx.clip(img, 0, 255))
     mx.eval(img, bad, src)
-    return np.array(img[0]).round().astype(np.uint8), np.array(bad[0]), _distortion(pl.G[t], W, H)
+    out = (np.array(img[0]).round().astype(np.uint8), np.array(bad[0]), _distortion(pl.G[t], W, H))
+    if diagnose:
+        return (*out, warpmetrics.diagnose(np.array(src[0]), H, W, kernel=cfg.kernel))
+    return out
+
+
+def warp_diagnostics(pl, cfg, W, H, frames=None, grid=None):
+    """Aggregated complete-warp diagnostics for a Plan (standalone API/benchmark entry point).
+
+    ``stabilize`` reuses the source field already computed while rendering; this helper recomputes and
+    aggregates it for callers that only want diagnostics."""
+    diags = []
+    for t in (range(len(pl.G)) if frames is None else frames):
+        src = source_coords(pl, t, W, H, grid); mx.eval(src)
+        diags.append(warpmetrics.diagnose(np.array(src[0]), H, W, kernel=cfg.kernel))
+    return warpmetrics.aggregate(diags)
 
 
 def _distortion(Gm, W, H):
     """Liu et al. 2013 distortion: ratio of the two singular values of the affine part of the global output->input homography
-    (1 = none). The residual mesh is local detail and is not counted."""
+    (1 = none). The residual mesh is local detail and is not counted. Returns None for a degenerate or non-finite mapping
+    (checked before least squares/SVD), so an invalid global map cannot be reported as a perfect score."""
     from .geometry import apply_h
+    if H < 1 or W < 1: return None
+    Gm = np.asarray(Gm, np.float64)
+    if Gm.shape != (3, 3) or not np.isfinite(Gm).all(): return None
     ys, xs = np.mgrid[0:H:H // 8 or 1, 0:W:W // 8 or 1]; q = np.stack([xs.ravel(), ys.ravel()], 1).astype(np.float64)
+    if len(q) < 3: return None
+    mapped = apply_h(Gm, q)
+    if not np.isfinite(mapped).all(): return None               # invalid mapping must not reach lstsq/SVD
     A = np.c_[q, np.ones(len(q))]
-    sol = np.linalg.lstsq(A, apply_h(Gm, q), rcond=None)[0]
-    sv = np.linalg.svd(sol[:2].T, compute_uv=False)
-    return float(sv[1] / sv[0])
+    try:
+        sol = np.linalg.lstsq(A, mapped, rcond=None)[0]
+        sv = np.linalg.svd(sol[:2].T, compute_uv=False)
+    except np.linalg.LinAlgError:
+        return None
+    if sv.size < 2 or not np.isfinite(sv).all() or sv[0] <= 0: return None
+    r = float(sv[1] / sv[0])
+    return r if np.isfinite(r) else None
 
 
 def stabilize(src, out, mask=None, weights=None, cfg=None, roll=None, start=None, duration=None, fps_out=None,
@@ -283,21 +314,26 @@ def stabilize(src, out, mask=None, weights=None, cfg=None, roll=None, start=None
     frames, fps, _ = media.decode(src, info, start, duration); frames = media.prefetch(frames)
     enc = media.Encoder(out, W, H, fps, out_fps=fps_out)
     menc = media.Encoder(mask, W, H, fps, gray=True, out_fps=fps_out) if mask else None
-    grid = None; borders = []; dist = []
+    grid = None; borders = []; dist = []; diags = []
     ys, xs = mx.meshgrid(mx.arange(H), mx.arange(W), indexing="ij"); grid = (xs.astype(mx.float32), ys.astype(mx.float32))
     for t, fr in enumerate(frames):
         if t >= len(pl.G): break
         if on_step: on_step(t)
-        img, bad, d = render_frame(fr, pl, t, cfg, grid)
+        if cfg.warp_diag:
+            img, bad, d, dg = render_frame(fr, pl, t, cfg, grid, diagnose=True); diags.append(dg)
+        else:
+            img, bad, d = render_frame(fr, pl, t, cfg, grid)
         enc.write(img); borders.append(float(bad.mean())); dist.append(d)
         if menc: menc.write(bad.astype(np.uint8) * 255)
         if t % 20 == 0: log(f"render {t}/{len(pl.G)}")
     enc.close()
     if menc: menc.close()
-    t3 = time.perf_counter(); n = len(pl.G)
+    t3 = time.perf_counter(); n = len(pl.G); dv = [d for d in dist if d is not None]
     rep = {"frames": n, "timing_s": {"analysis": t1 - t0, "plan": t2 - t1, "render": t3 - t2},
            "fps_analysis": n / (t1 - t0), "fps_render": n / (t3 - t2), "fps_total": n / (t3 - t0), "fps": fps, "interlaced": info["interlaced"], "fallback_frames": pl.fallbacks,
            "mean_border_frac": float(np.mean(borders)), "max_border_frac": float(np.max(borders)),
-           "cropping_ratio": float(1 - np.mean(borders)), "distortion_min": float(np.min(dist)), "distortion_mean": float(np.mean(dist))}
+           "cropping_ratio": float(1 - np.mean(borders)), "distortion_scope": "global_homography_only",
+           "distortion_min": float(np.min(dv)) if dv else None, "distortion_mean": float(np.mean(dv)) if dv else None,
+           "warp_diag": warpmetrics.aggregate(diags) if cfg.warp_diag else None}
     if report: Path(report).write_text(json.dumps(rep, indent=1))
     return rep

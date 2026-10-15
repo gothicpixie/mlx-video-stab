@@ -23,10 +23,11 @@ def main(argv=None):
     p.add_argument("--start", type=float); p.add_argument("--duration", type=float)
     p.add_argument("--fps", type=float, help="output frame rate (default: processing rate; interlaced sources are 2x field rate)")
     p.add_argument("--report", help="write a JSON report")
+    p.add_argument("--warp-diag", action="store_true", help="include complete-warp shape/coverage diagnostics in --report (opt-in)")
     a = p.parse_args(argv)
     gc, gr = (int(v) for v in a.mesh.lower().split("x"))
     cfg = Config(smooth=a.smooth, sigma=a.sigma, budget=a.budget, mesh=(gc, gr), rs_rows=a.rs_rows, flow_iters=a.iters,
-                 flow_downscale=a.flow_downscale, kernel=a.kernel, zoom=a.zoom, fidelity=a.fidelity)
+                 flow_downscale=a.flow_downscale, kernel=a.kernel, zoom=a.zoom, fidelity=a.fidelity, warp_diag=a.warp_diag)
     rep = stabilize(a.input, a.output, a.mask, a.weights, cfg, a.roll, a.start, a.duration, a.fps, report=a.report,
                     log=lambda m: print(m, file=sys.stderr))
     print(json.dumps(rep, indent=1))

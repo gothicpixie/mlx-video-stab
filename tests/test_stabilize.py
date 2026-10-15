@@ -76,3 +76,44 @@ def test_analysis_stride_interpolates_path():
     jin, jout = jitter_px(vid, cfg), jitter_px(out, cfg)
     print("stride-2 jitter in/out", jin, jout)
     assert jout < 0.6 * jin
+
+
+def test_stabilize_report_includes_warp_diag(monkeypatch):
+    """The stabilize report path emits complete-warp diagnostics when opt-in, preserving the old global metric."""
+    import json
+    from mlxstab import media
+    vid, _ = synth.render(T=8, W=96, H=64, jitter=3.0)
+    H, W = 64, 96
+    monkeypatch.setattr(media, "probe", lambda p: {"width": W, "height": H, "fps": 30.0,
+                                                    "field_order": "unknown", "interlaced": False, "duration": 0.0})
+
+    def fake_decode(path, info=None, start=None, duration=None, deinterlace=True, vf=None):
+        return iter(vid), 30.0, (W, H)
+
+    monkeypatch.setattr(media, "decode", fake_decode)
+    monkeypatch.setattr(media, "prefetch", lambda gen, n=4: gen)
+
+    class FakeEncoder:
+        def __init__(self, *a, **k): pass
+        def write(self, frame): pass
+        def close(self): pass
+
+    monkeypatch.setattr(media, "Encoder", FakeEncoder)
+    cfg = S.Config(mesh=(4, 3), rs_rows=4, budget=0.06, warp_diag=True)
+    rep = S.stabilize("in.mp4", "out.mp4", None, None, cfg, flow_fn=farneback, log=lambda m: None)
+    assert rep["distortion_scope"] == "global_homography_only"          # old field explicitly labelled, not redefined
+    assert rep["distortion_min"] is not None and rep["distortion_mean"] is not None
+    assert rep["warp_diag"] is not None
+    assert "coverage.center_valid_frac" in rep["warp_diag"]
+    assert "shape.anisotropy_mean" in rep["warp_diag"]
+    json.dumps(rep, allow_nan=False)                                    # JSON-safe, including the diagnostics
+
+
+def test_distortion_guards_invalid_mappings():
+    """The legacy global distortion must return None, not raise or report a perfect score, for invalid maps."""
+    assert S._distortion(np.eye(3), 8, 8) == pytest.approx(1.0)
+    assert S._distortion(np.full((3, 3), np.nan), 8, 8) is None
+    assert S._distortion(np.full((3, 3), np.inf), 8, 8) is None
+    assert S._distortion(np.array([[1., 0., 0.], [0., 1., 0.], [0., 0., 0.]]), 8, 8) is None   # w = 0
+    assert S._distortion(np.eye(3), 0, 0) is None
+    assert S._distortion(np.eye(3), 1, 1) is None                        # fewer than 3 sample points
