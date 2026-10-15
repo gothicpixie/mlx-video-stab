@@ -2178,8 +2178,17 @@ multiscale mappings; the five non-ties all chose B/right.
 The local, network-free reversal step is now reproducible with
 `python -m bench.multiscale_position_reversal REVIEW.json --out-dir OUTPUT [--pair-index N ...]`; its copied
 `review.json` remains valid input to `bench.gemini_blind_review`, with the post-swap method mapping updated.
-The focused reversal, report-validation and review tests passed (**85 tests**). Generated comparison clips and
-Gemini responses remain local and ignored. No production change.
+`bench.gemini_position_bias_audit` now reads the recorded Vertex response JSONs and source review reports,
+joins original/control judgments by run, source hash, source window and pair index, and reports screen-side and
+mapped-method preferences separately. It recovers the first schema-less response through its source report,
+records unmatched reviews, and performs no model/network call. Running it over the 16 original and three
+position-control API judgments produced three complete counterbalanced pairs and 13 originals without
+controls: all three originals chose B/right and mapped to L1; two controls again chose B/right and mapped to
+multiscale, while the third was a tie. Thus two pairs explicitly track screen position while the hidden method
+changes. The report confirms the position-confound reading without claiming a method winner. The focused
+reversal, Gemini-review and bias-audit suites passed (**101 tests**), and the auditor reproduced these counts
+from the saved Vertex reports. Generated comparison clips and Gemini responses remain local and ignored. No
+production change.
 
 ## What works
 

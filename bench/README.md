@@ -1213,6 +1213,35 @@ side is flipped. Artifacts stay under the ignored default
 Run `--help` for the CLI (`REVIEW.json`, `--out-dir`, repeatable `--pair-index`; omit `--pair-index` to swap
 every pair).
 
+### Gemini position-bias audit (JSON only)
+
+`bench.gemini_position_bias_audit` is an **offline, deterministic** auditor of an original/reversed Gemini
+review. It reads the already-recorded `gemini_blind_review` JSON results (and, for the oldest schema-less
+original report, the matching `multiscale_real_review.py` `review.json` via `--source-review`), joins each
+original and reversal judgment on **stable identity** (`run_id`, `source_sha256`, source window
+`start_s`/`duration_s`, `pair_index`; never on the clip name or digest, which a reversed control changes), and
+reports the screen-side choice and the hidden-method choice **separately** for each side. Derived fields are
+`side_following` (same raw side, non-tie), `method_agreement` (same mapped method, non-tie),
+`opposite_physical_sides` (opposite raw sides, non-tie) and `position_tracks_while_method_changes`. It emits raw
+side and mapped method counts, complete-pair and non-tie-pair counts, side-following and method-agreement
+counts, opposite-side counts, the position-tracked/method-changed count and mapping-reversal counts, with input
+and report hashes and a scope note. It performs **no**
+network or model call, decodes no video, computes **no** winner, ranking or score and calls no method better.
+Duplicate, malformed, missing-mapping and (by default) unmatched identity keys **fail clearly** instead of
+being dropped; pass `--allow-unmatched` only to record the unmatched keys while auditing the complete pairs.
+The report is written atomically with schema `mlxstab.gemini_position_bias_audit/1`.
+
+```bash
+.venv/bin/python -m bench.gemini_position_bias_audit \
+    --original-result out/bench/gemini_review/RUN/gemini_api_review.json \
+    --reversal-result out/bench/gemini_review/RUN/position_reversed/gemini_api_review.json \
+    --source-review out/bench/gemini_review/RUN/review.json \
+    --out out/bench/gemini_review/RUN/position_bias_audit.json
+```
+
+Run `--help` for the CLI (repeatable `--original-result`, `--reversal-result`, `--source-review`; required
+`--out`; `--allow-unmatched`). Tests: `tests/test_gemini_position_bias_audit.py`.
+
 ## Tests
 
 `tests/test_bench_runner.py` covers configuration/experiment identity, change labelling against the fully
