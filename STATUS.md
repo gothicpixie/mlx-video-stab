@@ -1694,8 +1694,46 @@ bench/depth_layer_render_audit.py` found **no graph-linked tests**, so the direc
 report is path-free; no production code changed, no production default changed, and **no private paths or
 private data** appear here.
 
-Next gate (E13): a **matched real-footage downstream crop / jitter / warp-validity experiment on the existing
-cached windows**, **per-window analysis only**; **no production wiring until validated**.
+### E13 matched real-footage depth-rank path audit (implemented; two windows measured)
+
+`bench/depth_layer_real_audit.py` compares a pooled affine flow fit with four neutral per-frame relative-depth
+rank fits. It composes each fit into a path, smooths the six affine parameters component-wise with a Gaussian
+(`sigma=1 pair`, nearest boundary), then measures the raw-versus-smoothed path jitter at five image points and
+the inverse correction's geometric and conservative bilinear valid coverage. `bench/depth_layer_real_runner.py`
+validates paired frame/depth caches, runs bidirectional RAFT, passes forward flow and cycle-map-valid support to
+the pure NumPy core, and writes a path-free report. Rank bins are recomputed per pair; there is no near/far label,
+no image render, and no model output enters production.
+
+Both existing 30-frame windows were run independently with RAFT-things MLX, 24 iterations, downscale 2, four
+rank bins, and `sigma=1`. The values below are each window's own estimates; they are not pooled across clips.
+
+| window | policy | path jitter (px) | geometric in-bounds | conservative rendered-valid |
+|---|---|---:|---:|---:|
+| stream00000 | pooled | 1.70667 | 0.98089 | 0.96578 |
+| stream00000 | rank 0 | 1.70129 | 0.97964 | 0.96590 |
+| stream00000 | rank 1 | 1.66567 | 0.97942 | 0.96441 |
+| stream00000 | rank 2 | 1.86733 | 0.97920 | 0.96415 |
+| stream00000 | rank 3 | 1.99646 | 0.97663 | 0.96194 |
+| 00176 | pooled | 0.03575 | 1.00000 | 0.97698 |
+| 00176 | rank 0 | 0.03665 | 1.00000 | 0.97687 |
+| 00176 | rank 1 | 0.03647 | 1.00000 | 0.97643 |
+| 00176 | rank 2 | 0.03662 | 1.00000 | 0.97641 |
+| 00176 | rank 3 | 0.03853 | 1.00000 | 0.97740 |
+
+The candidate ranking changes by metric and window. Rank 1 lowers the jitter proxy in the first window but
+increases it slightly in the second, while its rendered-valid coverage is lower than pooled in the second
+window. Rank 0 improves coverage slightly in the first but does not lower jitter in the second. There is **no
+consistent rank policy win**. These are fitted
+RAFT-field affine path proxies, not ground-truth camera motion or stabilized image quality. The cycle mask means
+the bidirectional sample is finite and in bounds; no cycle-residual threshold was selected. The audit is still
+one smoothing setting on two windows, and the synthetic splat audit's limitations remain separate.
+
+Reports are under ignored `out/bench/flow_prediction_real/`; no source clips or dense flow maps are committed.
+Focused tests for the core and cache runner passed **16 tests**; CodeGraph was synced and found no linked tests,
+so these tests were run directly. No production code or default changed.
+
+Next gate: repeat on more independent windows and evaluate rendered image quality against a human-reviewed
+baseline before considering any policy or production wiring.
 
 ## What works
 

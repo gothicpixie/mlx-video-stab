@@ -1092,8 +1092,39 @@ Tests: focused `tests/test_depth_layer_render_audit.py` passed **28 tests**; the
 graph-linked tests**, so the direct focused tests were run. No production code changed and no production default
 changed.
 
-Next gate (E13): a **matched real-footage downstream crop / jitter / warp-validity experiment on the existing
-cached windows**, **per-window analysis only**; **no production wiring until validated**.
+### E13 matched real-footage downstream geometry
+
+`bench.depth_layer_real_runner` validates one frame/depth cache pair, runs bidirectional RAFT, and supplies the
+forward flow plus cycle-map-valid support to the pure NumPy `bench.depth_layer_real_audit` core. The core
+compares a pooled affine fit with each of four per-frame relative-depth rank fits, composes each into a path,
+applies a component-wise Gaussian path smoother (`sigma=1 pair`), and reports jitter and inverse-warp geometric /
+conservative bilinear coverage. Rank bins are neutral numeric strata; they are not foreground/background or
+metric depth. Cycle-map-valid means finite and in bounds, not a selected residual threshold.
+
+Two independent existing cache windows were measured using RAFT-things MLX, 24 iterations, downscale 2. Results
+are not pooled across windows:
+
+| window | policy | jitter px | in-bounds | rendered-valid |
+|---|---|---:|---:|---:|
+| stream00000 | pooled | 1.70667 | 0.98089 | 0.96578 |
+| stream00000 | rank 1 | 1.66567 | 0.97942 | 0.96441 |
+| stream00000 | rank 3 | 1.99646 | 0.97663 | 0.96194 |
+| 00176 | pooled | 0.03575 | 1.00000 | 0.97698 |
+| 00176 | rank 1 | 0.03647 | 1.00000 | 0.97643 |
+| 00176 | rank 3 | 0.03853 | 1.00000 | 0.97740 |
+
+Other rank bins also move the trade-off; no rank policy consistently improves jitter and coverage. This is a
+model-derived affine path proxy, not ground-truth camera motion or rendered stabilization quality. Results are
+path-free and ignored under `out/bench/flow_prediction_real/`; no clips or dense flow maps are committed.
+
+```bash
+python -m bench.depth_layer_real_runner --frames-npz out/bench/flow_prediction_real/stream00000_t25_frames.npz --depth-npz out/bench/flow_prediction_real/stream00000_t25_depth_v2base_30frames.npz --weights vendor/weights/conv/raft-things.safetensors --out out/bench/flow_prediction_real/stream00000_t25_depth_layer_real.json --iters 24 --downscale 2 --bins 4 --smooth-sigma 1
+python -m bench.depth_layer_real_runner --frames-npz out/bench/flow_prediction_real/00176_t60_frames.npz --depth-npz out/bench/flow_prediction_real/00176_t60_depth_v2base_every4.npz --weights vendor/weights/conv/raft-things.safetensors --out out/bench/flow_prediction_real/00176_t60_depth_layer_real.json --iters 24 --downscale 2 --bins 4 --smooth-sigma 1
+```
+
+Focused core/runner tests passed **16 tests**. CodeGraph found no graph-linked tests, so the focused tests were
+run directly. No production code or default changed. The next gate is more independent windows plus a
+human-reviewed rendered-quality comparison before any production wiring.
 
 ## Tests
 
