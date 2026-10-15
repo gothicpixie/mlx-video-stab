@@ -1813,6 +1813,18 @@ rank resolution. This adds evidence of scene and parameter sensitivity, not a de
 flow and monocular depth remain proxies; these metrics are not rendered perceptual quality. The full path-free
 report is local-only under ignored `out/bench/flow_prediction_real/`. No production code or default changed.
 
+### E17 fifth distinct source-window sweep
+
+The `t063_photo` source was also depth-cached independently (15 frames sampled every four frames) and evaluated
+with the same RAFT settings and 16-variant grid. Its pooled jitter / rendered-valid coverage is `0 / 1.0` at
+sigma 0, then `0.01483 / 0.97822`, `0.04267 / 0.97838` and `0.06339 / 0.98016` at sigma 0.5, 1 and 2. Across
+2, 4 and 8 bins, depth-rank policies have jitter ranges `0.01687–0.08555`, `0.04918–0.23148` and
+`0.06829–0.32510` at those nonzero sigmas, respectively. In this window every sampled rank policy has higher
+jitter than pooled at each sigma, while coverage differences remain small. This is a fifth per-window
+observation, not a general policy verdict: all flow/depth values are model-derived geometric proxies, with no
+rendered perceptual assessment. The full report remains local-only under ignored
+`out/bench/flow_prediction_real/`; no production code or default changed.
+
 Reports are under ignored `out/bench/flow_prediction_real/`; no source clips or dense flow maps are committed.
 Focused tests for the core and cache runner passed **35 tests** (including the sweep grid validation, the
 one-bin rank-equals-pooled sanity check and a fake-runner check that one RAFT pass feeds every requested

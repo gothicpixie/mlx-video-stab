@@ -1151,6 +1151,8 @@ python3 -m bench.depth_cache --frames-npz out/bench/flow_prediction_real/stream0
 python -m bench.depth_layer_real_runner --frames-npz out/bench/flow_prediction_real/stream00016_t130_frames.npz --depth-npz out/bench/flow_prediction_real/stream00016_t130_depth_v2base_every4.npz --weights vendor/weights/conv/raft-things.safetensors --out out/bench/flow_prediction_real/stream00016_t130_depth_layer_real_sweep.json --iters 24 --downscale 2 --sweep-bins 1,2,4,8 --sweep-sigmas 0,0.5,1,2
 python3 -m bench.depth_cache --frames-npz out/bench/flow_prediction_real/stream00025_t05_frames.npz --out out/bench/flow_prediction_real/stream00025_t05_depth_v2base_every4.npz --every 4 --lock on
 python -m bench.depth_layer_real_runner --frames-npz out/bench/flow_prediction_real/stream00025_t05_frames.npz --depth-npz out/bench/flow_prediction_real/stream00025_t05_depth_v2base_every4.npz --weights vendor/weights/conv/raft-things.safetensors --out out/bench/flow_prediction_real/stream00025_t05_depth_layer_real_sweep.json --iters 24 --downscale 2 --sweep-bins 1,2,4,8 --sweep-sigmas 0,0.5,1,2
+python3 -m bench.depth_cache --frames-npz out/bench/flow_prediction_real/t063_photo_frames.npz --out out/bench/flow_prediction_real/t063_photo_depth_v2base_every4.npz --every 4 --lock on
+python -m bench.depth_layer_real_runner --frames-npz out/bench/flow_prediction_real/t063_photo_frames.npz --depth-npz out/bench/flow_prediction_real/t063_photo_depth_v2base_every4.npz --weights vendor/weights/conv/raft-things.safetensors --out out/bench/flow_prediction_real/t063_photo_depth_layer_real_sweep.json --iters 24 --downscale 2 --sweep-bins 1,2,4,8 --sweep-sigmas 0,0.5,1,2
 ```
 
 The fourth distinct source window (`stream00025`) keeps the zero-sigma identity control at `0 / 1.0`. At sigma
@@ -1158,6 +1160,11 @@ The fourth distinct source window (`stream00025`) keeps the zero-sigma identity 
 `0.49200 / 0.97502`. Across 2, 4 and 8 depth bins, rank-policy jitter spans `0.06279–2.15227` and
 rendered-valid coverage spans `0.96336–0.98086`. This is one window's model-derived geometric proxy; it adds
 scene sensitivity evidence and does not select a depth policy. Full per-window results are in `STATUS.md`.
+
+The fifth distinct source (`t063_photo`, 15 sampled frames) has pooled jitter / rendered-valid values of
+`0.01483 / 0.97822`, `0.04267 / 0.97838` and `0.06339 / 0.98016` at sigma 0.5, 1 and 2. Every tested rank
+policy has higher jitter in this window, with ranges `0.01687–0.08555`, `0.04918–0.23148` and
+`0.06829–0.32510`. This adds a contrasting per-window observation; it is not enough to select a general policy.
 
 Focused core/runner tests passed **49 tests**; the synthetic, multi-seed and rendered depth-layer suites plus
 depth-motion audit passed another **168 tests**. CodeGraph found no graph-linked tests, so these tests were run
