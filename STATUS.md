@@ -1968,6 +1968,95 @@ Next gate: repeat this rendered comparison on distinct real source windows with 
 layer/subject-motion stress tests before considering any multiscale advantage; keep fractal scaling out of
 scope until the non-fractal results are repeatable beyond this synthetic scene.
 
+### E10.2 multi-layer rendered-pixel audit: parallax and subject-motion stress (implemented; pure NumPy)
+
+E10.1 rendered a **single-layer, static, zero-parallax** scene, which a uniform camera warp can reproduce
+exactly; depth ordering, parallax and independent subject motion were out of scope. E10.2 adds
+`bench/multiscale_layered_render_audit.py`, which renders the **same** four fixed multiscale-retention camera
+paths and their **nearest measured-crop L1** counterparts (same `nearest_crop_index` tie rule) through a
+deterministic **three-layer** scene and compares rendered pixels. It imports no production module directly,
+changes no production default and is research-only.
+
+Scene and ground truth (explicit, asserted in tests). Three fixed layers, each a distinct deterministic
+procedural texture (`make_layer_canvases`): textured **background** (full canvas), opaque rectangular
+**foreground** geometry, and an opaque **subject** rectangle composited in front (so the subject/foreground
+overlap exercises occlusion). Layer `l` samples its canvas at `grid + margin + depth_scales[l] * camera`
+(the subject also adds its independent deterministic sinusoid `subject_motion_path`). Opacity is hard: a
+bilinear-sampled layer alpha is occupied iff `alpha >= 0.5`, and the frontmost occupied layer wins **and
+defines the ideal semantic region** of each pixel. The **observed** frames are the layered render under the
+noisy camera `C = pan + shake`; the **ideal** frames are the layered render under the known intended `pan`
+with the same true subject motion; a **candidate** camera path `P` renders as
+`backward_warp(observed, P - observed)`, one uniform correction per frame. Consequences asserted in tests:
+`P = C` reproduces the observed frame, and with flat depth scales (`1,1,1`) and no subject motion an integer
+`P - C` equals the E10.1 translation shift. A single uniform warp therefore **cannot** represent per-layer
+parallax or independent subject motion, which the per-region metrics expose rather than hide.
+
+Fixed isolation conditions (`CONDITION_SPECS`, no tuning): `static_no_parallax` (camera `static`, depth
+scales `(1,1,1)`, no subject motion: the exact-identity control), `parallax_shake` (camera `pan_shake`, depth
+scales `(0.5,1.0,1.0)`, no subject motion) and `parallax_subject_jolt` (camera `pan_jolt`, depth scales
+`(0.5,1.0,1.0)`, independent subject motion). Fixed scope: `n=60`, `fps=60`, `W=80`, `H=48`, `margin=20`,
+three seeds `0,1,2`, so 9 runs; fixed layer texture seeds `1729,2718,3141`, foreground rect
+`(0.42,0.55,0.24,0.30)`, subject rect `(0.60,0.48,0.14,0.22)`, subject period `0.8 s`, amplitude `(1.0,0.7)`
+and seed offset `101`. Both families keep **matched offline whole-clip** access (`n <= L1_WINDOW`).
+
+Reported per pair, **separately**: the E10 path metrics; whole-frame rendered RGB MAE/RMS and
+candidate/ideal/common valid coverage; and the same common-support MAE/RMS/coverage **per ideal semantic
+region** (background/foreground/subject) with explicit counts (`region_pixels`,
+`candidate_valid_region_pixels`, `ideal_valid_region_pixels`, `common_valid_region_pixels`), so a vanishing
+region cannot hide behind a pooled number. No aggregate winner, ranking, composite or score is produced.
+
+Run:
+
+```bash
+.venv/bin/python -I -m bench.multiscale_layered_render_audit --out /tmp/mlxstab-multiscale-layered-default.json
+```
+
+Default run results across seeds `0,1,2` (MAE is normalized intensity in `[0, 1]`; ranges are min-max across
+the three seed records; the report keeps every seed/pair/region record separate). The ideal semantic masks
+cover 230,400 output pixels total in the static control: 154,620 background, 46,740 foreground and 29,040
+subject. Paired L1 budgets can vary by seed.
+
+| condition | multiscale setting ↔ paired L1 budget(s) | whole-frame RGB MAE range (MS / L1) | subject-region RGB MAE range (MS / L1) |
+| --- | --- | ---: | ---: |
+| `static_no_parallax` | all four ↔ `0` | 0 / 0 | 0 / 0 |
+| `parallax_shake` | `drop_all_detail` ↔ `1.5, 1.6` | 0.01268–0.01600 / 0.01350–0.01737 | 0.01333–0.01403 / 0.01492–0.01579 |
+| `parallax_shake` | `drop_finest` ↔ `0.4, 0.5` | 0.01198–0.01983 / 0.01200–0.01900 | 0.02165–0.03180 / 0.02038–0.03041 |
+| `parallax_shake` | `drop_finest_and_medium` ↔ `1.1, 1.3` | 0.00851–0.01218 / 0.00991–0.01384 | 0.00696–0.00854 / 0.01036–0.01175 |
+| `parallax_shake` | `keep_all_detail` ↔ `0` | 0.01435–0.02226 / same | 0.02699–0.03546 / same |
+| `parallax_subject_jolt` | `drop_all_detail` ↔ `1.1` | 0.02175–0.02184 / 0.02120–0.02125 | 0.02839–0.02871 / 0.01851–0.01875 |
+| `parallax_subject_jolt` | `drop_finest` ↔ `0.6` | 0.01732–0.01746 / 0.02835–0.02853 | 0.02533–0.02614 / 0.03866–0.03955 |
+| `parallax_subject_jolt` | `drop_finest_and_medium` ↔ `0.9` | 0.01767–0.01783 / 0.02376–0.02383 | 0.02567–0.02647 / 0.02688–0.02724 |
+| `parallax_subject_jolt` | `keep_all_detail` ↔ `0` | 0.01708–0.01720 / same | 0.02530–0.02606 / same |
+
+In the `static_no_parallax` control every candidate reproduces the ideal layered render exactly (MAE 0,
+full coverage in every region). Under `parallax_shake`, `drop_all_detail` and `drop_finest_and_medium` show
+lower whole-frame MAE than their nearest-crop L1 pairs across the three seeds, while `drop_finest` trades the
+whole-frame number against its L1 pair; under `parallax_subject_jolt` the reversal is mixed
+(`drop_all_detail` has *higher* whole-frame MAE than its L1 pair and lower subject-region MAE, while
+`drop_finest`/`drop_finest_and_medium` show lower whole-frame MAE but a comparable or higher subject-region
+baseline). These are **synthetic, narrow observations, not a multiscale advantage**. The largest crop-proxy
+mismatch across all 36 pairs was **0.04982**, within the fixed **0.05** tolerance; the minimum whole-frame
+common-valid coverage was **0.9634** (`parallax_shake`). The background/foreground regions carry nonzero
+error even for the identity rendering `keep_all_detail` in the parallax conditions, confirming that parallax
+and the subject's own motion genuinely alter the known-truth render.
+
+Limitations. Deterministic synthetic **three-layer caricature**, not real footage: layer "depth" is a fixed
+scalar displacement multiplier, not a physical depth map; foreground/subject are axis-aligned rectangles with
+hard thresholded opacity, not geometry, segmentation or soft alpha; warps are **translation-only** pure-NumPy
+bilinear (no rotation, scale, perspective, rolling shutter or lens); the candidate is a **single uniform
+camera warp per frame** that cannot represent per-layer parallax or independent subject motion; ideal
+semantic masks are the ideal render's layer assignments and region metrics use the common candidate/ideal
+valid support inside each region; rendered RGB MAE/RMS on a synthetic cartoon is **not perceptual quality**;
+coverage is a geometric source-validity fraction, not a real stabilizer crop. The four fixed multiscale
+weights and the predeclared uniform L1 budget grid are reported verbatim and nothing is tuned or ranked;
+each pair and region is reported separately with no pooled score or winner. Errors here do not translate to
+real footage, and no real-scene benefit is established.
+
+Next gate: run the layered comparison on distinct real source windows with human-reviewed crops and layer/
+subject-motion stress, and check whether the parallax/subject-region tradeoff is repeatable beyond this
+synthetic scene, before considering any multiscale advantage. Keep fractal scaling out of scope until the
+non-fractal results are repeatable.
+
 ## What works
 
 - `mlxstab/warp.py`: Metal sampler (bilinear / Catmull-Rom / Lanczos-3, zeros/border, align_corners). `grid_sample` max abs error vs torch 1.2e-7 .. 2.4e-7. Forward only.
