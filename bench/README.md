@@ -1172,6 +1172,38 @@ directly. The full `.claude/verify.sh` passed **889 tests in 30.89 s**. No produ
 The next gate is more distinct source windows plus a
 human-reviewed rendered-quality comparison before any production wiring.
 
+### Temporal border-fill pilot (diagnostic)
+
+`bench.temporal_border_fill_pilot` is a **research-only, offline** diagnostic for the no-source border pixels
+that `stabilize` zeroes: it reads one successful `run_case` manifest, streams its retained output video and
+co-timed gray mask through a **bounded** sliding window (at most `2*radius + 1` decoded frames, never the whole
+clip) and writes one candidate MP4 plus one adjacent atomic JSON. For each frame and each mask-invalid pixel
+(`mask 255` = no source) it copies the color from the nearest temporal neighbor (`distance = 1..radius`) where
+that pixel is valid; when the equidistant previous and next frames are both valid it writes their truncated
+integer mean. Donors are taken only from the **original neighbor frames and masks**, so a filled pixel is never
+reused as a donor; pixels with no valid donor within `radius` are left unchanged and already-valid pixels are
+never modified.
+
+This is a **diagnostic heuristic, not a production default**: copying a border pixel forward or backward in
+time can **ghost moving content** (an object crossing the border within `radius` frames can leave a stale
+duplicate). The report records only per-frame `invalid`/`filled`/`unresolved` counts and fractions plus the
+candidate hash and the recomputed output CFR verification; it makes **no quality claim**, selects no threshold
+and changes no default. The candidate is encoded at the manifest's exact frame count/rate/resolution, refused if
+it would exceed Gemini's inline cap (so it can be submitted later with the existing local review tooling), and
+never overwrites an existing artifact. Validation requires a successful `run_case` manifest, existing
+video/mask files with matching dimensions/fps/frame count/CFR PTS, `timeline_alignment.aligned = true`, and a
+positive integer `--radius` (max 30). No network call is made.
+
+```bash
+.venv/bin/python -m bench.temporal_border_fill_pilot \
+    out/bench/RUN/manifest.json --radius 3 \
+    --out-video out/bench/RUN/temporal_fill_r3.mp4
+```
+
+Focused tests: `tests/test_temporal_border_fill_pilot.py` (nearest-donor preference, symmetric tie averaging,
+no-donor passthrough, untouched valid pixels, bounded window, count/cadence mismatch, inline cap and overwrite
+refusal), all with cheap fakes.
+
 ### Gemini blind visual review
 
 For a direct raw-versus-stabilized visual check, `bench.real_pair_review` makes a synchronized comparison
