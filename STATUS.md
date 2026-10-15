@@ -2077,8 +2077,12 @@ The sign is explicit and tested: with a pure forward translation `H` of `(tx, ty
 the path follows the scene shift and `delta = P - C` with `P = C` reproduces the observed panel. The
 reduction is **translation-only**: a rotation about the frame centre gives `C_t = 0` even though the composed
 map is not the identity, so rotation, scale, shear, perspective and depth are ignored. Side assignment is
-randomised from the fixed recorded seed `20240517`; the MP4s carry only `A`/`B` and the hidden mapping lives
-only in the JSON report. Manifest/provenance refusals are explicit: source-hash, window, dimension, fps,
+randomised from a **per-run seed** that `derive_blinding_seed` derives with stdlib SHA-256 from the **fixed
+base seed** `20240517` plus the run's stable provenance (`source.sha256`, `source.window.start_s`,
+`source.window.duration_s`, `run_id`), so different windows generally blind independently while one run
+replays bit-for-bit; the derived seed is recorded in `blinding.seed` (with the base seed in
+`blinding.base_seed`), the MP4s carry only `A`/`B` and the hidden mapping lives only in the JSON report.
+Manifest/provenance refusals are explicit: source-hash, window, dimension, fps,
 frame-count, interlace and deinterlace mismatches (plus a non-successful run or a manifest that does not name
 this motion) raise a stable `code`. The report contains path metrics, crop proxies, max correction and
 geometric-support mean/min only; it writes **no image-quality score, ranking or winner** and changes no
@@ -2112,12 +2116,18 @@ better.
 
 Checks: `codegraph sync .` indexed the new source module and `codegraph affected bench/multiscale_real_review.py`
 reported no test files (dynamic test relationship), so the relevant tests were run directly. The focused
-suite `tests/test_multiscale_real_review.py` passed **17 tests**, and `.claude/verify.sh` passed **1054 tests
-in 63.44 s**. Generated clips
+suite `tests/test_multiscale_real_review.py` passed **19 tests**, and `.claude/verify.sh` passed **1056 tests
+in 61.32 s** after the per-run blinding update. Generated clips
 and `review.json` were inspected: 4 MP4s at `960x270`/120 frames/`60000/1001`, both `A`/`B` labels inked and
-distinct, hidden mapping matching the recorded blinding draw, and the report JSON-safe, path-free, with no
-quality/winner/ranking field. Artifacts stay under ignored
+distinct, hidden mapping matching the recorded per-run blinding draw, and the report JSON-safe, path-free,
+with no quality/winner/ranking field. Artifacts stay under ignored
 `out/bench/gemini_review/t177_60_2s_multiscale_ab/` and are not committed.
+
+A second temporal window from the same source was also rendered: `out/bench/independent_00177_t000_1s`
+(`start 0.0 s`, `duration 1.0 s`, 60 frames) produced four more A/B clips under
+`out/bench/gemini_review/t177_00_1s_multiscale_ab/`. Its source hash also verified. The derived assignment is
+different from t060, but t000 and t060 are two windows of the **same source**, not independent scenes. Both
+windows remain local review material; no Gemini verdict has been recorded.
 
 Review status. The Gemini visual review of the four clips is **still pending**: the Mac is locked, so the
 **user is requested to unlock it** before the blinded A/B comparison can be viewed. No visual verdict exists
@@ -2130,9 +2140,9 @@ and selects no winner; the videos are for local human viewing only. The fixed mu
 are reported verbatim and nothing is tuned; nearest-crop pairing is descriptive. Errors here do not
 establish any multiscale advantage.
 
-Next gate: human/Gemini review of the four clips on this and other **distinct real windows**, with
-crop-proxy-matched pairs, to see whether any visible difference is repeatable; keep any claim out of scope
-until then. No production change.
+Next gate: Gemini/human review of the eight clips from both windows, then repeat on a **different source**
+before treating any visible difference as repeatable; keep any claim out of scope until then. No production
+change.
 
 ## What works
 

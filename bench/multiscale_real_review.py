@@ -23,8 +23,9 @@ Pipeline (all fixed, nothing tuned):
    (:func:`bench.multiscale_motion_audit.nearest_crop_index`), and backward-warp the observed panels one
    frame at a time with :func:`bench.multiscale_render_audit.backward_warp`.
 5. Write one two-panel A/B MP4 per comparison through :class:`mlxstab.media.Encoder`. Which side is
-   multiscale and which is L1 is randomised from a fixed recorded seed; the videos only carry ``A``/``B``
-   bitmap labels and the hidden mapping is written to the JSON report.
+   multiscale and which is L1 is randomised from a per-run seed derived (SHA-256, :func:`derive_blinding_seed`)
+   from a fixed base seed :data:`BLINDING_SEED` plus the run's stable provenance; the videos only carry
+   ``A``/``B`` bitmap labels and the hidden mapping plus the derived seed are written to the JSON report.
 
 Camera convention (explicit, and tested)
 ----------------------------------------
@@ -53,6 +54,7 @@ go under the ignored ``out/`` tree by default (``RUN_DIR/review``).
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import math
 import random
@@ -81,7 +83,8 @@ DEFAULT_OUT_HEIGHT = 270
 # interlaced source, and exactly what :func:`mlxstab.media.decode` applies when ``deinterlace=True``.
 BWDIF_VF = "bwdif=mode=send_field:parity=auto:deint=all"
 
-# Fixed, recorded blinding seed. Side assignment is drawn once per comparison, in order, from this seed.
+# Fixed base blinding seed. ``run_review`` derives a reproducible per-run seed from this base seed plus the
+# run's stable provenance (source sha256, window start/duration, run_id); see :func:`derive_blinding_seed`.
 BLINDING_SEED = 20240517
 
 # 5x7 bitmap font (only the labels a review clip needs). ``#`` marks an ink pixel.
@@ -127,8 +130,8 @@ LIMITATIONS = (
     "handling",
     "downscaled to 480x270 before warping: the review is a small-panel visual aid, not a full-resolution render",
     "no image-quality metric is computed; the report has path/crop/support numbers only and selects no winner",
-    "A/B side assignment is randomised from a fixed recorded seed and is hidden from the video (the mapping "
-    "lives only in the JSON report)",
+    "A/B side assignment is randomised from a per-run seed derived from a fixed base seed plus stable run "
+    "provenance and is hidden from the video (the mapping and derived seed live only in the JSON report)",
     "the fixed multiscale retention weights and the predeclared L1 budget grid are reported verbatim; nothing "
     "is tuned and no per-clip selection is made",
     "nearest-crop pairing is descriptive: it produces no winner, rank, score, aggregate or tuned selection",
@@ -136,10 +139,10 @@ LIMITATIONS = (
 )
 
 REVIEW_POLICY = (
-    "Each comparison is a blinded two-panel A/B clip; the panel mapping is randomised from a fixed recorded "
-    "seed and written only to the JSON report. Every path/crop/support number is reported separately per pair "
-    "and per side. No aggregate winner, ranking, total score or image-quality metric is computed and no "
-    "candidate or family is asserted superior."
+    "Each comparison is a blinded two-panel A/B clip; the panel mapping is randomised from a per-run seed "
+    "derived from a fixed base seed plus stable provenance and written only to the JSON report. Every "
+    "path/crop/support number is reported separately per pair and per side. No aggregate winner, ranking, "
+    "total score or image-quality metric is computed and no candidate or family is asserted superior."
 )
 
 
@@ -516,6 +519,26 @@ def blind_assignment(seed, count):
     return [bool(rng.random() < 0.5) for _ in range(int(count))]
 
 
+def derive_blinding_seed(base_seed, source_sha256, start_s, duration_s, run_id):
+    """Derive a reproducible per-run blinding seed from the fixed base seed and stable run provenance.
+
+    ``run_review`` uses this instead of :data:`BLINDING_SEED` directly so that different source windows
+    generally blind independently while any single run replays bit-for-bit. The seed is the first 8 bytes
+    (big-endian) of the SHA-256 of the base seed, the source sha256 and the window ``start_s``/``duration_s``
+    and ``run_id`` (all stable in the manifest). Uses only :mod:`hashlib` from the standard library and
+    returns a non-negative integer accepted by :func:`blind_assignment`. ``start_s`` and ``duration_s`` are
+    encoded via :meth:`float.hex` so the result is exact and platform-independent.
+    """
+    payload = "\n".join([
+        f"base_seed={int(base_seed)}",
+        f"source_sha256={source_sha256}",
+        f"start_s={float(start_s).hex()}",
+        f"duration_s={float(duration_s).hex()}",
+        f"run_id={run_id}",
+    ]).encode("utf-8")
+    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big")
+
+
 # --------------------------------------------------------------------------------------
 # runner
 # --------------------------------------------------------------------------------------
@@ -610,9 +633,10 @@ def run_review(run_dir, *, out_dir=None, motion_name=DEFAULT_MOTION_NAME,
     Loads and cross-checks the motion payload/manifest (see :func:`load_review_inputs`), reduces the composed
     global homographies to the translation path ``C_t``, scales it into panel pixels, builds the four fixed
     multiscale-vs-nearest-crop L1 comparisons and renders each as one two-panel A/B MP4. The side mapping is
-    randomised from :data:`BLINDING_SEED` and recorded only in the report. No image-quality metric, winner or
-    ranking is computed. Validation refusals raise :class:`ReviewError`; malformed motion raises
-    ``MotionPayloadError``. ``write=False`` skips clip and report output (metrics are still computed).
+    randomised from a per-run seed derived from :data:`BLINDING_SEED` and the run's stable provenance (see
+    :func:`derive_blinding_seed`) and the derived seed is recorded only in the report. No image-quality
+    metric, winner or ranking is computed. Validation refusals raise :class:`ReviewError`; malformed motion
+    raises ``MotionPayloadError``. ``write=False`` skips clip and report output (metrics are still computed).
     """
     out_width = _validate_dim(out_width, "out_width")
     out_height = _validate_dim(out_height, "out_height")
@@ -633,7 +657,10 @@ def run_review(run_dir, *, out_dir=None, motion_name=DEFAULT_MOTION_NAME,
     observed_path = scale_path(full_path, src_w, src_h, out_width, out_height)
 
     records = _plan_pairs(observed_path, times)
-    assignment = blind_assignment(BLINDING_SEED, len(records))
+    blinding_seed = derive_blinding_seed(
+        BLINDING_SEED, prov["source_sha256"], prov["source_window"]["start_s"],
+        prov["source_window"]["duration_s"], prov["run_id"])
+    assignment = blind_assignment(blinding_seed, len(records))
 
     source_path = prov.get("source_path")
     _require(isinstance(source_path, str) and source_path.strip(), "source_path_missing",
@@ -745,7 +772,12 @@ def run_review(run_dir, *, out_dir=None, motion_name=DEFAULT_MOTION_NAME,
             "scale": {"x": out_width / src_w, "y": out_height / src_h},
         },
         "blinding": {
-            "seed": int(BLINDING_SEED),
+            "seed": int(blinding_seed),
+            "base_seed": int(BLINDING_SEED),
+            "seed_derivation": (
+                "sha256 of the fixed base seed plus stable provenance (source_sha256, source.window.start_s, "
+                "source.window.duration_s, run_id), first 8 bytes big-endian; see derive_blinding_seed"
+            ),
             "rule": "one random draw per comparison: True => multiscale is the left/A panel, False => L1 is",
             "assignment": ["multiscale" if left else "l1" for left in assignment],
             "hidden_mapping": "recorded per pair below and in each clip's blind_mapping; the MP4 carries only A/B",
@@ -844,6 +876,7 @@ __all__ = [
     "draw_bitmap_label",
     "assemble_ab_panel",
     "blind_assignment",
+    "derive_blinding_seed",
     "run_review",
     "build_parser",
     "main",

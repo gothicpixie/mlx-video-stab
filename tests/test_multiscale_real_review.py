@@ -2,9 +2,10 @@
 
 Coverage: ``frame_center`` / ``composed_translation_path`` sign on pure translations built from real
 ``mlxstab.motion.Fit`` objects, ``scale_path``, ``correction_metrics`` and ``support_summary``,
-``resize_bilinear`` / ``warp_panel`` / the A/B bitmap labels, the deterministic ``blind_assignment``,
-``manifest_provenance`` / ``load_review_inputs`` refusals for missing and mismatched provenance, and a fully
-mocked ``run_review`` that checks four outputs, the fixed side mapping and the absence of any quality score.
+``resize_bilinear`` / ``warp_panel`` / the A/B bitmap labels, the deterministic ``blind_assignment`` and the
+per-run ``derive_blinding_seed`` provenance derivation, ``manifest_provenance`` / ``load_review_inputs``
+refusals for missing and mismatched provenance, and a fully mocked ``run_review`` that checks four outputs,
+the derived per-run side mapping and the absence of any quality score.
 Pure NumPy plus the motion npz writer: no MLX, no FFmpeg, no production default is changed.
 """
 import json
@@ -263,6 +264,22 @@ def test_blind_assignment_is_deterministic_and_seed_bound():
         R.blind_assignment(R.BLINDING_SEED, -1)
 
 
+def test_derive_blinding_seed_is_stable_and_provenance_bound():
+    base = R.BLINDING_SEED
+    derived = R.derive_blinding_seed(base, "abc", 0.0, 2.0, "run-1")
+    assert isinstance(derived, int) and derived >= 0
+    # Same provenance replays bit-for-bit.
+    assert derived == R.derive_blinding_seed(base, "abc", 0.0, 2.0, "run-1")
+    # Every stable provenance field feeds the seed, so a different window/run/source/base generally differs.
+    assert derived != R.derive_blinding_seed(base, "abc", 0.0, 2.0, "run-2")
+    assert derived != R.derive_blinding_seed(base, "abc", 30.0, 2.0, "run-1")
+    assert derived != R.derive_blinding_seed(base, "abc", 0.0, 4.0, "run-1")
+    assert derived != R.derive_blinding_seed(base, "def", 0.0, 2.0, "run-1")
+    assert derived != R.derive_blinding_seed(base + 1, "abc", 0.0, 2.0, "run-1")
+    # The derived seed is a valid blind_assignment seed.
+    assert R.blind_assignment(derived, 4) == R.blind_assignment(derived, 4)
+
+
 # --------------------------------------------------------------------------------------
 # provenance: missing and mismatched
 # --------------------------------------------------------------------------------------
@@ -390,9 +407,15 @@ def test_run_review_mocked_writes_four_outputs_with_fixed_mapping_and_no_score(t
         assert len(encoder.frames) == T
         assert all(frame.shape == (36, 96, 3) for frame in encoder.frames)
 
-    # The blind mapping is the fixed deterministic draw, hidden per pair and labelled A/B only.
-    assignment = R.blind_assignment(R.BLINDING_SEED, 4)
-    assert report["blinding"]["seed"] == R.BLINDING_SEED
+    # The blind mapping is the deterministic per-run draw, hidden per pair and labelled A/B only.
+    _, _, prov = R.load_review_inputs(run)
+    derived = R.derive_blinding_seed(
+        R.BLINDING_SEED, prov["source_sha256"], prov["source_window"]["start_s"],
+        prov["source_window"]["duration_s"], prov["run_id"])
+    assignment = R.blind_assignment(derived, 4)
+    assert report["blinding"]["seed"] == derived
+    assert report["blinding"]["seed"] != R.BLINDING_SEED
+    assert report["blinding"]["base_seed"] == R.BLINDING_SEED
     assert report["blinding"]["assignment"] == ["multiscale" if v else "l1" for v in assignment]
     for record, left_is_multiscale in zip(report["pairs"], assignment):
         assert record["blind_mapping"]["left_panel"] == ("multiscale" if left_is_multiscale else "l1")
@@ -420,3 +443,22 @@ def test_run_review_write_false_skips_clips(tmp_path, monkeypatch):
     assert _FakeEncoder.instances == []
     assert not (tmp_path / "review" / "review.json").exists()
     assert report["output"]["comparisons"] == 4
+
+
+def test_run_review_derives_independent_seed_per_window(tmp_path, monkeypatch):
+    W, H, T, fps = 64, 48, 8, 30.0
+    run_a, _, _, _ = _build_run(tmp_path / "a", W=W, H=H, T=T, fps=fps)
+    run_b, _, _, _ = _build_run(
+        tmp_path / "b", W=W, H=H, T=T, fps=fps,
+        manifest_mutate=lambda m: m["source"]["window"].update(start_s=30.0))
+    _mock_media(monkeypatch, W, H, T, fps)
+
+    first = R.run_review(run_a, out_dir=tmp_path / "ra", out_width=48, out_height=36, write=False)
+    second = R.run_review(run_b, out_dir=tmp_path / "rb", out_width=48, out_height=36, write=False)
+    # Different source windows generally get different derived seeds and assignment patterns.
+    assert first["blinding"]["seed"] != second["blinding"]["seed"]
+    assert first["blinding"]["base_seed"] == R.BLINDING_SEED
+    # The same run replays to the same derived seed and mapping.
+    replay = R.run_review(run_a, out_dir=tmp_path / "ra2", out_width=48, out_height=36, write=False)
+    assert replay["blinding"]["seed"] == first["blinding"]["seed"]
+    assert replay["blinding"]["assignment"] == first["blinding"]["assignment"]
