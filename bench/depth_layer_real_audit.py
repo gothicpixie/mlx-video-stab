@@ -16,6 +16,7 @@ LIMITATIONS = [
     "depth strata are per-frame relative-rank bins, not metric depth or near/far labels",
     "an affine fit to scene flow is only a camera-motion proxy and may include parallax or moving objects",
     "the Gaussian-smoothed path and its sigma are diagnostic choices, not a selected production policy",
+    "cycle-valid means the bidirectional cycle sample is finite and in bounds; no residual threshold is selected",
     "coverage is geometric and uses no image rendering, texture, or perceptual assessment",
     "each result describes one supplied source window; windows must be audited independently",
 ]
@@ -51,9 +52,9 @@ def _fit(depth, flow, valid, *, rank_map=None, rank_id=None):
     return T, int(support.sum()), _finite_float(np.median(resid))
 
 
-def _rank_bins(depth, valid, n_bins):
+def _rank_bins(depth, support, n_bins):
     """Assign stable equal-count quantile ranks; equal values stay in the same bin."""
-    use = valid & np.isfinite(depth)
+    use = support & np.isfinite(depth)
     values = depth[use]
     assigned = np.full(depth.shape, -1, np.int64)
     if not values.size:
@@ -164,7 +165,8 @@ def audit_depth_layer_window(observations: Sequence[dict], *, n_bins: int = 4,
     rank_sets = []
     pair_details = []
     for depth, flow, valid in obs:
-        ranks, ids = _rank_bins(depth, valid, n_bins)
+        rank_support = valid & np.isfinite(depth) & np.isfinite(flow).all(axis=2)
+        ranks, ids = _rank_bins(depth, rank_support, n_bins)
         rank_sets.append(ids)
         pooled_t, pooled_n, pooled_resid = _fit(depth, flow, valid)
         policies["pooled"].append(pooled_t)
