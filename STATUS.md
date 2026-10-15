@@ -1855,10 +1855,10 @@ clip; the audit caps the sequence at the L1 single-window limit of 600 samples. 
 `0.1`, matching the production default; an initial zero-fidelity run exposed a free constant-offset ambiguity
 on static input, so that run is not evidence.
 
-The default run covers 180 samples at 60 fps with three seeds and the three controls `static`, `pan_no_shake`,
-and `pan_shake`. Every method preserved the static control exactly. For pan plus shake, these per-pair ranges
-across the three seeds show the tradeoff; each metric is `multiscale / paired L1`, and units are synthetic path
-units, not rendered pixels or perceptual scores:
+The default run covers 180 samples at 60 fps with three seeds and five controls: `static`, `pan_no_shake`,
+`pan_shake`, `pan_stochastic_shake`, and `pan_jolt`. Every method preserved the static control exactly. For
+periodic pan plus shake, these per-pair ranges across the three seeds show the tradeoff; each metric is
+`multiscale / paired L1`, and units are synthetic path units, not rendered pixels or perceptual scores:
 
 | multiscale setting ↔ L1 budget | crop mismatch | pan error RMS | residual second-difference RMS |
 | --- | ---: | ---: | ---: |
@@ -1867,15 +1867,30 @@ units, not rendered pixels or perceptual scores:
 | `drop_finest_and_medium` ↔ `1.3` | 0.01321–0.04649 | 0.01481–0.04082 / 0.09195–0.13531 | 0.001257–0.001346 / 0.000237–0.002975 |
 | `keep_all_detail` ↔ `0.0` | 0 | 0.6225 / 0.6225 | 0.75595–0.75706 / 0.75595–0.75706 |
 
-In this cartoon, `drop_all_detail` has lower pan error and residual jitter than its nearest-crop L1 pair across
-the three shake seeds, while `drop_finest_and_medium` lowers pan error but has seed-sensitive jitter relative
-to L1. The pan-only control also shows candidate-dependent path error even without shake. This is a useful
-synthetic signal, not a quality result: it has translation only, a short sinusoidal pan and two sinusoidal shake
-bands, with no image rendering, rotation, depth, subject motion or occlusion. It does not establish a general
-multiscale advantage. The updated focused suite passed **54 tests** and the full `.claude/verify.sh` passed
-**972 tests in 63.74 s**. Next: extend the predeclared controls to non-periodic motion and jolts, then test
-rendered synthetic/real clips at matched valid coverage and delay. Consider fractal scaling only after a
-non-fractal multiscale result repeats on held-out controls.
+The added non-periodic controls use the same fixed candidates. `pan_stochastic_shake` is a stationary colored
+AR(1) process (explicitly not fractal and not 1/f noise); `pan_jolt` is a one-sided transient with exponential
+recovery. Their matched-crop ranges are:
+
+| control / multiscale setting ↔ L1 budget | crop mismatch | pan error RMS | residual second-difference RMS |
+| --- | ---: | ---: | ---: |
+| AR(1) `drop_all_detail` ↔ `1.7` | 0.00355–0.04802 | 0.1899–0.2288 / 0.2466–0.4175 | 0.000088–0.000110 / 0.000202–0.000264 |
+| AR(1) `drop_finest` ↔ `0.6` | 0.01187–0.04145 | 0.3346–0.4746 / 0.2024–0.4234 | 0.0791–0.1021 / 0.00515–0.02767 |
+| AR(1) `drop_finest_and_medium` ↔ `1.4` | 0.02176–0.04282 | 0.2089–0.2748 / 0.2082–0.3975 | 0.00212–0.00426 / 0.00021–0.00078 |
+| jolt `drop_all_detail` ↔ `1.3` | 0.00535 | 0.2144 / 0.3895 | 0.000133 / 0.000268 |
+| jolt `drop_finest` ↔ `0.6` | 0.04847 | 0.3449 / 0.5740 | 0.02810 / 0.01238 |
+| jolt `drop_finest_and_medium` ↔ `0.9` | 0.00021 | 0.3023 / 0.3847 | 0.001893 / 0.000872 |
+
+In these path proxies, `drop_all_detail` has lower pan error and residual jitter than its nearest-crop L1 pair
+for each of the three shake controls, at corrections around 1.3–1.7 units. Other multiscale settings trade
+pan error against jitter differently: for example, `drop_finest` has higher residual jitter than L1 in both
+non-periodic controls. The pan-only control also shows candidate-dependent path error despite having no shake.
+This is a promising signal for a deliberately narrow synthetic setting, not a quality result: the paths have
+translation only, a short sinusoidal pan and simple periodic/AR(1)/transient shake, with no rendered images,
+rotation, depth, subject motion or occlusion. It does not establish a general multiscale advantage. All 60
+default crop pairs stayed within the 0.05-unit tolerance. The updated focused suite passed **64 tests** and the
+full `.claude/verify.sh` passed **982 tests in 58.12 s**. Next: render these held-out-like synthetic controls
+and evaluate coverage and image shape, then use distinct real windows. Consider fractal scaling only after
+non-fractal multiscale behavior has a repeatable rendered benefit.
 
 ## What works
 

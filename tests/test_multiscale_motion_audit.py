@@ -4,9 +4,11 @@ The runner is exercised on the fixed synthetic fixture only: no media, no render
 wiring and no changed defaults. Coverage: determinism, independent metric recomputation, strict JSON safety
 and path-freedom, the explicit fixed parameter grids, the uniform zero-inclusive L1 budget grid, zero-budget
 identity, matched-crop pairing recomputation (ties to fixed grid order), window/overlap progress safety,
-offline temporal-access reporting, the L1-window sample cap on ``n``, the three default controls (static,
-pan_no_shake, pan_shake), malformed-input rejection, the absence of any ranking/winner/score field, and the
-CLI (stdout, ``--out`` and JSON error exits).
+offline temporal-access reporting, the L1-window sample cap on ``n``, all five default controls (static,
+pan_no_shake, pan_shake, pan_stochastic_shake, pan_jolt), the exact known-pan separation, the documented
+non-fractal AR(1) and jolt generation models, non-periodic motion of the two added stress controls,
+malformed-input rejection, the absence of any ranking/winner/score field, and the CLI (stdout, ``--out`` and
+JSON error exits).
 """
 import json
 import math
@@ -67,6 +69,16 @@ def _assert_metrics_close(got, want):
             assert got[key] == pytest.approx(value, rel=1e-9, abs=1e-12)
         else:
             assert got[key] == pytest.approx(value, rel=1e-9, abs=1e-12)
+
+
+def _autocorr(x, lag):
+    """Normalized autocorrelation of ``x`` at integer ``lag`` (0.0 when degenerate)."""
+    x = np.asarray(x, dtype=np.float64)
+    x = x - x.mean()
+    denom = float(np.dot(x, x))
+    if denom <= 0.0 or lag <= 0 or lag >= x.size:
+        return 0.0
+    return float(np.dot(x[:-lag], x[lag:]) / denom)
 
 
 # --------------------------------------------------------------------------------------
@@ -226,11 +238,171 @@ def test_multiple_seeds_and_conditions_are_reported_separately():
     assert len(rep["runs"]) == 4
 
 
-def test_default_conditions_include_all_three_controls():
-    # Every synthetic control (static, pan_no_shake, pan_shake) is part of the default report.
-    assert set(A.DEFAULT_CONDITIONS) == {"static", "pan_no_shake", "pan_shake"}
+# --------------------------------------------------------------------------------------
+# added non-fractal stress controls: stochastic AR(1) shake and fixed-time jolt
+# --------------------------------------------------------------------------------------
+
+def test_stochastic_control_is_deterministic_per_seed_and_varies_across_seeds():
+    one = A.synthetic_translation_fixture(seed=0, condition="pan_stochastic_shake")
+    again = A.synthetic_translation_fixture(seed=0, condition="pan_stochastic_shake")
+    np.testing.assert_array_equal(one["shake"], again["shake"])
+    np.testing.assert_array_equal(one["observed"], again["observed"])
+    other = A.synthetic_translation_fixture(seed=1, condition="pan_stochastic_shake")
+    assert not np.allclose(one["shake"], other["shake"])
+    # The intended pan is seed-independent ground truth; only the AR(1) realization changes with the seed.
+    np.testing.assert_array_equal(one["pan"], other["pan"])
+
+
+def test_stochastic_control_matches_its_documented_ar1_recursion():
+    n, fps, seed = 120, 30.0, 3
+    fx = A.synthetic_translation_fixture(n=n, fps=fps, seed=seed, condition="pan_stochastic_shake")
+    # Independently recompute the documented stationary colored AR(1) realization from the same seed.
+    rng = np.random.default_rng(seed)
+    expected = np.zeros((n, 2))
+    for d in range(2):
+        rho = A.STOCHASTIC_AR1_COEFFICIENT[d]
+        amp = A.STOCHASTIC_AR1_AMPLITUDE[d]
+        sigma = amp * math.sqrt(1.0 - rho * rho)
+        x = amp * float(rng.standard_normal())
+        for i in range(n):
+            x = rho * x + sigma * float(rng.standard_normal())
+            expected[i, d] = x
+    np.testing.assert_allclose(fx["shake"], expected, rtol=0, atol=1e-12)
+    assert not np.allclose(fx["shake"], np.zeros_like(fx["shake"]))
+
+
+def test_jolt_control_is_localized_at_a_fixed_duration_fraction():
+    n, fps = 180, 60.0
+    fx = A.synthetic_translation_fixture(n=n, fps=fps, seed=0, condition="pan_jolt")
+    times = fx["times"]
+    t = times - times[0]
+    duration = float(times[-1] - times[0])
+    jolt_time = float(fx["jolt_time_seconds"])
+    assert jolt_time == pytest.approx(A.JOLT_TIME_FRACTION * duration)
+    assert 0.0 < jolt_time < duration
+    before = t < jolt_time - 1e-12
+    after = t >= jolt_time - 1e-12
+    assert before.any() and after.any()
+    for d in range(2):
+        col = fx["shake"][:, d]
+        assert np.allclose(col[before], 0.0, atol=1e-12)      # no displacement before the fixed jolt time
+        assert np.max(np.abs(col[after])) > 0.0
+        assert np.argmax(np.abs(col)) == int(np.argmax(after))  # peaks at the jolt instant
+        assert np.max(np.abs(col)) <= abs(A.JOLT_AMPLITUDE[d]) + 1e-12
+
+
+def test_jolt_control_recovers_exponentially_after_the_jolt():
+    n, fps = 180, 60.0
+    fx = A.synthetic_translation_fixture(n=n, fps=fps, seed=0, condition="pan_jolt")
+    times = fx["times"]
+    t = times - times[0]
+    after = t >= float(fx["jolt_time_seconds"]) - 1e-12
+    dt = 1.0 / fps
+    expected_ratio = math.exp(-dt / A.JOLT_DECAY_SECONDS)
+    for d in range(2):
+        tail = fx["shake"][after, d]
+        assert tail.size > 3
+        # One-sided exponential recovery: every consecutive post-jolt sample keeps the same decay ratio.
+        ratios = tail[1:] / tail[:-1]
+        assert np.allclose(ratios, expected_ratio, rtol=1e-9, atol=1e-12)
+        assert np.all(np.diff(np.abs(tail)) <= 1e-12)          # monotone decay in magnitude
+
+
+def test_new_controls_keep_exact_known_pan_separation():
+    times = A.synthetic_translation_fixture(seed=0, condition="pan_no_shake")["times"]
+    t = times - times[0]
+    expected_pan = np.stack([
+        A.PAN_AMPLITUDE[d] * np.sin(2.0 * math.pi * t / A.PAN_PERIOD_SECONDS + A.PAN_PHASE_RADIANS[d])
+        for d in range(2)
+    ], axis=1)
+    for condition in ("pan_stochastic_shake", "pan_jolt"):
+        for seed in (0, 1):
+            fx = A.synthetic_translation_fixture(seed=seed, condition=condition)
+            np.testing.assert_allclose(fx["pan"], expected_pan, rtol=0, atol=1e-12)
+            np.testing.assert_allclose(fx["observed"] - fx["pan"], fx["shake"], rtol=0, atol=1e-12)
+            assert not np.allclose(fx["shake"], 0.0)
+
+
+def test_zero_shake_controls_are_exactly_pan_only():
+    for condition in ("static", "pan_no_shake"):
+        for seed in (0, 1):
+            fx = A.synthetic_translation_fixture(seed=seed, condition=condition)
+            np.testing.assert_array_equal(fx["shake"], np.zeros_like(fx["shake"]))
+            np.testing.assert_array_equal(fx["observed"], fx["pan"])
+    static = A.synthetic_translation_fixture(seed=0, condition="static")
+    np.testing.assert_array_equal(static["pan"], np.zeros_like(static["pan"]))
+    assert np.any(A.synthetic_translation_fixture(seed=0, condition="pan_no_shake")["pan"] != 0.0)
+
+
+def test_new_controls_contain_non_periodic_motion():
+    # pan_stochastic_shake: stationary colored AR(1) is persistent (positive lag-1 autocorrelation) yet it
+    # does not repeat at the pan period or at the sinusoidal shake periods, and it is not a single-frequency
+    # tone. This is a motion-shape assertion only; it makes no method-superiority claim.
+    fx = A.synthetic_translation_fixture(seed=0, condition="pan_stochastic_shake")
+    n = fx["observed"].shape[0]
+    for d in range(2):
+        x = fx["shake"][:, d]
+        assert _autocorr(x, 1) > 0.0                       # colored/persistent, not white noise
+        for period in (A.PAN_PERIOD_SECONDS, A.MEDIUM_SHAKE_PERIOD_SECONDS, A.FAST_SHAKE_PERIOD_SECONDS):
+            lag = int(round(period * A.DEFAULT_FPS))
+            assert abs(_autocorr(x, lag)) < 0.9            # a periodic signal would repeat (corr ~ 1)
+        spectrum = np.abs(np.fft.rfft(x - x.mean())) ** 2
+        assert spectrum[1:].sum() > 0.0
+        assert spectrum[1:].max() / spectrum[1:].sum() < 0.75   # broadband, not a pure sinusoid
+
+    # pan_jolt: a one-sided transient (zero before, single-signed exponential recovery after), so it is not
+    # periodic. Again a motion-shape assertion only.
+    fj = A.synthetic_translation_fixture(seed=0, condition="pan_jolt")
+    tj = fj["times"] - fj["times"][0]
+    jolt_time = float(fj["jolt_time_seconds"])
+    before = tj < jolt_time - 1e-12
+    after = ~before
+    for d in range(2):
+        x = fj["shake"][:, d]
+        assert np.allclose(x[before], 0.0, atol=1e-12)
+        tail = x[after]
+        assert np.max(np.abs(tail)) > 0.0
+        assert np.all(tail >= -1e-12) or np.all(tail <= 1e-12)   # no oscillation / zero crossings
+        assert np.all(np.diff(np.abs(tail)) <= 1e-12)
+
+
+def test_generation_models_and_constants_are_recorded_and_non_fractal():
+    report = A.run_audit(seeds=(0,), conditions=("pan_stochastic_shake", "pan_jolt"))
+    defaults = report["fixture_defaults"]
+    models = defaults["condition_models"]
+    for condition in A.CONDITIONS:
+        assert condition in models and models[condition]
+    assert "not fractal" in models["pan_stochastic_shake"].lower()
+    assert "not 1/f" in models["pan_stochastic_shake"].lower()
+    assert "non-periodic" in models["pan_jolt"].lower()
+    assert defaults["stochastic_ar1_amplitude"] == [float(v) for v in A.STOCHASTIC_AR1_AMPLITUDE]
+    assert defaults["stochastic_ar1_coefficient"] == [float(v) for v in A.STOCHASTIC_AR1_COEFFICIENT]
+    assert defaults["jolt_amplitude"] == [float(v) for v in A.JOLT_AMPLITUDE]
+    assert defaults["jolt_decay_seconds"] == pytest.approx(A.JOLT_DECAY_SECONDS)
+    assert defaults["jolt_time_fraction"] == pytest.approx(A.JOLT_TIME_FRACTION)
+    for run in report["runs"]:
+        assert run["fixture"]["condition_model"] == models[run["condition"]]
+        assert run["fixture"]["condition_kind"] == A.CONDITION_KIND[run["condition"]]
+    limits = " ".join(report["limitations"]).lower()
+    assert "non-fractal" in limits
+    assert "ar(1)" in limits
+    assert "jolt" in limits
+
+
+def test_all_five_default_conditions_are_json_serializable():
+    report = A.run_audit(seeds=(0,), conditions=tuple(A.DEFAULT_CONDITIONS))
+    assert len(report["runs"]) == len(A.DEFAULT_CONDITIONS)
+    _assert_json_native(report)
+    text = json.dumps(report, allow_nan=False, sort_keys=True)
+    assert "NaN" not in text and "Infinity" not in text
+
+
+def test_default_conditions_include_all_five_controls():
+    # Every synthetic control (three original plus the two non-fractal stress controls) is in the default run.
+    expected = {"static", "pan_no_shake", "pan_shake", "pan_stochastic_shake", "pan_jolt"}
+    assert set(A.DEFAULT_CONDITIONS) == expected
     assert A.DEFAULT_CONDITIONS == A.CONDITIONS
-    assert set(A.parse_conditions(",".join(A.DEFAULT_CONDITIONS))) == set(A.CONDITIONS)
+    assert set(A.parse_conditions(",".join(A.DEFAULT_CONDITIONS))) == expected
 
     report = A.run_audit(seeds=(0,))
     assert [run["condition"] for run in report["runs"]] == list(A.DEFAULT_CONDITIONS)
@@ -375,6 +547,7 @@ def test_cli_emits_json_safe_error_for_bad_n(capsys):
 def test_parsers_validate_their_input():
     assert A.parse_seeds("0,1,2") == (0, 1, 2)
     assert A.parse_conditions("static,pan_shake") == ("static", "pan_shake")
+    assert A.parse_conditions("pan_stochastic_shake,pan_jolt") == ("pan_stochastic_shake", "pan_jolt")
     with pytest.raises(ValueError):
         A.parse_seeds("a,b")
     with pytest.raises(ValueError):
@@ -442,6 +615,24 @@ def test_pairs_are_reported_and_recompute_within_half_grid_step():
                 l1[best]["metrics"]["rms_second_difference_residual"])
             assert pair["crop_match_tolerance"] == pytest.approx(tol)
             assert pair["abs_crop_mismatch"] <= tol + 1e-9
+
+
+def test_default_run_crop_matching_stays_within_tolerance_across_all_five_conditions():
+    # The predeclared default run: 180 samples, seeds (0, 1, 2), all five controls. The existing matched-crop
+    # pairing must stay within the fixed half-grid tolerance for every multiscale candidate, with no tuning.
+    assert A.DEFAULT_N == 180
+    assert A.DEFAULT_SEEDS == (0, 1, 2)
+    assert len(A.DEFAULT_CONDITIONS) == 5
+    report = A.run_audit()
+    assert len(report["runs"]) == 5 * 3 == 15
+    assert [run["condition"] for run in report["runs"]] == [
+        c for c in A.DEFAULT_CONDITIONS for _ in A.DEFAULT_SEEDS]
+    tol = A.L1_CROP_MATCH_TOLERANCE
+    for run in report["runs"]:
+        assert len(run["pairs"]) == len(A.MULTISCALE_CANDIDATES)
+        for pair in run["pairs"]:
+            assert pair["crop_match_tolerance"] == pytest.approx(tol)
+            assert pair["abs_crop_mismatch"] <= tol + 1e-9, (run["condition"], run["seed"], pair)
 
 
 def test_pair_ties_resolve_to_the_earliest_grid_index():

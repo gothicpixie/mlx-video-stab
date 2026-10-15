@@ -23,10 +23,15 @@ the whole clip, so neither has a causal/streaming advantage; these are offline p
 online-latency measurements. The cap exists because a longer clip would push L1 into its overlapping-window
 branch and the two families would no longer see the same entire clip.
 
-The synthetic fixture is a deliberate slow pan (the known intended ground truth) plus optional faster/mid
-shake. Timestamps are **uniform** on purpose: ``l1_path_windowed`` is frame-indexed, so uniform spacing makes
-the frame clock and the elapsed-time clock agree and the fixed multiscale scales (seconds) and L1 budgets
-(path units) are compared on one clock.
+The synthetic fixture is a deliberate slow pan (the known intended ground truth) plus one optional
+perturbation. Timestamps are **uniform** on purpose: ``l1_path_windowed`` is frame-indexed, so uniform
+spacing makes the frame clock and the elapsed-time clock agree and the fixed multiscale scales (seconds) and
+L1 budgets (path units) are compared on one clock. Beyond the three original controls (``static``,
+``pan_no_shake``, ``pan_shake``) the default report adds two deliberately **non-fractal** stress controls:
+``pan_stochastic_shake`` (deterministic-seed stationary colored AR(1) shake with fixed per-channel
+amplitudes and coefficients; not 1/f noise) and ``pan_jolt`` (a fixed-time one-sided transient displacement
+with exponential recovery, placed at a fixed fraction of the clip duration). Both are stress controls only:
+they exercise the fixed grids on non-periodic motion and make no superiority claim.
 
 For every seed and every variant the report gives, **separately**:
 
@@ -45,7 +50,8 @@ does **not** optimize weights, does **not** tune per seed and does **not** asser
 is superior. Reports are JSON-serializable and path-free.
 
 Run ``python -m bench.multiscale_motion_audit [--seeds 0,1,2]
-[--conditions static,pan_no_shake,pan_shake] [--out f.json]`` (``n`` is capped at ``L1_WINDOW``).
+[--conditions static,pan_no_shake,pan_shake,pan_stochastic_shake,pan_jolt] [--out f.json]`` (``n`` is capped
+at ``L1_WINDOW``).
 """
 from __future__ import annotations
 
@@ -106,13 +112,64 @@ MEDIUM_SHAKE_AMPLITUDE = (0.9, 0.7)
 FAST_SHAKE_PERIOD_SECONDS = 0.05
 FAST_SHAKE_AMPLITUDE = (0.4, 0.3)
 
+# Stochastic stress control: deterministic-seed **stationary colored AR(1)** shake, one independent process
+# per channel d. This is a fixed AR(1) process, explicitly **not fractal** and **not 1/f noise**:
+#     x_t[d] = rho[d] * x_{t-1}[d] + sigma[d] * eps_t[d],  eps_t ~ N(0, 1),
+#     sigma[d] = amplitude[d] * sqrt(1 - rho[d]^2)   (stationary per-channel std is amplitude[d]),
+#     x_0[d] drawn from the stationary distribution N(0, amplitude[d]^2).
+STOCHASTIC_AR1_AMPLITUDE = (0.6, 0.5)
+STOCHASTIC_AR1_COEFFICIENT = (0.85, 0.72)
+
+# Jolt stress control: a single fixed-time one-sided transient displacement with exponential recovery, one
+# process per channel d. Explicitly non-periodic and non-fractal:
+#     jolt_d(t) = 0                                                       for t < t_jolt
+#     jolt_d(t) = JOLT_AMPLITUDE[d] * exp(-(t - t_jolt)/JOLT_DECAY_SECONDS)  for t >= t_jolt
+#     t_jolt = JOLT_TIME_FRACTION * clip_duration
+# The fixed fraction keeps the jolt inside any valid clip (MIN_SAMPLES <= n <= L1_WINDOW).
+JOLT_AMPLITUDE = (1.6, 1.1)
+JOLT_DECAY_SECONDS = 0.4
+JOLT_TIME_FRACTION = 0.5
+
 DEFAULT_N = 180
 DEFAULT_FPS = 60.0
 DEFAULT_SEEDS = (0, 1, 2)
-# All three synthetic controls are reported by default.
-DEFAULT_CONDITIONS = ("static", "pan_no_shake", "pan_shake")
-CONDITIONS = ("static", "pan_no_shake", "pan_shake")
+# All five synthetic controls are reported by default.
+DEFAULT_CONDITIONS = ("static", "pan_no_shake", "pan_shake", "pan_stochastic_shake", "pan_jolt")
+CONDITIONS = ("static", "pan_no_shake", "pan_shake", "pan_stochastic_shake", "pan_jolt")
 MIN_SAMPLES = 5
+
+# Exact generation model per condition, recorded in the report so a reader does not have to re-derive it.
+CONDITION_MODELS = {
+    "static": "observed = 0 (zero pan and zero perturbation)",
+    "pan_no_shake": (
+        "observed = pan; pan[d](t) = PAN_AMPLITUDE[d] * sin(2*pi*t/PAN_PERIOD_SECONDS + "
+        "PAN_PHASE_RADIANS[d])"
+    ),
+    "pan_shake": (
+        "observed = pan + (medium + fast); medium[d] = MEDIUM_SHAKE_AMPLITUDE[d]*sin(2*pi*t/"
+        "MEDIUM_SHAKE_PERIOD_SECONDS + medium_phase[d]); fast[d] = FAST_SHAKE_AMPLITUDE[d]*sin(2*pi*t/"
+        "FAST_SHAKE_PERIOD_SECONDS + fast_phase[d]); medium_phase and fast_phase are deterministic-seed "
+        "uniform draws"
+    ),
+    "pan_stochastic_shake": (
+        "observed = pan + x; x_t[d] = STOCHASTIC_AR1_COEFFICIENT[d]*x_{t-1}[d] + sigma[d]*eps_t[d]; "
+        "sigma[d] = STOCHASTIC_AR1_AMPLITUDE[d]*sqrt(1-STOCHASTIC_AR1_COEFFICIENT[d]^2); eps_t ~ N(0,1); "
+        "x_0[d] ~ N(0, STOCHASTIC_AR1_AMPLITUDE[d]^2); deterministic per seed, stationary and colored, and "
+        "explicitly NOT fractal and NOT 1/f noise"
+    ),
+    "pan_jolt": (
+        "observed = pan + jolt; jolt_d(t) = 0 for t < t_jolt and JOLT_AMPLITUDE[d]*"
+        "exp(-(t-t_jolt)/JOLT_DECAY_SECONDS) for t >= t_jolt; t_jolt = JOLT_TIME_FRACTION * clip_duration; "
+        "a one-sided transient with exponential recovery: non-periodic and non-fractal"
+    ),
+}
+CONDITION_KIND = {
+    "static": "zero",
+    "pan_no_shake": "sinusoidal_pan",
+    "pan_shake": "sinusoidal_pan_plus_periodic_shake",
+    "pan_stochastic_shake": "sinusoidal_pan_plus_stochastic_ar1_shake_non_fractal",
+    "pan_jolt": "sinusoidal_pan_plus_transient_jolt_non_periodic",
+}
 
 SCOPE_NOTE = (
     "Measures a 1D/2D translation path only: it compares fixed multiscale-retention candidates against L1 "
@@ -144,6 +201,11 @@ LIMITATIONS = (
     "online latency or causal-streaming behavior",
     "matched-crop pairing is descriptive: it produces no winner, rank, score, aggregate or tuned selection",
     "no rendered image quality, rotation, depth, subject motion, border support or human preference is measured",
+    "the two added stress controls are non-fractal: pan_stochastic_shake is a stationary colored AR(1) "
+    "process (not 1/f noise, not a Hurst/fractal estimate) and pan_jolt is a one-sided exponential-recovery "
+    "transient; neither is periodic",
+    "pan_stochastic_shake and pan_jolt are stress controls only: they run the same fixed grids on "
+    "non-periodic perturbations and make no method-superiority claim",
 )
 
 
@@ -278,16 +340,45 @@ def translation_path_metrics(intended, observed, output):
 # synthetic known-truth fixture
 # --------------------------------------------------------------------------------------
 
+def _ar1_colored_shake(rng, n, *, coefficients, amplitudes):
+    """Deterministic stationary colored AR(1) realization, one independent process per channel.
+
+    ``x_t = rho * x_{t-1} + sigma * eps_t`` with ``eps_t ~ N(0, 1)`` and
+    ``sigma = amplitude * sqrt(1 - rho^2)`` so the stationary per-channel standard deviation is
+    ``amplitude``; the first sample is drawn from that stationary distribution. This is a plain colored AR(1)
+    process: it is explicitly **not fractal** and **not 1/f noise**.
+    """
+    out = np.zeros((n, 2), np.float64)
+    for d in range(2):
+        rho = float(coefficients[d])
+        amp = float(amplitudes[d])
+        sigma = amp * math.sqrt(max(0.0, 1.0 - rho * rho))
+        x = amp * float(rng.standard_normal())
+        for i in range(n):
+            x = rho * x + sigma * float(rng.standard_normal())
+            out[i, d] = x
+    return out
+
+
 def synthetic_translation_fixture(*, n=DEFAULT_N, fps=DEFAULT_FPS, seed=0, condition="pan_shake"):
-    """Deterministic known-truth camera translation: slow pan plus optional faster/mid shake.
+    """Deterministic known-truth camera translation: slow pan plus one optional perturbation.
 
     Timestamps are uniform (``arange(n) / fps``) so the frame-indexed L1 clock and the elapsed-time multiscale
-    clock coincide. The intended pan is seed-independent ground truth; only the shake realization depends on
-    ``seed``. ``condition`` is one of ``static`` (zero pan, zero shake), ``pan_no_shake`` (pan only) or
-    ``pan_shake`` (pan plus medium and fast shake).
+    clock coincide. The intended pan is seed-independent ground truth; only the perturbation depends on
+    ``seed``. ``condition`` is one of:
 
-    Returns a dict of NumPy arrays ``times [T]``, ``pan [T, 2]``, ``shake [T, 2]`` and ``observed [T, 2]``,
-    plus the per-channel amplitudes actually used. This is a synthetic cartoon, not real footage.
+    - ``static``: zero pan and zero perturbation,
+    - ``pan_no_shake``: the known sinusoidal pan only,
+    - ``pan_shake``: pan plus deterministic-seed medium and fast periodic sinusoidal shake,
+    - ``pan_stochastic_shake``: pan plus a deterministic-seed **stationary colored AR(1)** shake with fixed
+      per-channel amplitudes and coefficients; explicitly a non-fractal stress control (not 1/f noise),
+    - ``pan_jolt``: pan plus a fixed-time one-sided transient displacement (jolt) with exponential recovery,
+      placed at a fixed fraction of the clip duration so it always falls inside any valid clip; explicitly a
+      non-periodic, non-fractal stress control.
+
+    Returns a dict of NumPy arrays ``times [T]``, ``pan [T, 2]``, ``shake [T, 2]`` and ``observed [T, 2]``
+    (``observed = pan + shake`` exactly), plus the per-channel amplitudes and coefficients actually used.
+    This is a synthetic cartoon, not real footage.
     """
     n = _validate_n(n)
     fps = _validate_fps(fps)
@@ -303,8 +394,11 @@ def synthetic_translation_fixture(*, n=DEFAULT_N, fps=DEFAULT_FPS, seed=0, condi
     pan_amplitude = (0.0, 0.0)
     medium_amplitude = (0.0, 0.0)
     fast_amplitude = (0.0, 0.0)
+    stochastic_amplitude = (0.0, 0.0)
+    jolt_amplitude = (0.0, 0.0)
+    jolt_time_seconds = None
 
-    if condition in ("pan_no_shake", "pan_shake"):
+    if condition != "static":
         pan = np.stack([
             PAN_AMPLITUDE[d] * np.sin(two_pi * t / PAN_PERIOD_SECONDS + PAN_PHASE_RADIANS[d])
             for d in range(2)
@@ -326,6 +420,21 @@ def synthetic_translation_fixture(*, n=DEFAULT_N, fps=DEFAULT_FPS, seed=0, condi
         shake = medium + fast
         medium_amplitude = MEDIUM_SHAKE_AMPLITUDE
         fast_amplitude = FAST_SHAKE_AMPLITUDE
+    elif condition == "pan_stochastic_shake":
+        shake = _ar1_colored_shake(
+            np.random.default_rng(seed), n,
+            coefficients=STOCHASTIC_AR1_COEFFICIENT, amplitudes=STOCHASTIC_AR1_AMPLITUDE)
+        stochastic_amplitude = STOCHASTIC_AR1_AMPLITUDE
+    elif condition == "pan_jolt":
+        duration = float(times[-1] - times[0])
+        jolt_time_seconds = JOLT_TIME_FRACTION * duration
+        elapsed = t - jolt_time_seconds
+        after = elapsed >= 0.0
+        jolt = np.zeros((n, 2), np.float64)
+        for d in range(2):
+            jolt[after, d] = JOLT_AMPLITUDE[d] * np.exp(-elapsed[after] / JOLT_DECAY_SECONDS)
+        shake = jolt
+        jolt_amplitude = JOLT_AMPLITUDE
 
     return {
         "times": times,
@@ -335,6 +444,12 @@ def synthetic_translation_fixture(*, n=DEFAULT_N, fps=DEFAULT_FPS, seed=0, condi
         "pan_amplitude": [float(v) for v in pan_amplitude],
         "medium_shake_amplitude": [float(v) for v in medium_amplitude],
         "fast_shake_amplitude": [float(v) for v in fast_amplitude],
+        "stochastic_shake_amplitude": [float(v) for v in stochastic_amplitude],
+        "stochastic_ar1_coefficient": [float(v) for v in STOCHASTIC_AR1_COEFFICIENT],
+        "jolt_amplitude": [float(v) for v in jolt_amplitude],
+        "jolt_decay_seconds": float(JOLT_DECAY_SECONDS),
+        "jolt_time_fraction": float(JOLT_TIME_FRACTION),
+        "jolt_time_seconds": (None if jolt_time_seconds is None else float(jolt_time_seconds)),
     }
 
 
@@ -486,9 +601,17 @@ def _run_one(condition, seed, n, fps, scales):
             "dt_seconds": float(1.0 / fps),
             "duration_seconds": float(times[-1] - times[0]),
             "timestamp_basis": "uniform",
+            "condition_model": CONDITION_MODELS[condition],
+            "condition_kind": CONDITION_KIND[condition],
             "pan_amplitude": fx["pan_amplitude"],
             "medium_shake_amplitude": fx["medium_shake_amplitude"],
             "fast_shake_amplitude": fx["fast_shake_amplitude"],
+            "stochastic_shake_amplitude": fx["stochastic_shake_amplitude"],
+            "stochastic_ar1_coefficient": fx["stochastic_ar1_coefficient"],
+            "jolt_amplitude": fx["jolt_amplitude"],
+            "jolt_decay_seconds": fx["jolt_decay_seconds"],
+            "jolt_time_fraction": fx["jolt_time_fraction"],
+            "jolt_time_seconds": fx["jolt_time_seconds"],
             "pan_rms": float(np.sqrt(np.mean(pan * pan))),
             "shake_rms": float(np.sqrt(np.mean(shake * shake))),
             "observed_rms": float(np.sqrt(np.mean(observed * observed))),
@@ -611,6 +734,8 @@ def run_audit(*, seeds=DEFAULT_SEEDS, conditions=DEFAULT_CONDITIONS, n=DEFAULT_N
             "seeds": list(seeds),
             "conditions": list(conditions),
             "conditions_supported": list(CONDITIONS),
+            "condition_models": {c: CONDITION_MODELS[c] for c in CONDITIONS},
+            "condition_kinds": {c: CONDITION_KIND[c] for c in CONDITIONS},
             "pan_period_seconds": float(PAN_PERIOD_SECONDS),
             "pan_phase_radians": [float(v) for v in PAN_PHASE_RADIANS],
             "pan_amplitude": [float(v) for v in PAN_AMPLITUDE],
@@ -618,6 +743,11 @@ def run_audit(*, seeds=DEFAULT_SEEDS, conditions=DEFAULT_CONDITIONS, n=DEFAULT_N
             "medium_shake_amplitude": [float(v) for v in MEDIUM_SHAKE_AMPLITUDE],
             "fast_shake_period_seconds": float(FAST_SHAKE_PERIOD_SECONDS),
             "fast_shake_amplitude": [float(v) for v in FAST_SHAKE_AMPLITUDE],
+            "stochastic_ar1_amplitude": [float(v) for v in STOCHASTIC_AR1_AMPLITUDE],
+            "stochastic_ar1_coefficient": [float(v) for v in STOCHASTIC_AR1_COEFFICIENT],
+            "jolt_amplitude": [float(v) for v in JOLT_AMPLITUDE],
+            "jolt_decay_seconds": float(JOLT_DECAY_SECONDS),
+            "jolt_time_fraction": float(JOLT_TIME_FRACTION),
         },
         "runs": runs,
         "limitations": list(LIMITATIONS),
@@ -644,7 +774,11 @@ def parse_seeds(text):
 
 
 def parse_conditions(text):
-    """Parse ``"static,pan_no_shake,pan_shake"`` into a validated non-empty condition tuple."""
+    """Parse e.g. ``"static,pan_no_shake,pan_shake,pan_stochastic_shake,pan_jolt"`` into a tuple.
+
+    Any subset of :data:`CONDITIONS` is accepted; the result is validated as a non-empty tuple of unique
+    known conditions.
+    """
     if isinstance(text, (list, tuple)):
         parts = list(text)
     else:
@@ -656,8 +790,11 @@ def build_parser():
     p = argparse.ArgumentParser(
         prog="bench/multiscale_motion_audit.py",
         description="Research-only path-level comparison of fixed multiscale-retention candidates against L1 "
-                    "budgets on synthetic camera translation (no media, no rendering). Sample count is capped "
-                    "at L1_WINDOW so the L1 solver sees the whole clip in one window.")
+                    "budgets on synthetic camera translation (no media, no rendering). Conditions are "
+                    "static, pan_no_shake, pan_shake, and two non-fractal stress controls "
+                    "(pan_stochastic_shake: stationary colored AR(1); pan_jolt: fixed-time exponential-"
+                    "recovery transient). Sample count is capped at L1_WINDOW so the L1 solver sees the "
+                    "whole clip in one window.")
     p.add_argument("--seeds", default=",".join(str(s) for s in DEFAULT_SEEDS),
                    help="comma-separated integer seeds (default: %(default)s)")
     p.add_argument("--conditions", default=",".join(DEFAULT_CONDITIONS),
@@ -720,7 +857,15 @@ __all__ = [
     "L1_WEIGHTS",
     "L1_WINDOW",
     "L1_OVERLAP",
+    "STOCHASTIC_AR1_AMPLITUDE",
+    "STOCHASTIC_AR1_COEFFICIENT",
+    "JOLT_AMPLITUDE",
+    "JOLT_DECAY_SECONDS",
+    "JOLT_TIME_FRACTION",
     "CONDITIONS",
+    "CONDITION_MODELS",
+    "CONDITION_KIND",
+    "_ar1_colored_shake",
     "DEFAULT_N",
     "DEFAULT_FPS",
     "DEFAULT_SEEDS",
