@@ -1174,6 +1174,23 @@ human-reviewed rendered-quality comparison before any production wiring.
 
 ### Gemini blind visual review
 
+For a direct raw-versus-stabilized visual check, `bench.real_pair_review` makes a synchronized comparison
+from a successful `run_case` manifest. It verifies the source hash, source window, decoded counts, output cadence
+and encoded PTS, then maps each output timestamp to the unique nearest deinterlaced source frame. Source frames
+may be skipped when the output cadence is lower; duplicate or ambiguous pairings are refused. The generated
+video labels the left panel `A` (raw) and the right panel `B` (stabilized). Its adjacent `review.json` is
+compatible with the existing Gemini API reviewer; the panel mapping stays local while Gemini receives only
+the clip bytes and fixed A/B review brief. A nested `evidence` object records the source-frame mapping and
+hashes. Building the clip is local and makes no API call.
+
+```bash
+.venv/bin/python -m bench.real_pair_review out/bench/RUN/manifest.json
+.venv/bin/python -m bench.gemini_blind_review out/bench/RUN/raw_vs_stabilized.json --out out/bench/RUN/gemini_review.json
+```
+
+Review MP4 and report default to the run directory. Use `--out-video`, `--out-report`, `--panel-width`, and
+`--panel-height` to choose alternate paths or dimensions. Existing artifacts are never overwritten.
+
 After `bench/multiscale_real_review.py` writes a `review.json` (the blinded A/B MP4s plus the hidden
 `blind_mapping`), `bench.gemini_blind_review` sends each short review MP4 inline (`video/mp4`, base64) to
 Vertex AI Gemini through the existing `gcloud` user login (project `phx-ai-billing`, default model

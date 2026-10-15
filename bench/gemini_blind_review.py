@@ -78,7 +78,9 @@ RETRY_STATUS = (429, 500, 503)
 
 PREFERENCES = ("A", "B", "tie")
 CONFIDENCES = ("low", "medium", "high")
-PANEL_METHODS = ("multiscale", "l1")
+# The reviewer also supports the direct raw-vs-stabilized diagnostic pair. The mapping stays hidden from
+# Gemini; only the A/B preference is sent, then mapped locally to one of these panel identities.
+PANEL_METHODS = ("multiscale", "l1", "raw", "stabilized")
 
 PROVIDER = "Vertex AI REST, authenticated via gcloud user login"
 
@@ -174,7 +176,7 @@ def validate_blind_mapping(mapping):
 
 
 def map_preference(blind_mapping, side):
-    """Map a raw A/B/tie reviewer call to the hidden method (``multiscale``/``l1``/``tie``)."""
+    """Map a raw A/B/tie reviewer call to the hidden panel identity or ``tie``."""
     mapping = validate_blind_mapping(blind_mapping)
     if side == "tie":
         return "tie"
