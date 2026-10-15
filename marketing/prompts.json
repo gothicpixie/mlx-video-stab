@@ -1,0 +1,56 @@
+{
+  "tool": "Built-in image_gen.imagegen",
+  "created": "2026-10-14",
+  "project": "mlxstab",
+  "assets": [
+    {
+      "file": "assets/repo-banner.png",
+      "use_case": "ads-marketing",
+      "prompt": "Use case: ads-marketing\nPrimary request: Create a polished launch graphic for the GitHub project mlxstab, an experimental command-line video stabilizer for Apple Silicon built with MLX and RAFT. Core idea: \"Steady motion. Full frame.\" It renders at original frame dimensions and outputs a mask of missing-source border pixels; it does not fill those pixels. This artwork must be a conceptual illustration, never a fake result or screenshot.\nArt direction: premium editorial design for a technical filmmaking tool. Warm charcoal almost-black (#101310), soft ivory (#F0F0E8), a restrained chartreuse accent (#D6F57B), muted gray-green. Crisp oversized Swiss grotesk typography, small monospaced technical labels, generous negative space, thin hairline rules. No purple, blue gradients, glows, glossy UI, stock device mockups, robot imagery, or visual clutter.\nVisual motif: a precise landscape frame, several faint offset/rotated wireframe outlines indicating camera movement, a single firm chartreuse rectangular frame, and fine optical-flow-like curved lines settling into a quiet horizon. A restrained black-and-white mountainous shoreline with fine photographic texture may appear inside the frame, treated as conceptual editorial artwork. Subtle diagonal hatch in a narrow exposed border makes missing coverage legible. No before/after labels, fake metrics, charts, invented commands, endorsements, Apple logos, or generated extra copy.\nTypography accuracy: product name is exactly \"mlxstab\" (m l x s t a b), all lowercase, one word. All text below must appear exactly, with no extra text.\nAsset type: GitHub README banner, very wide 8:3 composition, target 2400 x 900 pixels.\nComposition: asymmetrical editorial grid with typography in the left 51%, framed cinematic motion illustration in the right 44%; allow 5% outer margins. All elements remain inside the image. Minimal, beautiful at small README width.\nText (verbatim):\n\"mlxstab\" — upper-left brand, compact but very readable\n\"Steady motion.\" and \"Full frame.\" — large two-line main headline, ivory\n\"Video stabilization for Apple Silicon\" — restrained subtitle\n\"MLX / RAFT / METAL\" — small footer label\n\"EXPERIMENTAL\" — clear small status label\nDo not include a URL.",
+      "reference_images": [],
+      "transparent_background": false
+    },
+    {
+      "file": "assets/social-preview-source.png",
+      "use_case": "ads-marketing",
+      "prompt": "Use case: ads-marketing\nPrimary request: Create a polished launch graphic for the GitHub project mlxstab, an experimental command-line video stabilizer for Apple Silicon built with MLX and RAFT. Core idea: \"Steady motion. Full frame.\" It renders at original frame dimensions and outputs a mask of missing-source border pixels; it does not fill those pixels. This artwork must be a conceptual illustration, never a fake result or screenshot.\nArt direction: premium editorial design for a technical filmmaking tool. Warm charcoal almost-black (#101310), soft ivory (#F0F0E8), a restrained chartreuse accent (#D6F57B), muted gray-green. Crisp oversized Swiss grotesk typography, small monospaced technical labels, generous negative space, thin hairline rules. No purple, blue gradients, glows, glossy UI, stock device mockups, robot imagery, or visual clutter.\nVisual motif: a precise landscape frame, several faint offset/rotated wireframe outlines indicating camera movement, a single firm chartreuse rectangular frame, and fine optical-flow-like curved lines settling into a quiet horizon. A restrained black-and-white mountainous shoreline with fine photographic texture may appear inside the frame, treated as conceptual editorial artwork. Subtle diagonal hatch in a narrow exposed border makes missing coverage legible. No before/after labels, fake metrics, charts, invented commands, endorsements, Apple logos, or generated extra copy.\nTypography accuracy: product name is exactly \"mlxstab\" (m l x s t a b), all lowercase, one word. All text below must appear exactly, with no extra text.\nInput image: style reference only, the existing mlxstab README banner. Preserve its wordmark treatment, typography, palette, and shoreline visual language, but redesign the composition for this format.\nAsset type: GitHub social preview and landscape launch card, precisely 2:1 landscape, target 1280 x 640 pixels. Keep type large and a 6% safe margin.\nComposition: enlarged product wordmark and two-line headline on the left, one framed monochrome mountain-lake scene with motion trails on the right. Under headline, readable subtitle. Bottom hairline separator with compact technology and status labels. Strong thumbnail legibility.\nText (verbatim):\n\"mlxstab\"\n\"Steady motion.\"\n\"Full frame.\"\n\"Video stabilization for Apple Silicon\"\n\"MLX / RAFT / METAL\"\n\"EXPERIMENTAL\"\nNo other copy, URL, benchmark, screenshot or claim.",
+      "reference_images": [
+        "assets/repo-banner.png"
+      ],
+      "transparent_background": false
+    },
+    {
+      "file": "assets/launch-square-source.png",
+      "use_case": "ads-marketing",
+      "prompt": "Use case: ads-marketing\nPrimary request: Create a polished launch graphic for the GitHub project mlxstab, an experimental command-line video stabilizer for Apple Silicon built with MLX and RAFT. Core idea: \"Steady motion. Full frame.\" It renders at original frame dimensions and outputs a mask of missing-source border pixels; it does not fill those pixels. This artwork must be a conceptual illustration, never a fake result or screenshot.\nArt direction: premium editorial design for a technical filmmaking tool. Warm charcoal almost-black (#101310), soft ivory (#F0F0E8), a restrained chartreuse accent (#D6F57B), muted gray-green. Crisp oversized Swiss grotesk typography, small monospaced technical labels, generous negative space, thin hairline rules. No purple, blue gradients, glows, glossy UI, stock device mockups, robot imagery, or visual clutter.\nVisual motif: a precise landscape frame, several faint offset/rotated wireframe outlines indicating camera movement, a single firm chartreuse rectangular frame, and fine optical-flow-like curved lines settling into a quiet horizon. A restrained black-and-white mountainous shoreline with fine photographic texture may appear inside the frame, treated as conceptual editorial artwork. Subtle diagonal hatch in a narrow exposed border makes missing coverage legible. No before/after labels, fake metrics, charts, invented commands, endorsements, Apple logos, or generated extra copy.\nTypography accuracy: product name is exactly \"mlxstab\" (m l x s t a b), all lowercase, one word. All text below must appear exactly, with no extra text.\nInput image: style reference only, the existing mlxstab README banner. Preserve its wordmark, typography, palette and shoreline visual language. Create a distinct, beautifully balanced square editorial composition.\nAsset type: square launch feature card, target 1080 x 1080 pixels, strictly 1:1.\nComposition: product wordmark and EXPERIMENTAL label at top in one row. Oversized two-line headline below. In the middle a wide monochrome mountain-lake frame with fine displaced frame outlines, one chartreuse stable rectangle and a narrow diagonally hatched exposed border, making the concept of unfilled border coverage visible. Illustration must be conceptual, not two before-and-after images. Below the visual a two-line feature description and thin footer rule with small technology label. 7% safe margins all around, minimal and spacious.\nText (verbatim):\n\"mlxstab\"\n\"EXPERIMENTAL\"\n\"Keep the frame.\"\n\"Know the gaps.\"\n\"Full-frame output + border mask\"\n\"Missing pixels stay marked, not filled.\"\n\"MLX / RAFT / METAL\"\nNo other text, metric or logo.",
+      "reference_images": [
+        "assets/repo-banner.png"
+      ],
+      "transparent_background": false
+    }
+  ],
+  "exports": {
+    "description": "macOS sips used only for deterministic sizing and JPEG encoding. Original generated PNGs retained.",
+    "files": [
+      {
+        "source": "assets/repo-banner.png",
+        "file": "assets/repo-banner.jpg",
+        "jpeg_quality": 88
+      },
+      {
+        "source": "assets/social-preview-source.png",
+        "file": "assets/social-preview.jpg",
+        "width": 1280,
+        "height": 640,
+        "jpeg_quality": 88
+      },
+      {
+        "source": "assets/launch-square-source.png",
+        "file": "assets/launch-square.jpg",
+        "width": 1080,
+        "height": 1080,
+        "jpeg_quality": 90
+      }
+    ]
+  }
+}
