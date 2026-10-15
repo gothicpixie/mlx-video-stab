@@ -1845,37 +1845,37 @@ signal exactly. The synthetic pan-plus-shake fixture makes a slow pan and two fa
 This is only the Stage 4 measurement baseline. It does not estimate a fractal/Hurst exponent, select a band,
 consume real footage or change production behavior. Its 25 focused tests passed.
 
-### E10 first fixed-grid synthetic comparison
+### E10 fixed-grid comparison with nearest-crop pairing
 
-Added `bench/multiscale_motion_audit.py`, comparing four fixed multiscale-retention settings with three L1
-budgets on deterministic, uniform-clock synthetic translation. The report keeps every condition, seed and
-variant separate and records path error against the known pan, second-difference residual jitter proxy, and
-maximum-translation crop proxy. The fixed grids are not tuned or ranked. The L1 control uses fidelity `0.1`,
-matching the current production default; an initial zero-fidelity run exposed a free constant-offset ambiguity
-on static input, so that run is not used as evidence.
+Added `bench/multiscale_motion_audit.py`, comparing four fixed multiscale-retention settings with a predeclared
+L1 budget grid from `0.0` to `2.0` in `0.1` steps on deterministic, uniform-clock synthetic translation. Each
+multiscale result is paired with the L1 result whose measured max-translation correction is nearest, with a
+maximum grid tolerance of `0.05` path units for this pilot. Both methods have offline access to the same entire
+clip; the audit caps the sequence at the L1 single-window limit of 600 samples. The L1 control uses fidelity
+`0.1`, matching the production default; an initial zero-fidelity run exposed a free constant-offset ambiguity
+on static input, so that run is not evidence.
 
-In the initial 180-sample, 60 fps pilot (three shake seeds), every method preserved the static control exactly.
-The pan-only control showed small but different path errors from the smoothers. On the pan-plus-shake control,
-the following min-to-max ranges across the three seeds illustrate the tradeoff; units are synthetic path units,
-not rendered pixels or perceptual scores:
+The default run covers 180 samples at 60 fps with three seeds and the three controls `static`, `pan_no_shake`,
+and `pan_shake`. Every method preserved the static control exactly. For pan plus shake, these per-pair ranges
+across the three seeds show the tradeoff; each metric is `multiscale / paired L1`, and units are synthetic path
+units, not rendered pixels or perceptual scores:
 
-| family / fixed setting | pan error RMS | residual second-difference RMS | max correction |
+| multiscale setting ↔ L1 budget | crop mismatch | pan error RMS | residual second-difference RMS |
 | --- | ---: | ---: | ---: |
-| multiscale `drop_all_detail` | 0.120–0.129 | 0.000082–0.000085 | 1.50–1.70 |
-| multiscale `drop_finest` | 0.502–0.504 | 0.09223–0.09229 | 0.443–0.543 |
-| multiscale `drop_finest_and_medium` | 0.0148–0.0408 | 0.00126–0.00135 | 1.13–1.29 |
-| multiscale `keep_all_detail` | 0.622 | 0.756–0.757 | 0 |
-| L1 budget `0.05` | 0.604–0.605 | 0.627–0.629 | 0.05 |
-| L1 budget `0.3` | 0.551–0.554 | 0.119–0.128 | 0.3 |
-| L1 budget `1.5` | 0.187–0.195 | 0.000163–0.000275 | 1.5 |
+| `drop_all_detail` ↔ `1.7` | 0.00065–0.04741 | 0.1198–0.1288 / 0.1867–0.2597 | 0.000082–0.000085 / 0.000163–0.000216 |
+| `drop_finest` ↔ `0.5` | 0.04288–0.04364 | 0.5024–0.5036 / 0.4317–0.5016 | 0.09223–0.09229 / 0.07815–0.09229 |
+| `drop_finest_and_medium` ↔ `1.3` | 0.01321–0.04649 | 0.01481–0.04082 / 0.09195–0.13531 | 0.001257–0.001346 / 0.000237–0.002975 |
+| `keep_all_detail` ↔ `0.0` | 0 | 0.6225 / 0.6225 | 0.75595–0.75706 / 0.75595–0.75706 |
 
-This short cartoon suggests a tradeoff, not a winner: multiscale retention can reduce pan error sharply at the
-cost of larger correction, while the high-budget L1 setting has lower residual jitter. The crop proxies are
-not matched closely enough to claim a quality advantage, and the scene contains only translation with two
-sinusoidal shake bands. The audit tests passed **20 tests**; together with the decomposition tests, the focused
-suite passed **45 tests**. Next: compare on longer, varied known-truth motion, match correction/coverage and
-delay more carefully, then inspect full rendered frames on synthetic and real windows. Only consider the
-fractal experiment after the strongest non-fractal multiscale baseline has a repeatable advantage over L1.
+In this cartoon, `drop_all_detail` has lower pan error and residual jitter than its nearest-crop L1 pair across
+the three shake seeds, while `drop_finest_and_medium` lowers pan error but has seed-sensitive jitter relative
+to L1. The pan-only control also shows candidate-dependent path error even without shake. This is a useful
+synthetic signal, not a quality result: it has translation only, a short sinusoidal pan and two sinusoidal shake
+bands, with no image rendering, rotation, depth, subject motion or occlusion. It does not establish a general
+multiscale advantage. The updated focused suite passed **54 tests** and the full `.claude/verify.sh` passed
+**972 tests in 63.74 s**. Next: extend the predeclared controls to non-periodic motion and jolts, then test
+rendered synthetic/real clips at matched valid coverage and delay. Consider fractal scaling only after a
+non-fractal multiscale result repeats on held-out controls.
 
 ## What works
 

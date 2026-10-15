@@ -8,8 +8,20 @@ This module compares two *path-level* families on **deterministic known-truth sy
 - fixed multiscale-retention candidates built from the committed research decomposition
   ``bench.multiscale_motion`` (``decompose`` + ``path_reconstruct`` with a fixed grid of detail-band
   retention weights), and
-- L1-budget paths from the production smoothing primitive ``mlxstab.smooth.l1_path_windowed`` on a fixed
-  budget grid.
+- L1-budget paths from the production smoothing primitive ``mlxstab.smooth.l1_path_windowed`` on a
+  **predeclared uniform** budget grid ``0.0, 0.1, ..., 2.0`` (budget ``0.0`` is the observed-path identity).
+
+Each multiscale candidate is additionally reported **paired** with the L1 variant whose *measured* crop proxy
+(``max_abs_correction_from_observed``) is nearest its own measured crop proxy. Ties resolve to the earlier L1
+grid index. The pairing is a descriptive matched-crop report: it is not a ranking, winner, score, aggregate or
+tuned selection, and it never picks a candidate for downstream use.
+
+Temporal access is **matched and offline** for both families: the audit requires ``n <= L1_WINDOW`` (600
+samples), so ``l1_path_windowed`` takes its ``T <= window`` branch and solves **one** L1 problem over every
+sample of the clip, and the timestamp-aware Gaussian low-pass also consumes the full clip. Both therefore see
+the whole clip, so neither has a causal/streaming advantage; these are offline path-level numbers, **not**
+online-latency measurements. The cap exists because a longer clip would push L1 into its overlapping-window
+branch and the two families would no longer see the same entire clip.
 
 The synthetic fixture is a deliberate slow pan (the known intended ground truth) plus optional faster/mid
 shake. Timestamps are **uniform** on purpose: ``l1_path_windowed`` is frame-indexed, so uniform spacing makes
@@ -32,7 +44,8 @@ stabilizer pipeline or change any production default. It does **not** compute an
 does **not** optimize weights, does **not** tune per seed and does **not** assert that any family or candidate
 is superior. Reports are JSON-serializable and path-free.
 
-Run ``python -m bench.multiscale_motion_audit [--seeds 0,1,2] [--conditions static,pan_shake] [--out f.json]``.
+Run ``python -m bench.multiscale_motion_audit [--seeds 0,1,2]
+[--conditions static,pan_no_shake,pan_shake] [--out f.json]`` (``n`` is capped at ``L1_WINDOW``).
 """
 from __future__ import annotations
 
@@ -69,7 +82,16 @@ MULTISCALE_CANDIDATES = (
 )
 
 # L1 budget grid in path units (the box half-width |p - observed| <= budget) and the L1 objective weights.
-L1_BUDGETS = (0.05, 0.3, 1.5)
+# Predeclared uniform grid: 0.0, 0.1, ..., 2.0 (21 points). Budget 0.0 pins the solution to the observed
+# path (identity); it is a fixed grid point, never a tuned or optimized value.
+L1_BUDGET_MIN = 0.0
+L1_BUDGET_MAX = 2.0
+L1_BUDGET_STEP = 0.1
+L1_BUDGET_COUNT = 21
+L1_BUDGETS = tuple(round(L1_BUDGET_MIN + i * L1_BUDGET_STEP, 1) for i in range(L1_BUDGET_COUNT))
+# Half a uniform grid step: the largest nearest-grid-point crop-proxy mismatch the grid can guarantee when the
+# L1 measured crop proxy tracks its budget. Reported verbatim; it is descriptive, not a quality threshold.
+L1_CROP_MATCH_TOLERANCE = L1_BUDGET_STEP / 2.0
 L1_WEIGHTS = (10.0, 1.0, 100.0)
 L1_FIDELITY = 0.1
 L1_WINDOW = 600
@@ -87,7 +109,8 @@ FAST_SHAKE_AMPLITUDE = (0.4, 0.3)
 DEFAULT_N = 180
 DEFAULT_FPS = 60.0
 DEFAULT_SEEDS = (0, 1, 2)
-DEFAULT_CONDITIONS = ("static", "pan_shake")
+# All three synthetic controls are reported by default.
+DEFAULT_CONDITIONS = ("static", "pan_no_shake", "pan_shake")
 CONDITIONS = ("static", "pan_no_shake", "pan_shake")
 MIN_SAMPLES = 5
 
@@ -116,6 +139,10 @@ LIMITATIONS = (
     "a second difference of the residual is a path-level jitter proxy, not a perceptual jitter measurement",
     "maximum absolute correction is a translation crop proxy, not a rendered crop or border-support measurement",
     "the multiscale retention weights and L1 budgets are fixed grids reported verbatim; neither is optimized",
+    "multiscale and L1 are compared with matched offline temporal access to the full clip: n is capped at "
+    "L1_WINDOW so the L1 solver takes its single-window branch over every sample; nothing here measures "
+    "online latency or causal-streaming behavior",
+    "matched-crop pairing is descriptive: it produces no winner, rank, score, aggregate or tuned selection",
     "no rendered image quality, rotation, depth, subject motion, border support or human preference is measured",
 )
 
@@ -334,9 +361,9 @@ def build_l1_output(observed, budget, *, weights=L1_WEIGHTS, fidelity=L1_FIDELIT
     try:
         b = float(budget)
     except (TypeError, ValueError):
-        raise ValueError(f"budget must be a finite positive number, got {budget!r}")
-    if not math.isfinite(b) or b <= 0.0:
-        raise ValueError(f"budget must be finite and > 0, got {budget!r}")
+        raise ValueError(f"budget must be a finite non-negative number, got {budget!r}")
+    if not math.isfinite(b) or b < 0.0:
+        raise ValueError(f"budget must be finite and >= 0, got {budget!r}")
     try:
         f = float(fidelity)
     except (TypeError, ValueError):
@@ -348,7 +375,11 @@ def build_l1_output(observed, budget, *, weights=L1_WEIGHTS, fidelity=L1_FIDELIT
     if isinstance(overlap, bool) or not isinstance(overlap, (int, np.integer)) or int(overlap) < 0:
         raise ValueError(f"overlap must be >= 0, got {overlap!r}")
     if int(overlap) >= int(window):
-        raise ValueError(f"overlap must be smaller than window, got overlap={overlap!r}, window={window!r}")
+        # Keeps the windowed solver strictly progressing: each step advances by window - overlap >= 1 samples,
+        # so any accepted (window, overlap) terminates instead of re-solving the same window forever.
+        raise ValueError(
+            f"overlap must be strictly smaller than window so the windowed solver advances "
+            f"(step = window - overlap >= 1), got overlap={overlap!r}, window={window!r}")
 
     out = np.empty_like(sig)
     for d in range(sig.shape[1]):
@@ -359,6 +390,36 @@ def build_l1_output(observed, budget, *, weights=L1_WEIGHTS, fidelity=L1_FIDELIT
 # --------------------------------------------------------------------------------------
 # runner
 # --------------------------------------------------------------------------------------
+
+def nearest_crop_index(target_crop, l1_crop_proxies):
+    """Index into the fixed-order ``l1_crop_proxies`` whose value is nearest ``target_crop``.
+
+    The search walks the sequence in its given (fixed grid) order using a strict improvement test, so a tie
+    between two equally distant proxies resolves to the **earliest** index in grid order. All inputs must be
+    finite; returns a plain int. This is a descriptive nearest-match over already-measured proxies, not a
+    selection, ranking or optimization.
+    """
+    try:
+        proxies = [float(v) for v in l1_crop_proxies]
+    except (TypeError, ValueError):
+        raise ValueError(f"l1_crop_proxies must be numeric, got {l1_crop_proxies!r}")
+    if not proxies:
+        raise ValueError("l1_crop_proxies must be non-empty")
+    try:
+        target = float(target_crop)
+    except (TypeError, ValueError):
+        raise ValueError(f"target_crop must be numeric, got {target_crop!r}")
+    if not math.isfinite(target) or not all(math.isfinite(v) for v in proxies):
+        raise ValueError("crop proxies must all be finite")
+    best = 0
+    best_dist = abs(proxies[0] - target)
+    for i in range(1, len(proxies)):
+        dist = abs(proxies[i] - target)
+        if dist < best_dist:
+            best_dist = dist
+            best = i
+    return best
+
 
 def _variant(family, name, parameters, intended, observed, output):
     return {
@@ -375,20 +436,46 @@ def _run_one(condition, seed, n, fps, scales):
     times, pan, shake, observed = fx["times"], fx["pan"], fx["shake"], fx["observed"]
 
     decom = MM.decompose(observed, times, list(scales))
-    variants = []
+    multiscale_variants = []
     for name, weights in MULTISCALE_CANDIDATES:
         out = MM.path_reconstruct(decom, np.asarray(list(weights), dtype=np.float64))
-        variants.append(_variant(
+        multiscale_variants.append(_variant(
             "multiscale", name,
             {"scales_seconds": list(scales), "retention_weights": [float(w) for w in weights]},
             pan, observed, out))
+    l1_variants = []
     for budget in L1_BUDGETS:
         out = build_l1_output(observed, budget)
-        variants.append(_variant(
+        l1_variants.append(_variant(
             "l1_budget", f"budget_{budget:g}",
             {"budget": float(budget), "weights": [float(w) for w in L1_WEIGHTS], "fidelity": float(L1_FIDELITY),
              "window": int(L1_WINDOW), "overlap": int(L1_OVERLAP)},
             pan, observed, out))
+    variants = multiscale_variants + l1_variants
+
+    # Matched-crop pairing: each multiscale candidate is paired with the L1 variant whose measured crop proxy
+    # is nearest the multiscale candidate's own crop proxy. Ties follow the fixed L1 grid order. No winner,
+    # rank, score or aggregate is produced; both sides keep their own metrics in the record.
+    l1_crops = [v["metrics"]["max_abs_correction_from_observed"] for v in l1_variants]
+    pairs = []
+    for mv in multiscale_variants:
+        target = float(mv["metrics"]["max_abs_correction_from_observed"])
+        idx = nearest_crop_index(target, l1_crops)
+        lv = l1_variants[idx]
+        l1_crop = float(l1_crops[idx])
+        pairs.append({
+            "multiscale_name": mv["name"],
+            "l1_name": lv["name"],
+            "multiscale_crop_proxy": target,
+            "l1_crop_proxy": l1_crop,
+            "abs_crop_mismatch": float(abs(target - l1_crop)),
+            "multiscale_rms_path_deviation": float(mv["metrics"]["rms_path_deviation"]),
+            "l1_rms_path_deviation": float(lv["metrics"]["rms_path_deviation"]),
+            "multiscale_rms_second_difference_residual": float(
+                mv["metrics"]["rms_second_difference_residual"]),
+            "l1_rms_second_difference_residual": float(lv["metrics"]["rms_second_difference_residual"]),
+            "crop_match_tolerance": float(L1_CROP_MATCH_TOLERANCE),
+        })
 
     return {
         "condition": condition,
@@ -407,20 +494,34 @@ def _run_one(condition, seed, n, fps, scales):
             "observed_rms": float(np.sqrt(np.mean(observed * observed))),
         },
         "variants": variants,
+        "pairs": pairs,
     }
 
 
 def run_audit(*, seeds=DEFAULT_SEEDS, conditions=DEFAULT_CONDITIONS, n=DEFAULT_N, fps=DEFAULT_FPS):
     """Run the fixed-grid comparison over the given seeds/conditions and return a JSON-safe report.
 
-    Every ``(condition, seed)`` run reports the same fixed multiscale candidate grid and L1 budget grid, with
-    each variant's metrics and parameters listed separately. No cross-variant aggregate, winner or ranking is
-    computed. The returned dict contains only Python scalars, strings, lists and dicts (no NumPy objects and no
-    filesystem paths); validation errors raise ``ValueError``.
+    Every ``(condition, seed)`` run reports the same fixed multiscale candidate grid and the same predeclared
+    uniform L1 budget grid (``0.0..2.0`` in ``0.1`` steps, budget ``0.0`` being the observed-path identity),
+    with each variant's metrics and parameters listed separately. Each run also carries a ``pairs`` list that
+    matches every multiscale candidate to the L1 variant with the nearest measured crop proxy (ties to the
+    earlier grid index) and reports both sides' crop proxies, the absolute mismatch, both path-error and
+    residual-second-difference metrics and the fixed-grid match tolerance. No cross-variant aggregate, winner,
+    ranking, score or tuned selection is computed. ``n`` is capped at ``L1_WINDOW`` so the L1 solver covers
+    the whole clip in a single window, which keeps its temporal access matched with the full-clip multiscale
+    Gaussian; these are offline path-level numbers, not online latency. The returned dict contains only
+    Python scalars, strings, lists and dicts (no NumPy objects and no filesystem paths); validation errors
+    raise ``ValueError``.
     """
     seeds = _validate_seeds(seeds)
     conditions = _validate_conditions(conditions)
     n = _validate_n(n)
+    if n > L1_WINDOW:
+        # The full-clip comparison only holds while l1_path_windowed stays on its T <= window branch (one
+        # global L1 solve); a longer clip would switch to overlapping windows and break the matched access.
+        raise ValueError(
+            f"n must be <= L1_WINDOW ({L1_WINDOW}) so l1_path_windowed solves one L1 problem over the whole "
+            f"clip, matching the full-clip multiscale Gaussian; got n={n}")
     fps = _validate_fps(fps)
     scales = [float(s) for s in MULTISCALE_SCALES_SECONDS]
 
@@ -451,6 +552,33 @@ def run_audit(*, seeds=DEFAULT_SEEDS, conditions=DEFAULT_CONDITIONS, n=DEFAULT_N
                 "clock"
             ),
         },
+        "temporal_access": {
+            "kind": "offline_full_clip",
+            "max_samples": int(L1_WINDOW),
+            "l1": (
+                "mlxstab.smooth.l1_path_windowed is given the whole clip in a single window: the audit caps n at "
+                "L1_WINDOW, so its T <= window branch solves a single L1 problem over every sample"
+            ),
+            "multiscale": (
+                "bench.multiscale_motion.decompose applies a timestamp-aware Gaussian over every frame of the "
+                "full clip"
+            ),
+            "status": "matched",
+            "statement": (
+                "Both families are evaluated with offline temporal access to the whole clip: the audit caps n "
+                "at L1_WINDOW so the L1 solver covers every sample in a single window, and the timestamp-aware "
+                "Gaussian consumes the full clip too, so their temporal access is matched. These are offline "
+                "path-level numbers, not online latency or causal-streaming measurements."
+            ),
+        },
+        "pairing": {
+            "rule": (
+                "each multiscale candidate is paired with the L1 variant whose measured crop proxy is nearest "
+                "the multiscale candidate's own measured crop proxy; ties resolve to the earlier L1 grid index"
+            ),
+            "tolerance": float(L1_CROP_MATCH_TOLERANCE),
+            "tolerance_definition": "half the uniform L1 budget grid step",
+        },
         "grids": {
             "multiscale_scales_seconds": scales,
             "multiscale_candidates": [
@@ -458,6 +586,11 @@ def run_audit(*, seeds=DEFAULT_SEEDS, conditions=DEFAULT_CONDITIONS, n=DEFAULT_N
                 for name, weights in MULTISCALE_CANDIDATES
             ],
             "l1_budgets": [float(b) for b in L1_BUDGETS],
+            "l1_budget_min": float(L1_BUDGET_MIN),
+            "l1_budget_max": float(L1_BUDGET_MAX),
+            "l1_budget_step": float(L1_BUDGET_STEP),
+            "l1_budget_count": int(L1_BUDGET_COUNT),
+            "l1_crop_match_tolerance": float(L1_CROP_MATCH_TOLERANCE),
             "l1_weights": [float(w) for w in L1_WEIGHTS],
             "l1_fidelity": float(L1_FIDELITY),
             "l1_window": int(L1_WINDOW),
@@ -511,7 +644,7 @@ def parse_seeds(text):
 
 
 def parse_conditions(text):
-    """Parse ``"static,pan_shake"`` into a validated non-empty condition tuple."""
+    """Parse ``"static,pan_no_shake,pan_shake"`` into a validated non-empty condition tuple."""
     if isinstance(text, (list, tuple)):
         parts = list(text)
     else:
@@ -523,12 +656,14 @@ def build_parser():
     p = argparse.ArgumentParser(
         prog="bench/multiscale_motion_audit.py",
         description="Research-only path-level comparison of fixed multiscale-retention candidates against L1 "
-                    "budgets on synthetic camera translation (no media, no rendering).")
+                    "budgets on synthetic camera translation (no media, no rendering). Sample count is capped "
+                    "at L1_WINDOW so the L1 solver sees the whole clip in one window.")
     p.add_argument("--seeds", default=",".join(str(s) for s in DEFAULT_SEEDS),
                    help="comma-separated integer seeds (default: %(default)s)")
     p.add_argument("--conditions", default=",".join(DEFAULT_CONDITIONS),
                    help=f"comma-separated conditions chosen from {CONDITIONS} (default: %(default)s)")
-    p.add_argument("--n", type=int, default=DEFAULT_N, help="number of uniform samples (default: %(default)s)")
+    p.add_argument("--n", type=int, default=DEFAULT_N,
+                   help=f"number of uniform samples, {MIN_SAMPLES}..{L1_WINDOW} (default: %(default)s)")
     p.add_argument("--fps", type=float, default=DEFAULT_FPS, help="uniform sample rate (default: %(default)s)")
     p.add_argument("--out", default=None, help="write the JSON report here (default: stdout)")
     return p
@@ -577,6 +712,11 @@ __all__ = [
     "MULTISCALE_SCALES_SECONDS",
     "MULTISCALE_CANDIDATES",
     "L1_BUDGETS",
+    "L1_BUDGET_MIN",
+    "L1_BUDGET_MAX",
+    "L1_BUDGET_STEP",
+    "L1_BUDGET_COUNT",
+    "L1_CROP_MATCH_TOLERANCE",
     "L1_WEIGHTS",
     "L1_WINDOW",
     "L1_OVERLAP",
@@ -588,6 +728,7 @@ __all__ = [
     "SCOPE_NOTE",
     "LIMITATIONS",
     "translation_path_metrics",
+    "nearest_crop_index",
     "synthetic_translation_fixture",
     "build_multiscale_output",
     "build_l1_output",
