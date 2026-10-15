@@ -1614,6 +1614,89 @@ Verification. `bench/depth_layer_synthetic_suite.py` composes `bench/depth_layer
 tests** for the suite module, so the direct suite tests were run. The suite report is path-free. No production
 code changed, no production default changed, and no private paths or private data appear here.
 
+### E12 rendered-validity audit (offline, synthetic, pure NumPy; diagnostic only; no threshold)
+
+E12 closes the "no textured render yet" gap left by E09/E10/E11. The coordinate-model diagnostics measure a
+*coordinate model* (a residual path, a crop-coverage fraction, a flow error) but never rasterize a pixel, so
+their "valid coverage" is a geometric fraction, not a statement about which *rendered* pixels survive the warp.
+`bench/depth_layer_render_audit.py` is an isolated, **pure-NumPy** module that adds a rendered-pixel
+bookkeeping stage. It adds **no new model, threshold or winner**; it is not imported by `stabilize`,
+`source_coords` or any production module, changes no default, and touches no renderer.
+
+Rendering model (explicit, deterministic):
+
+- **Textures.** `build_textures` builds a `[2, H, W, 3]` float64 RGB stack from fixed sinusoids of the
+  reference coordinates (background) plus a distinct frequency set and a domain-separating offset (foreground).
+  **No RNG, no assets, no media, no weights**; values are finite and clipped to `[0, 1]`.
+- **Forward splat per frame.** For frame `t` and layer `l` the reference pixel `p` maps to `q = M[l][t](p) +
+  d_l(p)` where `M[l][t] = seq.layer_transform[l, t]` is the known affine and `d_l = seq.layer_nonaffine[l, t]`
+  is the known sampled non-affine displacement (exact zeros for the background and for zero non-affine
+  amplitude). `q` is rounded to the **nearest integer pixel** (`rasterization =
+  nearest_forward_splat`); destinations outside `[0, W-1] x [0, H-1]` are dropped (the source of splat holes).
+- **Compositing and collision policy.** The scene composites layer 0 first, then layer 1 on top, so the explicit
+  collision policy is **later layer wins**; within one layer the **last reference pixel in deterministic
+  row-major order wins** (`collision_policy = later_layer_wins_then_row_major_last`). A per-pixel
+  render-validity mask marks destinations that received at least one splat; an unwritten destination stays at
+  zero RGB with `valid=False` (a hole). **Holes and collisions are synthetic** — they are artifacts of the
+  forward splat and the collision rule, not of any stabilizer.
+- **Pull-warp.** `pull_warp` maps every output pixel `o` back to `s = E[t]^-1(o)` and **bilinearly samples** the
+  rendered frame there with a **conservative validity mask**: a pixel is valid only when all four contributing
+  source-mask taps are valid **and** the mapped sample is strictly inside the pixel-edge box `[0, W-1] x
+  [0, H-1]` (all four bilinear taps in bounds). The conservative rule makes the warped valid mask a subset of
+  the source mask's interior, so an output pixel adjacent to a hole is dropped rather than mixed with an
+  invalid neighbour. The `E[t]` used is the **estimated** `E[t]` from `bench.depth_layer_synthetic._fit_policy`
+  (per policy, pooled/background/foreground respectively).
+
+Policies and the pooled baseline. `background_lock` selects `spec.lock_rank` and `foreground_preserve` selects
+`spec.preserve_rank`; each has its own estimated `E[t]` per frame and therefore its own rendered-validity
+numbers, and **nothing is pooled between them**. The **pooled baseline** fits one affine on all valid train
+cells and is reported as a single common diagnostic path. When a policy's rank is unavailable -- under
+uninformative depth the rank collapses, under shuffled depth the rank/layer association is destroyed, and a rank
+outside the scene is simply absent -- the policy is reported `available=False` with a machine-readable reason
+and **no rendered frames are fabricated** (its `render` block is `None`); the pooled baseline remains a
+diagnostic in those regimes.
+
+Report. `bench/depth_layer_render_audit.py` records, per frame and as an aggregate, **in-bounds coverage**,
+**rendered-valid fraction**, and **finite RGB fraction / variance / counts**. The report contains **no image
+pixels**, is **path-free** and finite-safe (written atomically through `bench.manifest`). No media is decoded,
+no RAFT/MLX/production code is imported, no weights are read, the heavy lock is untouched, and **no production
+wiring, default or threshold, and no winner** is selected or changed.
+
+Independently reproduced CLI results for `T=10, W=48, H=36`, default spec and the stress spec
+`flow_noise_px=0.5, depth_error_frac=0.2, fg_nonaffine_px=2.0`. Metrics are **mean rendered-valid coverage /
+mean in-bounds coverage / mean finite-RGB fraction**:
+
+| spec | policy | rendered-valid / in-bounds / finite-RGB |
+|---|---|---|
+| default | pooled | .595081 / .813252 / 1.0 |
+| default | background_lock | .594213 / .810069 / 1.0 |
+| default | foreground_preserve | .603183 / .822859 / 1.0 |
+| stress | pooled | .543461 / .801794 / 1.0 |
+| stress | background_lock | .545775 / .804630 / 1.0 |
+| stress | foreground_preserve | .549479 / .805324 / 1.0 |
+
+Cautious note. The **lower rendered-valid coverage relative to geometric in-bounds coverage** reflects forward-
+splat **holes plus the conservative four-tap mask**; the difference is a **fixture / rasterization property**,
+**not a measured real-stabilizer crop or an advantage** of any policy. These values are **one deterministic
+synthetic configuration**, not a policy winner. This is **not perceptual evidence**, and the forward-splat hole
+rate is an artifact of the synthetic splat, not a property of stabilization.
+
+Commands:
+
+```bash
+python -m bench.depth_layer_render_audit --T 10 --W 48 --H 36 --out out/bench/depth_layer_render_audit_e12_default.json
+python -m bench.depth_layer_render_audit --T 10 --W 48 --H 36 --flow-noise-px 0.5 --depth-error-frac 0.2 --fg-nonaffine-px 2.0 --out out/bench/depth_layer_render_audit_e12_stress.json
+```
+
+Verification. Focused test module `tests/test_depth_layer_render_audit.py` passed **28 tests**; the full
+`.claude/verify.sh` passed **840 tests in 25.74 s**. CodeGraph was synced and `affected
+bench/depth_layer_render_audit.py` found **no graph-linked tests**, so the direct focused tests were run. The
+report is path-free; no production code changed, no production default changed, and **no private paths or
+private data** appear here.
+
+Next gate (E13): a **matched real-footage downstream crop / jitter / warp-validity experiment on the existing
+cached windows**, **per-window analysis only**; **no production wiring until validated**.
+
 ## What works
 
 - `mlxstab/warp.py`: Metal sampler (bilinear / Catmull-Rom / Lanczos-3, zeros/border, align_corners). `grid_sample` max abs error vs torch 1.2e-7 .. 2.4e-7. Forward only.
