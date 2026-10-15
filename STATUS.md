@@ -1704,7 +1704,7 @@ validates paired frame/depth caches, runs bidirectional RAFT, passes forward flo
 the pure NumPy core, and writes a path-free report. Rank bins are recomputed per pair; there is no near/far label,
 no image render, and no model output enters production.
 
-Both existing 30-frame windows were run independently with RAFT-things MLX, 24 iterations, downscale 2, four
+Both existing 30-frame windows were run separately with RAFT-things MLX, 24 iterations, downscale 2, four
 rank bins, and `sigma=1`. The values below are each window's own estimates; they are not pooled across clips.
 
 | window | policy | path jitter (px) | geometric in-bounds | conservative rendered-valid |
@@ -1738,12 +1738,13 @@ and a missing grid axis falls back to the single-run `n_bins`/`smooth_sigma`. Om
 single-run report unchanged. The sweep is a per-window diagnostic enumeration only; it selects no smoothing or
 bin policy and adds no production wiring.
 
-### E14 real-window sensitivity sweep (two windows; 16 variants each)
+### E14 real-window sensitivity sweep (three windows; 16 variants each)
 
-The same two windows were rerun once each with `bin_counts=(1,2,4,8)` and `smooth_sigmas=(0,0.5,1,2)`;
-each RAFT pass produced 16 NumPy audit variants without rerunning flow. The zero-sigma regression exposed and
-fixed floating-point edge loss: with no smoothing the correction is exactly identity, so jitter is 0 and both
-coverage measures are exactly 1.0. This is a no-stabilization control, not a quality result.
+The two E13 windows plus one additional `stream00016` window were each run once with
+`bin_counts=(1,2,4,8)` and `smooth_sigmas=(0,0.5,1,2)`; each RAFT pass produced 16 NumPy audit variants without
+rerunning flow. The zero-sigma regression exposed and fixed floating-point edge loss: with no smoothing the
+correction is exactly identity, so jitter is 0 and both coverage measures are exactly 1.0. This is a
+no-stabilization control, not a quality result.
 
 The table reports pooled `jitter / rendered-valid coverage` and the min-to-max range over every depth-rank
 policy at bin counts 2, 4 and 8. These envelopes are descriptive across different model resolutions, not a
@@ -1759,11 +1760,16 @@ ranking or pooled cross-window score.
 | 00176 | 0.5 | 0.01079 / 0.97691 | 0.01078–0.01687 | 0.97501–0.97728 |
 | 00176 | 1 | 0.03575 / 0.97698 | 0.03574–0.05510 | 0.97487–0.97757 |
 | 00176 | 2 | 0.06299 / 0.97779 | 0.06206–0.10561 | 0.97525–0.97826 |
+| stream00016 | 0 | 0.00000 / 1.00000 | 0.00000–0.00000 | 1.00000–1.00000 |
+| stream00016 | 0.5 | 0.00460 / 0.97833 | 0.00512–0.01546 | 0.97510–0.97861 |
+| stream00016 | 1 | 0.01264 / 0.97775 | 0.01368–0.03984 | 0.97644–0.97875 |
+| stream00016 | 2 | 0.01704 / 0.97667 | 0.01734–0.05841 | 0.97623–0.97923 |
 
 The smoother choice changes the jitter/coverage pair substantially in the first window; the second window's
-coverage is comparatively flat and its jitter remains much smaller. More bins also produce larger jitter in
-some rank policies. These results show parameter and scene sensitivity, not a robust depth-rank advantage.
-No combination is selected. Full per-pair reports are local-only under ignored `out/bench/flow_prediction_real/`.
+coverage is comparatively flat and its jitter remains much smaller. The third window also has a substantially
+lower jitter scale than the first. More bins produce larger jitter in some rank policies in every window. These
+results show parameter and scene sensitivity, not a robust depth-rank advantage. No combination is selected.
+Full per-pair reports are local-only under ignored `out/bench/flow_prediction_real/`.
 
 Reports are under ignored `out/bench/flow_prediction_real/`; no source clips or dense flow maps are committed.
 Focused tests for the core and cache runner passed **35 tests** (including the sweep grid validation, the
@@ -1771,7 +1777,7 @@ one-bin rank-equals-pooled sanity check and a fake-runner check that one RAFT pa
 variant); CodeGraph was synced and found no linked tests,
 so these tests were run directly. No production code or default changed.
 
-Next gate: repeat on more independent windows and evaluate rendered image quality against a human-reviewed
+Next gate: repeat on more distinct source windows and evaluate rendered image quality against a human-reviewed
 baseline before considering any policy or production wiring.
 
 ## What works

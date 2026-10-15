@@ -1101,8 +1101,8 @@ applies a component-wise Gaussian path smoother (`sigma=1 pair`), and reports ji
 conservative bilinear coverage. Rank bins are neutral numeric strata; they are not foreground/background or
 metric depth. Cycle-map-valid means finite and in bounds, not a selected residual threshold.
 
-Two independent existing cache windows were measured using RAFT-things MLX, 24 iterations, downscale 2. Results
-are not pooled across windows:
+Two existing cache windows were measured as separate analyses using RAFT-things MLX, 24 iterations, downscale 2.
+Results are not pooled across windows:
 
 | window | policy | jitter px | in-bounds | rendered-valid |
 |---|---|---:|---:|---:|
@@ -1121,9 +1121,11 @@ The optional `--sweep-bins 1,2,4,8 --sweep-sigmas 0,0.5,1,2` runs 16 variants fr
 for each window. The zero-sigma control is exact identity correction (0 jitter, 1.0 coverage); a regression
 test guards against floating-point edge loss there. Across sigma values, the first window's pooled jitter /
 rendered-valid coverage moves from `0 / 1.0` at sigma 0 to `2.36869 / 0.94545` at sigma 2. In the second it
-moves from `0 / 1.0` to `0.06299 / 0.97779`. Across rank policies at 2, 4 and 8 bins, jitter ranges are
-`0.53474–3.40642` for stream00000 and `0.01078–0.10561` for 00176 (over the full sigma sweep). These ranges
-show strong scene and parameter sensitivity; they do not identify a winner. Full per-window values are in
+moves from `0 / 1.0` to `0.06299 / 0.97779`. One additional `stream00016` window was added by running the
+local depth-cache builder on its already-decoded frame cache, with samples every four frames. Across rank
+policies at 2, 4 and 8 bins, jitter ranges over the full sigma sweep are `0.53474–3.40642` for stream00000,
+`0.01078–0.10561` for 00176, and `0.00512–0.05841` for stream00016. These windows are kept separate; these
+ranges show scene and parameter sensitivity and do not identify a winner. Full per-window values are in
 `STATUS.md`.
 
 ```bash
@@ -1136,11 +1138,14 @@ Re-run the same windows with the sensitivity grid:
 ```bash
 python -m bench.depth_layer_real_runner --frames-npz out/bench/flow_prediction_real/stream00000_t25_frames.npz --depth-npz out/bench/flow_prediction_real/stream00000_t25_depth_v2base_30frames.npz --weights vendor/weights/conv/raft-things.safetensors --out out/bench/flow_prediction_real/stream00000_t25_depth_layer_real_sweep.json --iters 24 --downscale 2 --sweep-bins 1,2,4,8 --sweep-sigmas 0,0.5,1,2
 python -m bench.depth_layer_real_runner --frames-npz out/bench/flow_prediction_real/00176_t60_frames.npz --depth-npz out/bench/flow_prediction_real/00176_t60_depth_v2base_every4.npz --weights vendor/weights/conv/raft-things.safetensors --out out/bench/flow_prediction_real/00176_t60_depth_layer_real_sweep.json --iters 24 --downscale 2 --sweep-bins 1,2,4,8 --sweep-sigmas 0,0.5,1,2
+python3 -m bench.depth_cache --frames-npz out/bench/flow_prediction_real/stream00016_t130_frames.npz --out out/bench/flow_prediction_real/stream00016_t130_depth_v2base_every4.npz --every 4 --lock on
+python -m bench.depth_layer_real_runner --frames-npz out/bench/flow_prediction_real/stream00016_t130_frames.npz --depth-npz out/bench/flow_prediction_real/stream00016_t130_depth_v2base_every4.npz --weights vendor/weights/conv/raft-things.safetensors --out out/bench/flow_prediction_real/stream00016_t130_depth_layer_real_sweep.json --iters 24 --downscale 2 --sweep-bins 1,2,4,8 --sweep-sigmas 0,0.5,1,2
 ```
 
 Focused core/runner tests passed **35 tests**; the synthetic, multi-seed and rendered depth-layer suites plus
 depth-motion audit passed another **168 tests**. CodeGraph found no graph-linked tests, so these tests were run
-directly. No production code or default changed. The next gate is more independent windows plus a
+directly. The full `.claude/verify.sh` passed **875 tests in 34.42 s**. No production code or default changed.
+The next gate is more distinct source windows plus a
 human-reviewed rendered-quality comparison before any production wiring.
 
 ## Tests
