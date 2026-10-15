@@ -82,26 +82,123 @@ def test_source_indices_exact_nearest_unique_and_refuses_ambiguity():
         R.source_indices(60, 30, 3, 4)
 
 
-def test_build_labels_raw_left_stabilized_right_and_writes_provenance(tmp_path, monkeypatch):
+def test_build_writes_original_and_position_reversed_clips_with_provenance(tmp_path, monkeypatch):
     manifest_path, raw, stab = _setup(monkeypatch, tmp_path)
     video_path = tmp_path / "paired.mp4"
     report_path = tmp_path / "paired.json"
     report = R.build(manifest_path, out_video=video_path, out_report=report_path,
                      panel_width=40, panel_height=32)
-    enc = FakeEncoder.instances[0]
-    assert len(enc.frames) == 2
-    assert enc.frames[0].shape == (32, 80, 3)
-    assert np.mean(enc.frames[0][28:, :40]) < 1  # raw frame index zero
-    assert np.all(enc.frames[0][28:, 75:] == 200)  # stabilized frame index zero
+    assert len(FakeEncoder.instances) == 2
+    original, reversed_clip = FakeEncoder.instances
+    assert ".paired." in original.path and "_posrev" not in original.path
+    assert ".paired_posrev." in reversed_clip.path
+    for encoder in (original, reversed_clip):
+        assert len(encoder.frames) == 2
+        assert encoder.frames[0].shape == (32, 80, 3)
+    # Original: raw frame zero (0) on the left, stabilized frame zero (200) on the right.
+    assert np.mean(original.frames[0][28:, :40]) < 1
+    assert np.all(original.frames[0][28:, 75:] == 200)
+    # Position-reversed: the same paired frames with the two panels exchanged (sample right of the label box).
+    assert np.all(reversed_clip.frames[0][28:, 30:40] == 200)
+    assert np.mean(reversed_clip.frames[0][28:, 75:]) < 1
     assert report["evidence"]["mapping"]["source_frame_indices"] == [0, 2]
-    assert report["evidence"]["panels"]["left"] == "A (raw)"
-    assert report["evidence"]["panels"]["right"] == "B (stabilized)"
+    assert report["evidence"]["panels"]["original"] == {"clip": "paired.mp4", "left_panel": "raw",
+                                                         "right_panel": "stabilized"}
+    assert report["evidence"]["panels"]["position_reversed"] == {"clip": "paired_posrev.mp4",
+                                                                  "left_panel": "stabilized",
+                                                                  "right_panel": "raw"}
+    assert [entry["role"] for entry in report["evidence"]["outputs"]] == ["original", "position_reversed"]
+    assert [entry["frames"] for entry in report["evidence"]["outputs"]] == [2, 2]
     api_input = json.loads(report_path.read_text())
-    assert api_input["evidence"]["output"]["frames"] == 2
+    assert api_input["output"]["clips"] == ["paired.mp4", "paired_posrev.mp4"]
     from bench import gemini_blind_review as G
     validated = G.load_review(report_path)
+    assert [pair["clip"] for pair in validated["pairs"]] == ["paired.mp4", "paired_posrev.mp4"]
     assert G.map_preference(validated["pairs"][0]["blind_mapping"], "A") == "raw"
     assert G.map_preference(validated["pairs"][0]["blind_mapping"], "B") == "stabilized"
+    assert G.map_preference(validated["pairs"][1]["blind_mapping"], "A") == "stabilized"
+    assert G.map_preference(validated["pairs"][1]["blind_mapping"], "B") == "raw"
+    # The Gemini reviewer validates and enumerates both clips with their hidden mappings.
+    tasks = G.collect_tasks([report_path])
+    assert [task["pair_index"] for task in tasks] == [0, 1]
+    assert tasks[0]["blind_mapping"]["left_panel"] == "raw"
+    assert tasks[1]["blind_mapping"]["left_panel"] == "stabilized"
+    assert tasks[1]["blind_mapping"]["right_panel"] == "raw"
+
+
+def test_build_enforces_inline_cap_for_each_clip(tmp_path, monkeypatch):
+    manifest_path, _, _ = _setup(monkeypatch, tmp_path)
+
+    class SizedEncoder(FakeEncoder):
+        def close(self):
+            Path(self.path).write_bytes(b"x" * (4096 if "posrev" in self.path else 8))
+
+    monkeypatch.setattr(media, "Encoder", SizedEncoder)
+    monkeypatch.setattr(R.Gemini, "MAX_INLINE_BYTES", 1024)
+    with pytest.raises(R.ReviewBuildError, match="position_reversed"):
+        R.build(manifest_path, panel_width=40, panel_height=32)
+
+    monkeypatch.setattr(R.Gemini, "MAX_INLINE_BYTES", 8192)
+    report = R.build(manifest_path, out_video=tmp_path / "ok.mp4", out_report=tmp_path / "ok.json",
+                     panel_width=40, panel_height=32)
+    assert [entry["role"] for entry in report["evidence"]["outputs"]] == ["original", "position_reversed"]
+
+
+def test_build_refuses_existing_reversed_artifact(tmp_path, monkeypatch):
+    manifest_path, _, _ = _setup(monkeypatch, tmp_path)
+    reversed_path = tmp_path / "paired_posrev.mp4"
+    reversed_path.write_bytes(b"keep")
+    with pytest.raises(FileExistsError, match="refusing to overwrite"):
+        R.build(manifest_path, out_video=tmp_path / "paired.mp4", out_reversed=reversed_path,
+                panel_width=40, panel_height=32)
+    assert reversed_path.read_bytes() == b"keep"
+
+
+def test_build_requires_both_clips_and_report_in_one_directory(tmp_path, monkeypatch):
+    manifest_path, _, _ = _setup(monkeypatch, tmp_path)
+    other = tmp_path / "elsewhere"
+    other.mkdir()
+    with pytest.raises(R.ReviewBuildError, match="same directory"):
+        R.build(manifest_path, out_video=tmp_path / "paired.mp4",
+                out_reversed=other / "paired_posrev.mp4", out_report=tmp_path / "paired.json",
+                panel_width=40, panel_height=32)
+
+
+def test_build_rejects_bad_pts_for_reversed_clip(tmp_path, monkeypatch):
+    manifest_path, _, _ = _setup(monkeypatch, tmp_path)
+    good = media.frame_pts
+    monkeypatch.setattr(media, "frame_pts",
+                        lambda path: _pts(2, 25.0) if "_posrev" in str(path) else good(path))
+    with pytest.raises(R.ReviewBuildError, match="generated position_reversed"):
+        R.build(manifest_path, out_video=tmp_path / "paired.mp4", panel_width=40, panel_height=32)
+
+
+def test_build_rejects_source_frame_dimensions_changing_midstream(tmp_path, monkeypatch):
+    manifest_path, _, _ = _setup(monkeypatch, tmp_path)
+    decode = media.decode
+
+    def wrong_source_frame(path, *args, **kwargs):
+        frames, fps, size = decode(path, *args, **kwargs)
+        if Path(path).name == "source.mts":
+            frames = iter([np.zeros((4, 8, 3), np.uint8), *list(frames)[1:]])
+        return frames, fps, size
+
+    monkeypatch.setattr(media, "decode", wrong_source_frame)
+    with pytest.raises(R.ReviewBuildError, match="source frame dimensions changed"):
+        R.build(manifest_path, panel_width=40, panel_height=32)
+
+
+def test_cli_builds_both_clips_and_reports_reversed(tmp_path, monkeypatch, capsys):
+    manifest_path, _, _ = _setup(monkeypatch, tmp_path)
+    video_path = tmp_path / "cli.mp4"
+    report_path = tmp_path / "cli.json"
+    assert R.main([str(manifest_path), "--out-video", str(video_path),
+                   "--out-report", str(report_path)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"status": "success", "output": str(video_path),
+                       "reversed": str(tmp_path / "cli_posrev.mp4"),
+                       "report": str(report_path), "frames": 2}
+    assert len(FakeEncoder.instances) == 2
 
 
 @pytest.mark.parametrize("change, message", [

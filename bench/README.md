@@ -1177,19 +1177,31 @@ human-reviewed rendered-quality comparison before any production wiring.
 For a direct raw-versus-stabilized visual check, `bench.real_pair_review` makes a synchronized comparison
 from a successful `run_case` manifest. It verifies the source hash, source window, decoded counts, output cadence
 and encoded PTS, then maps each output timestamp to the unique nearest deinterlaced source frame. Source frames
-may be skipped when the output cadence is lower; duplicate or ambiguous pairings are refused. The generated
-video labels the left panel `A` (raw) and the right panel `B` (stabilized). Its adjacent `review.json` is
-compatible with the existing Gemini API reviewer; the panel mapping stays local while Gemini receives only
-the clip bytes and fixed A/B review brief. A nested `evidence` object records the source-frame mapping and
-hashes. Building the clip is local and makes no API call.
+may be skipped when the output cadence is lower; duplicate or ambiguous pairings are refused.
+
+The tool encodes **two** blinded A/B MP4s from the same paired frames in one pass and writes **one**
+`review.json` describing both. The original clip labels the left panel `A` (raw) and the right panel `B`
+(stabilized); the position-reversed clip swaps the two panels but keeps the fixed A-left/B-right bitmap
+labels, so a reviewer always sees `A` on the left and `B` on the right. Each clip's hidden `blind_mapping`
+records which method is behind which letter (original: left/A = raw, right/B = stabilized; reversed:
+left/A = stabilized, right/B = raw), and the A/B preference is only mapped back to raw/stabilized locally
+after the response. The report keeps the exact same source-frame pairing for both clips and refuses to
+generate either clip if the generated MP4 would exceed Gemini's 15 MiB (15,728,640-byte) inline cap. A nested
+`evidence` object records the source-frame mapping, both panel orders and both output hashes, and a top-level
+`position_reversal` block records the swap. The report is compatible with the existing Gemini API reviewer;
+the panel mappings stay local while Gemini receives only the clip bytes and the fixed A/B review brief.
+Building the clips is local and makes no API call.
 
 ```bash
 .venv/bin/python -m bench.real_pair_review out/bench/RUN/manifest.json
 .venv/bin/python -m bench.gemini_blind_review out/bench/RUN/raw_vs_stabilized.json --out out/bench/RUN/gemini_review.json
 ```
 
-Review MP4 and report default to the run directory. Use `--out-video`, `--out-report`, `--panel-width`, and
-`--panel-height` to choose alternate paths or dimensions. Existing artifacts are never overwritten.
+The original MP4, the position-reversed MP4 and the report default to the run directory
+(`raw_vs_stabilized.mp4`, `raw_vs_stabilized_posrev.mp4`, `raw_vs_stabilized.json`), all in the same
+directory so the reviewer resolves both clips. Use `--out-video`, `--out-reversed`, `--out-report`,
+`--panel-width`, and `--panel-height` to choose alternate paths or dimensions; both clips and the report must
+share one directory. Existing artifacts are never overwritten.
 
 After `bench/multiscale_real_review.py` writes a `review.json` (the blinded A/B MP4s plus the hidden
 `blind_mapping`), `bench.gemini_blind_review` sends each short review MP4 inline (`video/mp4`, base64) to
