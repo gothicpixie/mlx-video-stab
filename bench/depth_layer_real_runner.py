@@ -15,18 +15,35 @@ import numpy as np
 from . import depth_temporal_pilot as D
 from . import flow_prediction_real as R
 from . import manifest as MF
-from .depth_layer_real_audit import audit_depth_layer_window
+from .depth_layer_real_audit import (
+    audit_depth_layer_sweep,
+    audit_depth_layer_window,
+    validate_sweep_options,
+)
 
 
 def run_cached_audit(frames_npz, depth_npz, weights, out_path=None, *, iters=12, downscale=1,
-                     n_bins=4, smooth_sigma=1.0, flow_dtype="float32", corr_dtype="float32",
+                     n_bins=4, smooth_sigma=1.0, sweep_bins=None, sweep_sigmas=None,
+                     flow_dtype="float32", corr_dtype="float32",
                      lock_enabled=True, lock_chunk=0, lock_pause=0.0, lock_factory=None,
                      runner_factory=None, write=True, log=print):
-    """Run the matched downstream geometry audit on exactly one paired cache window."""
+    """Run the matched downstream geometry audit on exactly one paired cache window.
+
+    When ``sweep_bins`` or ``sweep_sigmas`` is supplied the RAFT pass still runs exactly
+    once; the collected observations are then audited independently for every requested
+    combination by :func:`bench.depth_layer_real_audit.audit_depth_layer_sweep`. A missing
+    grid axis falls back to the single-run ``n_bins``/``smooth_sigma`` value. When both
+    sweep arguments are omitted the existing single-run report is returned unchanged.
+    """
     if int(iters) < 1 or int(downscale) < 1 or int(n_bins) < 1:
         raise ValueError("iters, downscale and n_bins must be >= 1")
     if not np.isfinite(float(smooth_sigma)) or float(smooth_sigma) < 0:
         raise ValueError("smooth_sigma must be finite and >= 0")
+    sweep = sweep_bins is not None or sweep_sigmas is not None
+    if sweep:
+        bins = tuple(sweep_bins) if sweep_bins is not None else (int(n_bins),)
+        sigmas = tuple(sweep_sigmas) if sweep_sigmas is not None else (float(smooth_sigma),)
+        validate_sweep_options(bins, sigmas)
     if int(lock_chunk) < 0 or float(lock_pause) < 0:
         raise ValueError("lock_chunk and lock_pause must be >= 0")
     frames_npz, depth_npz, weights = Path(frames_npz), Path(depth_npz), Path(weights)
@@ -74,9 +91,15 @@ def run_cached_audit(frames_npz, depth_npz, weights, out_path=None, *, iters=12,
             if log:
                 log(f"depth-layer real audit pair {i + 1}/{len(frame_indices) - 1}")
 
-    report = audit_depth_layer_window(observations, n_bins=n_bins, smooth_sigma=smooth_sigma)
-    for item, provenance in zip(report["pairs"], pair_meta):
-        item.update(provenance)
+    if sweep:
+        report = audit_depth_layer_sweep(observations, bin_counts=bins, smooth_sigmas=sigmas)
+        for variant in report["variants"].values():
+            for item, provenance in zip(variant["pairs"], pair_meta):
+                item.update(provenance)
+    else:
+        report = audit_depth_layer_window(observations, n_bins=n_bins, smooth_sigma=smooth_sigma)
+        for item, provenance in zip(report["pairs"], pair_meta):
+            item.update(provenance)
     lock_status = lock.status()
     lock_status.pop("path", None)
     report.update({
@@ -107,6 +130,10 @@ def build_parser():
     parser.add_argument("--downscale", type=int, default=1)
     parser.add_argument("--bins", type=int, default=4)
     parser.add_argument("--smooth-sigma", type=float, default=1.0, help="Gaussian sigma measured in pairs")
+    parser.add_argument("--sweep-bins", default=None,
+                        help="comma-separated positive bin counts enabling the audit sweep")
+    parser.add_argument("--sweep-sigmas", default=None,
+                        help="comma-separated finite nonnegative sigmas enabling the audit sweep")
     parser.add_argument("--flow-dtype", choices=("float32", "float16"), default="float32")
     parser.add_argument("--corr-dtype", choices=("float32", "float16"), default="float32")
     parser.add_argument("--lock", choices=("on", "off"), default="on")
@@ -115,11 +142,21 @@ def build_parser():
     return parser
 
 
+def _parse_sweep_values(text, cast):
+    """Parse a comma-separated CLI grid axis into a tuple, or ``None`` when the flag is absent."""
+    if text is None:
+        return None
+    return tuple(cast(part.strip()) for part in text.split(",") if part.strip())
+
+
 def main(argv=None):
     args = build_parser().parse_args(argv)
     result = run_cached_audit(args.frames_npz, args.depth_npz, args.weights, args.out,
                               iters=args.iters, downscale=args.downscale, n_bins=args.bins,
-                              smooth_sigma=args.smooth_sigma, flow_dtype=args.flow_dtype,
+                              smooth_sigma=args.smooth_sigma,
+                              sweep_bins=_parse_sweep_values(args.sweep_bins, int),
+                              sweep_sigmas=_parse_sweep_values(args.sweep_sigmas, float),
+                              flow_dtype=args.flow_dtype,
                               corr_dtype=args.corr_dtype, lock_enabled=(args.lock == "on"),
                               lock_chunk=args.lock_chunk, lock_pause=args.lock_pause)
     print(MF.dumps_json(result))

@@ -1117,13 +1117,30 @@ Other rank bins also move the trade-off; no rank policy consistently improves ji
 model-derived affine path proxy, not ground-truth camera motion or rendered stabilization quality. Results are
 path-free and ignored under `out/bench/flow_prediction_real/`; no clips or dense flow maps are committed.
 
+The optional `--sweep-bins 1,2,4,8 --sweep-sigmas 0,0.5,1,2` runs 16 variants from the same RAFT observations
+for each window. The zero-sigma control is exact identity correction (0 jitter, 1.0 coverage); a regression
+test guards against floating-point edge loss there. Across sigma values, the first window's pooled jitter /
+rendered-valid coverage moves from `0 / 1.0` at sigma 0 to `2.36869 / 0.94545` at sigma 2. In the second it
+moves from `0 / 1.0` to `0.06299 / 0.97779`. Across rank policies at 2, 4 and 8 bins, jitter ranges are
+`0.53474–3.40642` for stream00000 and `0.01078–0.10561` for 00176 (over the full sigma sweep). These ranges
+show strong scene and parameter sensitivity; they do not identify a winner. Full per-window values are in
+`STATUS.md`.
+
 ```bash
 python -m bench.depth_layer_real_runner --frames-npz out/bench/flow_prediction_real/stream00000_t25_frames.npz --depth-npz out/bench/flow_prediction_real/stream00000_t25_depth_v2base_30frames.npz --weights vendor/weights/conv/raft-things.safetensors --out out/bench/flow_prediction_real/stream00000_t25_depth_layer_real.json --iters 24 --downscale 2 --bins 4 --smooth-sigma 1
 python -m bench.depth_layer_real_runner --frames-npz out/bench/flow_prediction_real/00176_t60_frames.npz --depth-npz out/bench/flow_prediction_real/00176_t60_depth_v2base_every4.npz --weights vendor/weights/conv/raft-things.safetensors --out out/bench/flow_prediction_real/00176_t60_depth_layer_real.json --iters 24 --downscale 2 --bins 4 --smooth-sigma 1
 ```
 
-Focused core/runner tests passed **16 tests**. CodeGraph found no graph-linked tests, so the focused tests were
-run directly. No production code or default changed. The next gate is more independent windows plus a
+Re-run the same windows with the sensitivity grid:
+
+```bash
+python -m bench.depth_layer_real_runner --frames-npz out/bench/flow_prediction_real/stream00000_t25_frames.npz --depth-npz out/bench/flow_prediction_real/stream00000_t25_depth_v2base_30frames.npz --weights vendor/weights/conv/raft-things.safetensors --out out/bench/flow_prediction_real/stream00000_t25_depth_layer_real_sweep.json --iters 24 --downscale 2 --sweep-bins 1,2,4,8 --sweep-sigmas 0,0.5,1,2
+python -m bench.depth_layer_real_runner --frames-npz out/bench/flow_prediction_real/00176_t60_frames.npz --depth-npz out/bench/flow_prediction_real/00176_t60_depth_v2base_every4.npz --weights vendor/weights/conv/raft-things.safetensors --out out/bench/flow_prediction_real/00176_t60_depth_layer_real_sweep.json --iters 24 --downscale 2 --sweep-bins 1,2,4,8 --sweep-sigmas 0,0.5,1,2
+```
+
+Focused core/runner tests passed **35 tests**; the synthetic, multi-seed and rendered depth-layer suites plus
+depth-motion audit passed another **168 tests**. CodeGraph found no graph-linked tests, so these tests were run
+directly. No production code or default changed. The next gate is more independent windows plus a
 human-reviewed rendered-quality comparison before any production wiring.
 
 ## Tests

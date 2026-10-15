@@ -3,6 +3,10 @@
 This compares one pooled affine flow fit with neutral per-frame relative-depth-rank
 fits. It measures implied affine paths and inverse-warp coverage; it does not render
 images or establish camera motion, depth accuracy, or perceptual stabilization.
+
+``audit_depth_layer_sweep`` runs the same per-window audit across a declared grid of
+bin counts and smoothing sigmas and returns every variant. It scores and selects
+nothing; the sweep is a diagnostic enumeration, not a tuning result.
 """
 from __future__ import annotations
 
@@ -11,6 +15,7 @@ from typing import Sequence
 import numpy as np
 
 SCHEMA = "mlxstab.depth_layer_real_audit/1"
+SWEEP_SCHEMA = "mlxstab.depth_layer_real_audit_sweep/1"
 LIMITATIONS = [
     "flow and monocular depth are model-derived; neither is ground truth",
     "depth strata are per-frame relative-rank bins, not metric depth or near/far labels",
@@ -21,6 +26,10 @@ LIMITATIONS = [
     "each result describes one supplied source window; windows must be audited independently",
 ]
 MIN_FIT_SAMPLES = 6
+SWEEP_LIMITATION = (
+    "the sweep enumerates every requested bin-count/smoothing combination independently; "
+    "no combination is scored, ranked or selected as a winner"
+)
 
 
 def _finite_float(value):
@@ -84,12 +93,14 @@ def _path_summary(transforms, h, w, sigma):
         kernel /= kernel.sum()
         smooth = np.stack([np.convolve(np.pad(raw[:, k], (radius, radius), mode="edge"), kernel,
                                        mode="valid") for k in range(6)], axis=1)
+        smoothed_path = []
+        for p in smooth:
+            smoothed_path.append(np.array([[1 + p[0], p[1], p[2]], [p[3], 1 + p[4], p[5]],
+                                           [0, 0, 1]], np.float64))
     else:
-        smooth = raw.copy()
-    smoothed_path = []
-    for p in smooth:
-        smoothed_path.append(np.array([[1 + p[0], p[1], p[2]], [p[3], 1 + p[4], p[5]],
-                                       [0, 0, 1]], np.float64))
+        # Preserve the exact matrices: reconstructing I + (C-I) can introduce tiny
+        # round-off at image edges and falsely lower validity for an identity correction.
+        smoothed_path = path
     points = np.array([[0, 0, 1], [w - 1, 0, 1], [w - 1, h - 1, 1],
                        [0, h - 1, 1], [(w - 1) / 2, (h - 1) / 2, 1]], np.float64).T
     deviations = []
@@ -99,7 +110,7 @@ def _path_summary(transforms, h, w, sigma):
     for raw_c, smooth_c in zip(path, smoothed_path):
         deviations.append((raw_c @ points)[:2] - (smooth_c @ points)[:2])
         try:
-            correction = smooth_c @ np.linalg.inv(raw_c)
+            correction = np.eye(3, dtype=np.float64) if sigma == 0 else smooth_c @ np.linalg.inv(raw_c)
             source = np.linalg.inv(correction) @ target
             x, y = source[0], source[1]
             finite = np.isfinite(source).all(axis=0)
@@ -190,3 +201,81 @@ def audit_depth_layer_window(observations: Sequence[dict], *, n_bins: int = 4,
             "rank_ids_per_pair": rank_sets, "smoothing": {"method": "component-wise Gaussian",
             "sigma_pairs": smooth_sigma, "boundary": "nearest"}, "limitations": list(LIMITATIONS),
             "pairs": pair_details, "policies": summaries}
+
+
+def _sweep_bin_counts(bin_counts) -> list:
+    """Normalise ``bin_counts`` to a nonempty list of positive ``int`` values or raise ``ValueError``."""
+    if isinstance(bin_counts, (str, bytes)):
+        raise ValueError("bin_counts must be a nonempty sequence of positive integers")
+    try:
+        values = list(bin_counts)
+    except TypeError as exc:
+        raise ValueError("bin_counts must be a nonempty sequence of positive integers") from exc
+    if not values:
+        raise ValueError("bin_counts must be a nonempty sequence of positive integers")
+    checked = []
+    for value in values:
+        if isinstance(value, bool) or not isinstance(value, (int, np.integer)) or int(value) < 1:
+            raise ValueError("bin_counts must be a nonempty sequence of positive integers")
+        checked.append(int(value))
+    return list(dict.fromkeys(checked))
+
+
+def _sweep_sigmas(smooth_sigmas) -> list:
+    """Normalise ``smooth_sigmas`` to a nonempty list of finite nonnegative floats."""
+    if isinstance(smooth_sigmas, (str, bytes)):
+        raise ValueError("smooth_sigmas must be a nonempty sequence of finite nonnegative numbers")
+    try:
+        values = list(smooth_sigmas)
+    except TypeError as exc:
+        raise ValueError("smooth_sigmas must be a nonempty sequence of finite nonnegative numbers") from exc
+    if not values:
+        raise ValueError("smooth_sigmas must be a nonempty sequence of finite nonnegative numbers")
+    checked = []
+    for value in values:
+        try:
+            sigma = float(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "smooth_sigmas must be a nonempty sequence of finite nonnegative numbers") from exc
+        if not np.isfinite(sigma) or sigma < 0:
+            raise ValueError("smooth_sigmas must be a nonempty sequence of finite nonnegative numbers")
+        checked.append(sigma)
+    return list(dict.fromkeys(checked))
+
+
+def validate_sweep_options(bin_counts=(1, 2, 4, 8), smooth_sigmas=(0, 0.5, 1, 2)):
+    """Validate a sweep grid and return ``(bin_counts, smooth_sigmas)`` as normalised lists.
+
+    ``bin_counts`` must be a nonempty sequence of positive integers; ``smooth_sigmas`` must be
+    a nonempty sequence of finite, nonnegative numbers. Raises ``ValueError`` otherwise.
+    """
+    return _sweep_bin_counts(bin_counts), _sweep_sigmas(smooth_sigmas)
+
+
+def sweep_variant_key(n_bins, smooth_sigma) -> str:
+    """Stable, filesystem/JSON-safe key for one ``(n_bins, smooth_sigma)`` variant."""
+    return f"bins_{int(n_bins)}__sigma_{float(smooth_sigma):g}"
+
+
+def audit_depth_layer_sweep(observations: Sequence[dict], *, bin_counts=(1, 2, 4, 8),
+                            smooth_sigmas=(0, 0.5, 1, 2)) -> dict:
+    """Run :func:`audit_depth_layer_window` independently for every grid combination.
+
+    Each Cartesian ``(n_bins, smooth_sigma)`` pair is audited on the same supplied window
+    and the full per-window report is kept verbatim under ``variants``, keyed by a stable
+    string such as ``"bins_4__sigma_1"``. Every window (the single supplied observation
+    sequence) is preserved as its own report; no pooling, scoring, ranking or winner
+    selection is performed. The returned structure is JSON-safe (finite floats only).
+    """
+    bins, sigmas = validate_sweep_options(bin_counts, smooth_sigmas)
+    variants = {}
+    for n_bins in bins:
+        for sigma in sigmas:
+            variants[sweep_variant_key(n_bins, sigma)] = audit_depth_layer_window(
+                observations, n_bins=n_bins, smooth_sigma=sigma)
+    first = next(iter(variants.values()))
+    return {"schema": SWEEP_SCHEMA, "pair_count": first["pair_count"],
+            "feature_grid": list(first["feature_grid"]), "bin_counts": list(bins),
+            "smooth_sigmas": list(sigmas), "variants": variants,
+            "limitations": list(LIMITATIONS) + [SWEEP_LIMITATION]}

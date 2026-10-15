@@ -40,6 +40,16 @@ class FakeRunner:
         return np.zeros((self.h, self.w, 2)), np.zeros((self.h, self.w, 2))
 
 
+class CountingRunner(FakeRunner):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.pair_calls = 0
+
+    def reference_pair(self, src, dst, iters):
+        self.pair_calls += 1
+        return super().reference_pair(src, dst, iters)
+
+
 def write_caches(tmp_path, *, n=3, h=64, w=80):
     frames_path = tmp_path / "frames.npz"
     frames = np.zeros((n, h, w, 3), np.uint8)
@@ -91,3 +101,44 @@ def test_runner_rejects_bad_parameters_before_loading_model(tmp_path):
     with pytest.raises(ValueError, match="iters"):
         runner.run_cached_audit(frames, depth, weights, iters=0, runner_factory=FakeRunner,
                                 lock_factory=FakeLock, log=None)
+
+
+def test_sweep_runner_runs_raft_once_and_reuses_observations(tmp_path):
+    frames, depth, weights = write_caches(tmp_path)
+    created = []
+
+    def factory(*args):
+        instance = CountingRunner(*args)
+        created.append(instance)
+        return instance
+
+    result = runner.run_cached_audit(frames, depth, weights, None, runner_factory=factory,
+                                     lock_factory=FakeLock, sweep_bins=(1, 2),
+                                     sweep_sigmas=(0, 1), write=False, log=None)
+    assert len(created) == 1
+    assert created[0].pair_calls == 2  # one RAFT pass over the two adjacent frame pairs
+    assert set(result["variants"]) == {
+        "bins_1__sigma_0", "bins_1__sigma_1", "bins_2__sigma_0", "bins_2__sigma_1"}
+    for variant in result["variants"].values():
+        assert variant["pair_count"] == 2
+        assert len(variant["pairs"]) == 2
+        assert variant["pairs"][0]["source_frame_indices"] == [0, 1]
+        assert variant["pairs"][0]["time_s"] == [0.0, 0.5]
+    assert "pairs" not in result  # the sweep nests each variant instead of a single-run report
+    assert result["flow"]["feature_grid"] == [8, 10]
+    json.dumps(result, allow_nan=False)
+
+
+def test_sweep_runner_falls_back_to_single_run_axis(tmp_path):
+    frames, depth, weights = write_caches(tmp_path)
+    result = runner.run_cached_audit(frames, depth, weights, None, runner_factory=FakeRunner,
+                                     lock_factory=FakeLock, sweep_bins=(1,), smooth_sigma=0.5,
+                                     write=False, log=None)
+    assert set(result["variants"]) == {"bins_1__sigma_0.5"}
+
+
+def test_sweep_runner_rejects_bad_grid_before_loading_model(tmp_path):
+    frames, depth, weights = write_caches(tmp_path)
+    with pytest.raises(ValueError, match="bin_counts"):
+        runner.run_cached_audit(frames, depth, weights, None, runner_factory=FakeRunner,
+                                lock_factory=FakeLock, sweep_bins=(0,), write=False, log=None)

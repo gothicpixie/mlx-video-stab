@@ -1728,8 +1728,47 @@ RAFT-field affine path proxies, not ground-truth camera motion or stabilized ima
 the bidirectional sample is finite and in bounds; no cycle-residual threshold was selected. The audit is still
 one smoothing setting on two windows, and the synthetic splat audit's limitations remain separate.
 
+An optional sweep mode was added without changing the single-run report or API.
+`audit_depth_layer_sweep(observations, *, bin_counts=(1, 2, 4, 8), smooth_sigmas=(0, 0.5, 1, 2))` runs the
+existing per-window audit independently for every Cartesian combination and returns each full per-window report
+verbatim under a stable string key (for example `bins_4__sigma_1`), with no scoring, ranking or winner
+selection. `run_cached_audit` accepts optional `sweep_bins`/`sweep_sigmas` (CLI `--sweep-bins`/`--sweep-sigmas`);
+when either is supplied RAFT still runs exactly once and every variant reuses the same collected observations,
+and a missing grid axis falls back to the single-run `n_bins`/`smooth_sigma`. Omitting both keeps the existing
+single-run report unchanged. The sweep is a per-window diagnostic enumeration only; it selects no smoothing or
+bin policy and adds no production wiring.
+
+### E14 real-window sensitivity sweep (two windows; 16 variants each)
+
+The same two windows were rerun once each with `bin_counts=(1,2,4,8)` and `smooth_sigmas=(0,0.5,1,2)`;
+each RAFT pass produced 16 NumPy audit variants without rerunning flow. The zero-sigma regression exposed and
+fixed floating-point edge loss: with no smoothing the correction is exactly identity, so jitter is 0 and both
+coverage measures are exactly 1.0. This is a no-stabilization control, not a quality result.
+
+The table reports pooled `jitter / rendered-valid coverage` and the min-to-max range over every depth-rank
+policy at bin counts 2, 4 and 8. These envelopes are descriptive across different model resolutions, not a
+ranking or pooled cross-window score.
+
+| window | sigma (pairs) | pooled jitter / valid | rank-policy jitter range | rank-policy valid range |
+|---|---:|---:|---:|---:|
+| stream00000 | 0 | 0.00000 / 1.00000 | 0.00000–0.00000 | 1.00000–1.00000 |
+| stream00000 | 0.5 | 0.60033 / 0.97641 | 0.53474–0.93775 | 0.97370–0.97742 |
+| stream00000 | 1 | 1.70667 / 0.96578 | 1.55994–2.57133 | 0.95473–0.96590 |
+| stream00000 | 2 | 2.36869 / 0.94545 | 2.22245–3.40642 | 0.92446–0.94514 |
+| 00176 | 0 | 0.00000 / 1.00000 | 0.00000–0.00000 | 1.00000–1.00000 |
+| 00176 | 0.5 | 0.01079 / 0.97691 | 0.01078–0.01687 | 0.97501–0.97728 |
+| 00176 | 1 | 0.03575 / 0.97698 | 0.03574–0.05510 | 0.97487–0.97757 |
+| 00176 | 2 | 0.06299 / 0.97779 | 0.06206–0.10561 | 0.97525–0.97826 |
+
+The smoother choice changes the jitter/coverage pair substantially in the first window; the second window's
+coverage is comparatively flat and its jitter remains much smaller. More bins also produce larger jitter in
+some rank policies. These results show parameter and scene sensitivity, not a robust depth-rank advantage.
+No combination is selected. Full per-pair reports are local-only under ignored `out/bench/flow_prediction_real/`.
+
 Reports are under ignored `out/bench/flow_prediction_real/`; no source clips or dense flow maps are committed.
-Focused tests for the core and cache runner passed **16 tests**; CodeGraph was synced and found no linked tests,
+Focused tests for the core and cache runner passed **35 tests** (including the sweep grid validation, the
+one-bin rank-equals-pooled sanity check and a fake-runner check that one RAFT pass feeds every requested
+variant); CodeGraph was synced and found no linked tests,
 so these tests were run directly. No production code or default changed.
 
 Next gate: repeat on more independent windows and evaluate rendered image quality against a human-reviewed
