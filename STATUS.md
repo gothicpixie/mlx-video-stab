@@ -2163,6 +2163,24 @@ Next gate: human review of the twelve clips from both sources plus **more indepe
 treating any visible difference as repeatable or claiming any multiscale advantage; keep any advantage claim
 out of scope until then. No production change.
 
+Position-bias control. The three original non-tie choices all selected screen position **B/right**, which had
+happened to map to L1 in each reviewed pair. To test this confound, three clips were locally panel-swapped,
+their fixed A-left/B-right labels repainted, and the hidden mapping reversed; the videos were then sent to the
+same **Vertex AI `generateContent` API** reviewer, without sending the hidden mapping. The API returned two
+more B/right choices and one tie. Those two B choices now map to multiscale because the pixels were reversed.
+Across the five non-tie judgments, Gemini chose the right-hand position every time, irrespective of method.
+This makes the method comparison **position-confounded and inconclusive**; the earlier three apparent L1
+preferences are not evidence for L1. The full position-control response is in ignored
+`out/bench/gemini_review/position_bias_reversal/gemini_api_review.json` (three judgments, two mapped to
+multiscale and one tie). Original and reversal API reports together cover 19 judgments: 14 ties, 3 L1 and 2
+multiscale mappings; the five non-ties all chose B/right.
+
+The local, network-free reversal step is now reproducible with
+`python -m bench.multiscale_position_reversal REVIEW.json --out-dir OUTPUT [--pair-index N ...]`; its copied
+`review.json` remains valid input to `bench.gemini_blind_review`, with the post-swap method mapping updated.
+The focused reversal, report-validation and review tests passed (**85 tests**). Generated comparison clips and
+Gemini responses remain local and ignored. No production change.
+
 ## What works
 
 - `mlxstab/warp.py`: Metal sampler (bilinear / Catmull-Rom / Lanczos-3, zeros/border, align_corners). `grid_sample` max abs error vs torch 1.2e-7 .. 2.4e-7. Forward only.

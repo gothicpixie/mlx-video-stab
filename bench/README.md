@@ -1191,6 +1191,28 @@ no winner, ranking, aggregate or quality score, and it consults each `review.jso
 
 Run `--help` for the CLI (repeatable `REVIEW.json`, `--out`, `--model`, `--limit-bytes`, `--no-resume`).
 
+### Local position-reversed blind review clips
+
+`bench.multiscale_position_reversal` builds a **local position-reversed clone** of selected pairs from one
+`multiscale_real_review.py` `review.json`. For each selected pair it resolves/validates the source clip inside
+the review directory (reusing `gemini_blind_review` path validation), decodes the already-rendered progressive
+A/B MP4 with `mlxstab.media`, exchanges its two equal-width panels, repaints the fixed A-left/B-right bitmap
+labels with `multiscale_real_review.draw_bitmap_label`, and re-encodes at the original fps/dimensions. The
+copied `review.json` keeps only the selected pairs, renames their clips, flips
+`blind_mapping.left_panel`/`right_panel` for every swapped pair and adds explicit `position_reversal`
+metadata. It writes atomically, refuses output/input path collisions, never modifies the source report or
+clips, and makes no network call. The result keeps the `mlxstab.multiscale_real_review/1` schema and remains
+valid input to `gemini_blind_review`; the visible A/B sides are unchanged, only the hidden method behind each
+side is flipped. Artifacts stay under the ignored default
+`out/bench/gemini_review/position_reversal/<review-dir-name>`.
+
+```bash
+.venv/bin/python -m bench.multiscale_position_reversal out/bench/gemini_review/RUN/review.json --out-dir out/bench/gemini_review/RUN/position_reversed --pair-index 0 --pair-index 2
+```
+
+Run `--help` for the CLI (`REVIEW.json`, `--out-dir`, repeatable `--pair-index`; omit `--pair-index` to swap
+every pair).
+
 ## Tests
 
 `tests/test_bench_runner.py` covers configuration/experiment identity, change labelling against the fully
