@@ -947,6 +947,79 @@ Tests: `bench/depth_layer_synthetic.py` (with the three controls) is covered by
 `.claude/verify.sh` passed **785 tests in 28.11 s**. CodeGraph was synced and `affected` found **no graph-linked
 tests** for the module, so the direct tests were run. No production code changed.
 
+## E11 multi-seed / foreground-geometry synthetic suite
+
+E11 adds the isolated suite `bench/depth_layer_synthetic_suite.py`, a thin deterministic harness around
+`bench.depth_layer_synthetic.run_experiment`. It adds **no new model, metric, threshold or winner**; it only runs
+the existing E09/E10 experiment across a **fixed, predeclared grid** and reports per-cell numbers. Still no
+media decode, no RAFT/MLX/production import, no weights, heavy lock untouched, path-free atomic JSON report.
+
+Fixed grid (frozen constants, not swept):
+
+- **Seeds**: `0, 1, 7, 42` (a small deterministic convenience sample, not a random sample).
+- **Foreground geometries**, normalized fractions `(cx, cy, half_w, half_h)`: `default_center`
+  `(0.56, 0.52, 0.20, 0.20)` (the E09/E10 default rectangle), `offcenter_vertical` `(0.32, 0.48, 0.12, 0.35)`,
+  and `upper_wide` `(0.64, 0.35, 0.30, 0.14)`.
+- **Conditions**, run separately and never mixed: `ideal` (all E10 controls zero) and `stress` with the fixed
+  `flow_noise_px=0.5, depth_error_frac=0.10, fg_nonaffine_px=1.0`.
+
+That is `4 seeds x 3 geometries x 2 conditions = 24 cases`; each `(seed, geometry, condition)` is run exactly
+once and its individual report preserved verbatim under `cases`. Summaries are keyed by
+`geometry|condition|policy` and are **kept separate by geometry, condition and policy** -- **no pooling across
+geometries**. The values are **descriptive only, not inferential**: no significance claim, no winner, no
+threshold, no production wiring (and no import by `stabilize`).
+
+The suite runs the base module, whose foreground rectangle is an explicit **`fg_rect`** field
+(`SyntheticSpec(fg_rect=...)`, normalized `(cx, cy, half_w, half_h)`); the **default `(0.56, 0.52, 0.20,
+0.20)` preserves the E09/E10 geometry**, so `default_center` is bit-for-bit the existing fixture. On the base
+CLI it is exposed as **`--fg-rect`** (`cx,cy,half_w,half_h`, default `0.56,0.52,0.20,0.20`).
+
+Summary cells (all 12). Each entry is **error median [min,max] px; target-layer jitter median [min,max] px;
+coverage median [min,max]; material-win seeds / frame wins**. Values were **independently verified** from the
+suite report. **Synthetic only, descriptive only, no winner, no threshold.**
+
+| geometry \| condition \| policy | error median [min,max] px | target-layer jitter median [min,max] px | coverage median [min,max] | material-win seeds / frame wins |
+|---|---|---|---|---|
+| default_center \| ideal \| background_lock | 3.55e-15 [3.55e-15, 3.55e-15] | 1.433e-14 [1.159e-14, 1.735e-14] | .844763 [.816667, .872975] | 4/4 seeds, 36/40 frames |
+| default_center \| ideal \| foreground_preserve | 3.55e-15 [3.55e-15, 3.55e-15] | 9.292e-15 [7.959e-15, 1.323e-14] | .856916 [.837326, .887211] | 4/4 seeds, 36/40 frames |
+| default_center \| stress \| background_lock | .074652 [.059796, .087068] | .180607 [.164005, .188279] | .845081 [.816898, .872512] | 4/4 seeds, 40/40 frames |
+| default_center \| stress \| foreground_preserve | 1.097184 [1.036723, 1.153596] | .553389 [.517897, .584807] | .850203 [.824421, .876215] | 4/4 seeds, 40/40 frames |
+| offcenter_vertical \| ideal \| background_lock | 3.948e-15 [3.553e-15, 4.651e-15] | 1.459e-14 [1.142e-14, 1.802e-14] | .844763 [.816667, .872975] | 4/4 seeds, 36/40 frames |
+| offcenter_vertical \| ideal \| foreground_preserve | 3.553e-15 [3.553e-15, 3.553e-15] | 1.132e-14 [8.367e-15, 1.318e-14] | .856916 [.837326, .887211] | 4/4 seeds, 36/40 frames |
+| offcenter_vertical \| stress \| background_lock | .085059 [.081109, .085198] | .184236 [.172043, .188164] | .845139 [.819965, .875000] | 4/4 seeds, 39/40 frames |
+| offcenter_vertical \| stress \| foreground_preserve | .793693 [.779753, .851519] | .440549 [.405352, .462743] | .839959 [.813831, .875463] | 4/4 seeds, 36/40 frames |
+| upper_wide \| ideal \| background_lock | 3.109e-15 [2.221e-15, 3.553e-15] | 1.251e-14 [1.010e-14, 1.556e-14] | .844763 [.816667, .872975] | 4/4 seeds, 36/40 frames |
+| upper_wide \| ideal \| foreground_preserve | 3.397e-15 [1.776e-15, 5.329e-15] | 1.009e-14 [9.597e-15, 1.223e-14] | .856916 [.837326, .887211] | 4/4 seeds, 36/40 frames |
+| upper_wide \| stress \| background_lock | .091512 [.074313, .110384] | .222435 [.189997, .259119] | .845197 [.820370, .873380] | 4/4 seeds, 38/40 frames |
+| upper_wide \| stress \| foreground_preserve | .854979 [.854523, .894360] | .460494 [.398733, .476876] | .859722 [.841319, .891435] | 4/4 seeds, 37/40 frames |
+
+Interpretation (cautious): under `ideal` the errors are at floating-point level (near machine zero), which is
+**expected from the exact affine ground truth** -- it validates plumbing, not benefit. `stress` **raises errors
+and jitter relative to `ideal`** in every cell, consistent with E10. The **stress magnitudes differ across
+geometries**, but with **only four fixed seeds that is not evidence of any ordering** between geometries, and
+no geometry, condition or policy is declared better. All counts (material-win seeds/frames, coverage) are
+**descriptive only**. There is **no textured render yet**: the next gate is a **textured/rendered
+warp-validity** check plus a **matched real-footage downstream crop/jitter/warp-validity** comparison. **No
+production policy until then.**
+
+Limitations: unchanged from E09/E10 (synthetic coordinate model with known ground truth, arbitrary depth
+labels, explicit rank orientation, no physical near/far or semantic foreground/background, coordinate-model
+rather than rendered-pixel or perceptual metrics) plus the E11 scope caveat: the seed list and geometries are a
+**small predeclared deterministic convenience sample, not a random sample**, so medians and min/max describe
+those fixed realisations only; the results are **exploratory and not inferential**. No threshold is selected or
+swept, no winner is declared, and no production wiring, import or default change is implied. Nothing here is
+proven or general, and no robust real-footage benefit is established (no textured render exists yet).
+
+```bash
+python -m bench.depth_layer_synthetic_suite --out out/bench/depth_layer_synthetic_suite_e11.json   # E11 fixed grid (24 cases)
+python -m bench.depth_layer_synthetic --fg-rect 0.32,0.48,0.12,0.35 --out out/bench/depth_layer_synthetic_offcenter.json   # base: explicit fg rect
+```
+
+Tests: `bench/depth_layer_synthetic_suite.py` composes `bench/depth_layer_synthetic.py`, covered by
+`tests/test_depth_layer_synthetic.py`; the focused suite + base tests passed **105 tests**. The full
+`.claude/verify.sh` passed **812 tests in 26.12 s**. CodeGraph was synced and `affected` found **no graph-linked
+tests** for the suite module, so the direct suite tests were run. No production code changed.
+
 ## Tests
 
 `tests/test_bench_runner.py` covers configuration/experiment identity, change labelling against the fully
