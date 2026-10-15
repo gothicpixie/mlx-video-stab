@@ -245,18 +245,26 @@ def source_coords(pl, t, W, H, grid=None):
     return src
 
 
-def render_frame(frame, pl, t, cfg, grid=None, diagnose=False):
-    """-> (stabilized uint8 [H,W,3], border mask bool [H,W] (True = no source), distortion[, warp_diag]).
-
-    ``distortion`` is the historical global-homography-only score. With ``diagnose=True`` a fourth item
-    holds complete-warp diagnostics computed from the very source field used for rendering (no second warp pass)."""
+def render_from_src(frame, src, cfg):
+    """Render from an already-computed source-coordinate field -> (uint8 [H,W,3], border mask bool [H,W])."""
     H, W = frame.shape[:2]
-    src = source_coords(pl, t, W, H, grid)
     img = sample(mx.array(frame).astype(mx.float32)[None], src, cfg.kernel, "zeros")
     bad = ~valid_mask(src, H, W)
     img = mx.where(bad[..., None], 0.0, mx.clip(img, 0, 255))
     mx.eval(img, bad, src)
-    out = (np.array(img[0]).round().astype(np.uint8), np.array(bad[0]), _distortion(pl.G[t], W, H))
+    return np.array(img[0]).round().astype(np.uint8), np.array(bad[0])
+
+
+def render_frame(frame, pl, t, cfg, grid=None, diagnose=False, src=None):
+    """-> (stabilized uint8 [H,W,3], border mask bool [H,W] (True = no source), distortion[, warp_diag]).
+
+    ``distortion`` is the historical global-homography-only score. With ``diagnose=True`` a fourth item
+    holds complete-warp diagnostics computed from the very source field used for rendering (no second warp pass).
+    Pass ``src`` to reuse a field already computed by the caller."""
+    H, W = frame.shape[:2]
+    if src is None: src = source_coords(pl, t, W, H, grid)
+    img, bad = render_from_src(frame, src, cfg)
+    out = (img, bad, _distortion(pl.G[t], W, H))
     if diagnose:
         return (*out, warpmetrics.diagnose(np.array(src[0]), H, W, kernel=cfg.kernel))
     return out
@@ -298,8 +306,10 @@ def _distortion(Gm, W, H):
 
 
 def stabilize(src, out, mask=None, weights=None, cfg=None, roll=None, start=None, duration=None, fps_out=None,
-              flow_fn=None, log=print, report=None, on_step=None, dump_motion=None):
+              flow_fn=None, log=print, report=None, on_step=None, dump_motion=None, diag_every=0, diag_callback=None):
     cfg = cfg or Config()
+    if cfg.warp_diag and diag_callback is not None and diag_every:
+        raise ValueError("choose all-frame warp_diag or sampled diagnostics, not both")
     info = media.probe(src)
     if flow_fn is None:
         flow_fn = RaftFlow(weights, cfg.flow_iters, cfg.flow_downscale, cfg.warm_start, getattr(mx, cfg.corr_dtype), getattr(mx, cfg.flow_dtype), cfg.warm_iters or None)
@@ -314,22 +324,32 @@ def stabilize(src, out, mask=None, weights=None, cfg=None, roll=None, start=None
     frames, fps, _ = media.decode(src, info, start, duration); frames = media.prefetch(frames)
     enc = media.Encoder(out, W, H, fps, out_fps=fps_out)
     menc = media.Encoder(mask, W, H, fps, gray=True, out_fps=fps_out) if mask else None
-    grid = None; borders = []; dist = []; diags = []
+    grid = None; borders = []; dist = []; diags = []; rendered = 0; diag_total = 0.0
     ys, xs = mx.meshgrid(mx.arange(H), mx.arange(W), indexing="ij"); grid = (xs.astype(mx.float32), ys.astype(mx.float32))
     for t, fr in enumerate(frames):
         if t >= len(pl.G): break
         if on_step: on_step(t)
-        if cfg.warp_diag:
+        if diag_callback is not None and diag_every and t % diag_every == 0:
+            src = source_coords(pl, t, W, H, grid)
+            ts = time.perf_counter(); img, bad = render_from_src(fr, src, cfg); t_render = time.perf_counter() - ts
+            ts = time.perf_counter(); dg = warpmetrics.diagnose(np.array(src[0]), H, W, kernel=cfg.kernel); t_diag = time.perf_counter() - ts
+            diag_total += t_diag
+            diag_callback(t, t_render, t_diag, dg)
+            d = _distortion(pl.G[t], W, H)
+        elif cfg.warp_diag:
             img, bad, d, dg = render_frame(fr, pl, t, cfg, grid, diagnose=True); diags.append(dg)
         else:
             img, bad, d = render_frame(fr, pl, t, cfg, grid)
-        enc.write(img); borders.append(float(bad.mean())); dist.append(d)
+        enc.write(img); borders.append(float(bad.mean())); dist.append(d); rendered += 1
         if menc: menc.write(bad.astype(np.uint8) * 255)
         if t % 20 == 0: log(f"render {t}/{len(pl.G)}")
     enc.close()
     if menc: menc.close()
     t3 = time.perf_counter(); n = len(pl.G); dv = [d for d in dist if d is not None]
-    rep = {"frames": n, "timing_s": {"analysis": t1 - t0, "plan": t2 - t1, "render": t3 - t2},
+    rep = {"frames": n, "decoded_frames": int(mot.n_frames), "rendered_frames": int(rendered),
+           "output_fps": fps_out or fps, "analysis_fps": fps / max(int(cfg.analysis_stride), 1),
+           "diagnostics_total_s": diag_total, "observed_nondiag_render_s": (t3 - t2) - diag_total,
+           "timing_s": {"analysis": t1 - t0, "plan": t2 - t1, "render": t3 - t2},
            "fps_analysis": n / (t1 - t0), "fps_render": n / (t3 - t2), "fps_total": n / (t3 - t0), "fps": fps, "interlaced": info["interlaced"], "fallback_frames": pl.fallbacks,
            "mean_border_frac": float(np.mean(borders)), "max_border_frac": float(np.max(borders)),
            "cropping_ratio": float(1 - np.mean(borders)), "distortion_scope": "global_homography_only",

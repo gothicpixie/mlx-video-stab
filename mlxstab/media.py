@@ -5,14 +5,40 @@ import numpy as np
 
 def probe(path):
     out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries",
-                          "stream=width,height,r_frame_rate,avg_frame_rate,field_order,nb_frames,duration", "-of", "json", str(path)],
+                          "stream=width,height,r_frame_rate,avg_frame_rate,field_order,nb_frames,duration,start_time,time_base,codec_name,pix_fmt", "-of", "json", str(path)],
                          capture_output=True, text=True, check=True).stdout
     s = json.loads(out)["streams"][0]
     n, d = (s.get("avg_frame_rate") or s["r_frame_rate"]).split("/")
     fps = float(n) / float(d) if float(d) else 25.0
     fo = s.get("field_order", "unknown")
     return {"width": int(s["width"]), "height": int(s["height"]), "fps": fps, "field_order": fo,
-            "interlaced": fo in ("tt", "bb", "tb", "bt"), "duration": float(s.get("duration") or 0)}
+            "interlaced": fo in ("tt", "bb", "tb", "bt"), "duration": float(s.get("duration") or 0),
+            "start_time": float(s.get("start_time") or 0), "time_base": s.get("time_base"),
+            "codec_name": s.get("codec_name"), "pix_fmt": s.get("pix_fmt")}
+
+
+def frame_pts(path):
+    """Frame presentation timestamps from the encoded stream (ffprobe; no re-encoding).
+
+    Returns ``{'count', 'n_pts', 'pts_s', 'first_pts_s', 'last_pts_s', 'monotonic'}``. ``count`` is the number of
+    frames; ``n_pts`` is how many had a usable ``pts_time``. Missing/``N/A`` PTS are not invented. Used to
+    validate the encoded output and mask timelines without re-encoding or re-inferring anything.
+    """
+    out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "frame=pts_time",
+                          "-of", "json", str(path)], capture_output=True, text=True, check=True).stdout
+    frames = json.loads(out).get("frames", [])
+    pts = []
+    for f in frames:
+        v = f.get("pts_time")
+        try:
+            v = float(v)
+        except (TypeError, ValueError):
+            v = None
+        pts.append(v if v is not None and np.isfinite(v) else None)
+    valid = [v for v in pts if v is not None]
+    return {"count": len(frames), "n_pts": len(valid), "pts_s": pts,
+            "first_pts_s": pts[0] if pts else None, "last_pts_s": pts[-1] if pts else None,
+            "monotonic": len(valid) == len(pts) and all(a < b for a, b in zip(valid, valid[1:]))}
 
 
 def decode(path, info=None, start=None, duration=None, deinterlace=True, vf=None):
@@ -45,11 +71,18 @@ def decode(path, info=None, start=None, duration=None, deinterlace=True, vf=None
 
 
 class Encoder:
-    """Pipe raw frames into ffmpeg. gray=True writes a single-channel (mask) stream, lossless."""
+    """Pipe raw frames into ffmpeg. gray=True writes a single-channel (mask) stream, lossless.
+
+    ``out_fps`` converts to a constant output frame rate by resampling the raw input explicitly
+    (``-vf fps=... -r ... -fps_mode cfr``). Relying on output ``-r`` alone duplicated/dropped frames
+    unpredictably (60 fps -> 30 fps produced 32 frames for 1 s); the filter path is exact. Frame counts are
+    validated by the caller (see ``tests/test_media_cadence.py``).
+    """
     def __init__(self, path, W, H, fps, gray=False, crf=14, preset="slow", out_fps=None):
         pf = "gray" if gray else "rgb24"
         cmd = ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", pf, "-s", f"{W}x{H}", "-r", f"{fps}", "-i", "-"]
-        if out_fps: cmd += ["-r", f"{out_fps}"]
+        if out_fps:
+            cmd += ["-vf", f"fps={out_fps}", "-r", f"{out_fps}", "-fps_mode", "cfr"]
         if gray: cmd += ["-c:v", "libx264", "-qp", "0", "-pix_fmt", "gray"]
         else: cmd += ["-c:v", "libx264", "-crf", str(crf), "-preset", preset, "-pix_fmt", "yuv420p"]
         import queue, threading

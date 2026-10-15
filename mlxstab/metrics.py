@@ -81,8 +81,15 @@ def measure(frames, flow_fn, W, H, fps, masks=None, keep_frames=False, on_step=N
     frames = list(frames) if keep_frames else frames
     mot = analyze(iter(frames), flow_fn, cfg, W, H, fps, masks=masks, on_step=on_step)
     ser = path_series(mot); st = stability(ser); jt, fm = jitter(mot)
+    fallback = int(sum(f.fallback for f in mot.fits))
+    fits = mot.fits
     r = {"stability": min(st), "stability_xyr": st, "jitter_px": jt, "frame_motion_px": fm, "wobble_px": wobble(mot),
-         "fallback_frames": int(sum(f.fallback for f in mot.fits))}
+         "fallback_frames": fallback,
+         "support_frames": len(fits),
+         "fallback_frac": (fallback / len(fits)) if fits else None,
+         "inlier_frac_mean": float(np.mean([f.inlier_frac for f in fits])) if fits else None,
+         "inlier_frac_min": float(np.min([f.inlier_frac for f in fits])) if fits else None,
+         "mover_frac_mean": float(np.mean([f.mover_frac for f in fits])) if fits else None}
     if keep_frames:
         v = vline_wobble(frames)
         if v is not None: r["vline_wobble_deg"] = v

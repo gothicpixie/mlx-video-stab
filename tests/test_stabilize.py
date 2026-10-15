@@ -109,6 +109,12 @@ def test_stabilize_report_includes_warp_diag(monkeypatch):
     json.dumps(rep, allow_nan=False)                                    # JSON-safe, including the diagnostics
 
 
+def test_stabilize_rejects_ambiguous_diagnostic_scope_before_loading_media():
+    with pytest.raises(ValueError, match="not both"):
+        S.stabilize("unused", "unused", cfg=S.Config(warp_diag=True), diag_every=2,
+                    diag_callback=lambda *args: None)
+
+
 def test_distortion_guards_invalid_mappings():
     """The legacy global distortion must return None, not raise or report a perfect score, for invalid maps."""
     assert S._distortion(np.eye(3), 8, 8) == pytest.approx(1.0)

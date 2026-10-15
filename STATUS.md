@@ -22,6 +22,49 @@ Implemented the evaluator-reset and mask-coordinate fixes from the plan, with re
 
 Check: `.claude/verify.sh` -> 58 passed (offline; the earlier 40 still pass).
 
+### Slice 3: reproducible benchmark runner
+
+`bench/run_case.py` runs explicit cases with a full experiment identity: source and weight hashes,
+source window and preprocessing, resolved configuration, output/evaluation rates, diagnostic selection,
+seed policy, code revision and working-tree code hashes. The baseline uses half-resolution flow,
+20 iterations, fidelity 0.1 and 30000/1001 output/evaluation fps. This historical preset differs from
+`Config()` defaults (full-resolution flow, 24 iterations). Cases isolate fp16 network, fp16 correlation,
+warm-8 and stride-2; combined-fp16 explicitly changes both precision settings.
+
+- Diagnostics sample the actual full-window render field, with exact frame indices, values and separately
+  measured cost. They require no second RAFT pass. All-frame and sampled diagnostic scopes are mutually
+  exclusive. Sampled maxima do not bound unsampled frames.
+- Fixed output-rate conversion: 60 input frames at 60 fps previously became 32 frames at 30 fps.
+  The encoder now uses an explicit fps filter, producing 30. Tests also cover NTSC rates and mask alignment.
+  Render writes and measured encoded frame counts are reported separately.
+- Evaluation uses common-rate normalized frame-index time. Every encoded video/mask PTS is separately
+  checked against its zero-origin CFR clock, including interior timestamps. This permits native-rate
+  output with lower-rate evaluation and rejects extra mask tails, duplicate/shifted timestamps and missing
+  timing. Original source PTS and VFR timing are not verified by this CFR benchmark.
+- Atomic manifests record running, success, failure and cancellation states. Initial/final persistence
+  failures surface; directories are protected against accidental overwrite. Missing/non-finite metrics,
+  absent support or identity-fit fallbacks make comparisons unreliable.
+- Repeats reset temporal state, use distinct output paths and distinguish initial model loading from cached
+  runs. Timing includes model construction and encoder close. Lock waits and configurable chunk pauses
+  have separate counters; stage wall times include pauses. Render time minus measured diagnostic intervals
+  is not a counterfactual throughput estimate because encoding overlaps.
+
+Usage, schema, rate overrides, window-selection notes and lock options are in `bench/README.md`.
+Verification: `.claude/verify.sh` -> **99 passed** (offline); focused benchmark/media checks and the native-rate smoke also passed.
+
+Evidence under ignored `out/` (no private media is tracked):
+
+- `out/bench/final_t060_1s/`: one-second camcorder smoke at the inferred 60-second window, 60 deinterlaced
+  fields -> 30 output/mask frames at 30000/1001, 1.001 s. Input/output evaluation had 29 supported pairs
+  each and no identity fallbacks. Diagnostics sampled actual render indices [0,15,30,45]. The retained
+  original report contains a stale encoded-count field; inspection records distinguish it from measured
+  counts. The 60/800-second window choices come from historical filenames, not a recovered formal manifest.
+- `out/bench/native_cadence_audit/`: public synthetic run with 60 fps encoding and 30 fps evaluation;
+  60 encoded video/mask frames, 30 evaluated frames, matching complete encoded timelines and normalized
+  evaluation clocks. This specifically checks that the two rates are not conflated.
+- Earlier runner drafts remain marked unaccepted. Smoke runs establish execution and reporting behavior;
+  ten-second footage baselines and approximation-quality comparisons remain outstanding.
+
 Remaining Stage 0 work: rerun the current defaults and the unfinished camcorder configurations; reproduce the reported tree deformation and floaty motion with global-only, mesh-only, row-only and combined ablations; audit motion-field accumulation under rotation and parallax. Real-footage baselines and the deformation diagnosis remain outstanding, so Stage 0 is not complete. Fixture parity (fp32/fp16) does not establish full-clip quality of the approximations.
 
 ## What works
@@ -29,7 +72,7 @@ Remaining Stage 0 work: rerun the current defaults and the unfinished camcorder 
 - `mlxstab/warp.py`: Metal sampler (bilinear / Catmull-Rom / Lanczos-3, zeros/border, align_corners). `grid_sample` max abs error vs torch 1.2e-7 .. 2.4e-7. Forward only.
 - `mlxstab/raft/`: RAFT-things in MLX + `.pth` -> safetensors converter. Final flow EPE vs PyTorch at 12 iterations: 2.2e-3 px (reference demo frames), 2.4e-3 px (synthetic); batch-2 bidirectional path: 2.2e-3 px fp32, 2.7e-3 px fp16. Gate is < 0.01 px for the fp32 path.
 - `mlxstab/stabilize.py`, `python -m mlxstab`: no-crop stabilizer (similarity global fit by RANSAC with forward-backward masking and mover exclusion, residual mesh + rolling-shutter row bands, L1-optimal paths with border budget, roll levelling, one Lanczos resample, border mask video). Interlaced sources deinterlaced first (bwdif send_field).
-- `.claude/verify.sh`: 58 tests pass locally, offline; weight-dependent tests skip when weights are unavailable.
+- `.claude/verify.sh`: 99 tests pass locally, offline; weight-dependent tests skip when weights are unavailable.
 
 ### Benchmarks (RAFT-things, 12 iterations; one pair unless noted; MLX fp32 unless noted)
 
@@ -97,11 +140,23 @@ NOT finished: the camcorder quality gate for the fast configurations. The runs (
 
 ```
 cd mlx-video-stab
-.claude/verify.sh                                              # green check
+.claude/verify.sh                                              # green check (99 tests)
+python -I bench/run_case.py --list-cases                       # Stage 0 cases
+python -I bench/run_case.py --dry-run --case baseline          # resolved config + digest, no run
+# public synthetic smoke (no private footage, no lock)
+python -I bench/run_case.py --case baseline --source synthetic --duration 1 --synth-frames 30 --diag-every 15 --lock off
+# cheap real-input smoke / 10 s window (private footage stays local; shared film lock)
+python -I bench/run_case.py --case baseline --source /path/to/local/clip.MTS --start 60 --duration 1 \
+    --diag-every 15 --lock on --out-dir out/bench/smoke_t060 --log out/bench/smoke_t060.log
 .venv/bin/python -I bench/profile.py raft 1088 1920 12         # per-stage RAFT profile
 .venv/bin/python -I bench/profile.py raftfast 1088 1920 12 float16 float16
 .venv/bin/python -I bench/warm_iters.py ref && .venv/bin/python -I bench/warm_iters.py mlx
 .venv/bin/python -I bench/bench_raft.py {mlx|mps|cpu} 544 960 12 3 {pair|bidir|bidir16}
 python -m mlxstab in.mp4 out.mp4 --mask mask.mp4 --iters 20 --flow-downscale 2     # exact path
 ```
-Config fields for the fast path: `flow_dtype="float16"`, `warm_iters=8`, `analysis_stride=2`. To finish the gate, run clips A and B (10 s windows) with `base`, `fast`, `fast2` and compare jitter, wobble and border with the table above, taking the film's heavy lock per chunk (about 30 frames, 12 s gap). Setup, weights and conversion are in the README. Outputs of earlier runs are in the film repo under renders/v5_proto/mlxstab_*.
+Stage 0 resume: the runner is built and reviewed; the 1 s real smoke passed. Next is the baseline 10 s
+windows (`--case baseline --start 60/800 --duration 10`, shared lock), then the isolated `fp16-network`,
+`fp16-corr`, `combined-fp16`, `warm-8` and `stride-2` cases on the same windows before any quality
+conclusion. Use `--lock on --lock-chunk 30 --lock-pause 12` for long jobs. Setup, weights and conversion are
+in the README; private-footage outputs stay under this repo's ignored `out/`, earlier film-repo outputs are
+under renders/v5_proto/mlxstab_*.
