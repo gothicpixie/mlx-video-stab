@@ -1172,6 +1172,25 @@ directly. The full `.claude/verify.sh` passed **889 tests in 30.89 s**. No produ
 The next gate is more distinct source windows plus a
 human-reviewed rendered-quality comparison before any production wiring.
 
+### Gemini blind visual review
+
+After `bench/multiscale_real_review.py` writes a `review.json` (the blinded A/B MP4s plus the hidden
+`blind_mapping`), `bench.gemini_blind_review` sends each short review MP4 inline (`video/mp4`, base64) to
+Vertex AI Gemini through the existing `gcloud` user login (project `phx-ai-billing`, default model
+`gemini-3.8-flash`). This uploads those selected review clips to Google.
+
+The request carries only the clip bytes and one fixed review brief: no source path, hash, run/window
+identifier or candidate mapping is included, and the access token is never printed or stored. The response is
+a per-clip judgment (side preference, confidence, visible evidence, artifacts, limitations); the tool records
+no winner, ranking, aggregate or quality score, and it consults each `review.json`'s hidden `blind_mapping`
+**only after the response** to map the A/B/tie call back to a method. Keep results in the ignored `out/` tree.
+
+```bash
+.venv/bin/python -m bench.gemini_blind_review out/bench/gemini_review/RUN/review.json --out out/bench/gemini_review/RUN/gemini_api_review.json
+```
+
+Run `--help` for the CLI (repeatable `REVIEW.json`, `--out`, `--model`, `--limit-bytes`, `--no-resume`).
+
 ## Tests
 
 `tests/test_bench_runner.py` covers configuration/experiment identity, change labelling against the fully
