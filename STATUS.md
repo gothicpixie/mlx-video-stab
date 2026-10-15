@@ -1834,6 +1834,20 @@ so these tests were run directly. No production code or default changed.
 Next gate: repeat on more distinct source windows and evaluate rendered image quality against a human-reviewed
 baseline before considering any policy or production wiring.
 
+## Stage 4 progress: timestamp-aware multiscale baseline (research-only)
+
+Added `bench/multiscale_motion.py`, a pure-NumPy decomposition of a `[T, D]` camera-motion signal using
+normalized Gaussian low-pass kernels over explicit timestamps in seconds. It supports irregular frame intervals,
+processes bounded time-row chunks, returns fine-to-coarse detail bands plus a trend, and reports per-band RMS
+energy. Reconstruction is exact up to floating-point round-off; all-one detail retention returns the original
+signal exactly. The synthetic pan-plus-shake fixture makes a slow pan and two faster components inspectable.
+
+This is only the Stage 4 measurement baseline. It does not estimate a fractal/Hurst exponent, select a band,
+compare against the L1 path planner, consume real footage or change production behavior. The 25 focused tests
+passed. Next decision: compare fixed multiscale retention weights with the L1 path on known-truth synthetic
+motion and real windows at matched crop and delay. Consider a fractal prior only if the best multiscale method
+shows a measurable gain and a scaling relationship survives shuffled and non-fractal controls.
+
 ## What works
 
 - `mlxstab/warp.py`: Metal sampler (bilinear / Catmull-Rom / Lanczos-3, zeros/border, align_corners). `grid_sample` max abs error vs torch 1.2e-7 .. 2.4e-7. Forward only.
