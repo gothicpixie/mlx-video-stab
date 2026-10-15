@@ -1892,6 +1892,82 @@ full `.claude/verify.sh` passed **982 tests in 58.12 s**. Next: render these hel
 and evaluate coverage and image shape, then use distinct real windows. Consider fractal scaling only after
 non-fractal multiscale behavior has a repeatable rendered benefit.
 
+### E10.1 rendered-pixel audit of fixed multiscale vs nearest-crop L1 (implemented; pure NumPy)
+
+E10 measured translation *paths* only. E10.1 adds the rendered-pixel stage it lacked:
+`bench/multiscale_render_audit.py` builds a deterministic, procedurally textured single-layer RGB **static
+scene** on a finite array with a margin, renders it into moving frames with a local pure-NumPy **bilinear**
+translation-only warp along the known camera path, and compares the four fixed multiscale-retention candidates
+with their **nearest measured-crop L1** counterparts (via `nearest_crop_index`, same tie rule) by rendered RGB
+MAE/RMS against the known ideal frame path plus geometric valid coverage. It imports no MLX and changes no
+production default; it is research-only.
+
+Camera convention (explicit, and asserted in tests): output pixel `(y, x)` samples
+`scene(y + margin + C_t.y, x + margin + C_t.x)` for the observed camera path `C_t`, the ideal view samples
+`scene(y + margin + pan_t.y, x + margin + pan_t.x)`, and the candidate view backward-samples the observed frame
+at `grid + P_t - C_t`. Hence `P = C` reproduces the observed frame, and with `C = pan` (so observed = ideal)
+`P = pan` gives the ideal view. A source coordinate is valid only when `0 <= x <= W-1` and `0 <= y <= H-1` (all
+bilinear taps in bounds); MAE/RMS are RGB-channel means over the intersection of candidate-valid and
+ideal-valid pixels, so uncovered/zero pixels are never penalized. Coverage is reported over all output pixels
+and as common-support coverage. Units are normalized scene intensity in `[0, 1]`.
+
+Fixed scope and defaults (not tunable in the report): `n=60`, `fps=60`, `W=80`, `H=48`, `margin=16`, scene seed
+`1729`; the same four fixed multiscale-retention candidates and the same predeclared uniform L1 budget grid
+(`0.0..2.0` in `0.1` steps) as E10; five conditions (`static`, `pan_no_shake`, `pan_shake`,
+`pan_stochastic_shake`, `pan_jolt`) and three seeds (`0,1,2`), i.e. 15 runs, each rendering only the four
+multiscale candidates plus their (cached) paired L1 paths. The scene is a fixed procedural texture, not media.
+
+Run:
+
+```bash
+.venv/bin/python -I -m bench.multiscale_render_audit --out /tmp/mlxstab-multiscale-render-default.json
+```
+
+Default run results across seeds 0, 1 and 2. MAE and common-valid coverage are shown as min–max across the
+three independent seed records; the report itself keeps each seed and candidate pair separate. Paired L1
+budgets can vary by seed, so the table lists the distinct budget(s) seen for each candidate.
+
+| condition | multiscale setting ↔ paired L1 budget(s) | RGB MAE range (MS / L1) | common-valid fraction range (MS / L1) |
+| --- | --- | ---: | ---: |
+| `static` | `drop_all_detail` ↔ `0` | 0 / 0 | 1 / 1 |
+| `static` | `drop_finest` ↔ `0` | 0 / 0 | 1 / 1 |
+| `static` | `drop_finest_and_medium` ↔ `0` | 0 / 0 | 1 / 1 |
+| `static` | `keep_all_detail` ↔ `0` | 0 / 0 | 1 / 1 |
+| `pan_no_shake` | `drop_all_detail` ↔ `0.4` | 0.00875 / 0.00951 | 0.9669 / 0.9673 |
+| `pan_no_shake` | `drop_finest` ↔ `0` | 0.00003 / 0 | 0.9669 / 1 |
+| `pan_no_shake` | `drop_finest_and_medium` ↔ `0.1` | 0.00091 / 0.00215 | 0.9669 / 0.9677 |
+| `pan_no_shake` | `keep_all_detail` ↔ `0` | 0 / 0 | 1 / 1 |
+| `pan_shake` | `drop_all_detail` ↔ `1.5, 1.6` | 0.00891–0.00932 / 0.01038–0.01164 | 0.9634–0.9643 / 0.9637–0.9647 |
+| `pan_shake` | `drop_finest` ↔ `0.4, 0.5` | 0.01038–0.02820 / 0.00906–0.02723 | 0.9669 / 0.9669 |
+| `pan_shake` | `drop_finest_and_medium` ↔ `1.1, 1.3` | 0.00209–0.00285 / 0.00569–0.00629 | 0.9643–0.9653 / 0.9638–0.9645 |
+| `pan_shake` | `keep_all_detail` ↔ `0` | 0.01617–0.03134 / 0.01617–0.03134 | 1 / 1 |
+| `pan_stochastic_shake` | `drop_all_detail` ↔ `1, 1.4, 2` | 0.00771–0.00986 / 0.01003–0.01306 | 0.9635–0.9669 / 0.9632–0.9675 |
+| `pan_stochastic_shake` | `drop_finest` ↔ `0.4, 0.5, 0.6` | 0.00937–0.01559 / 0.00817–0.01565 | 0.9669 / 0.9669 |
+| `pan_stochastic_shake` | `drop_finest_and_medium` ↔ `0.8, 1.1, 1.2` | 0.00553–0.00996 / 0.00589–0.01210 | 0.9666–0.9669 / 0.9649–0.9669 |
+| `pan_stochastic_shake` | `keep_all_detail` ↔ `0` | 0.01272–0.01873 / 0.01272–0.01873 | 1 / 1 |
+| `pan_jolt` | `drop_all_detail` ↔ `1.1` | 0.02473 / 0.01482 | 0.9665 / 0.9656 |
+| `pan_jolt` | `drop_finest` ↔ `0.6` | 0.02401 / 0.03456 | 0.9669 / 0.9669 |
+| `pan_jolt` | `drop_finest_and_medium` ↔ `0.9` | 0.02427 / 0.02347 | 0.9669 / 0.9669 |
+| `pan_jolt` | `keep_all_detail` ↔ `0` | 0.02391 / 0.02391 | 1 / 1 |
+
+The periodic and stochastic controls show lower MAE for `drop_all_detail` than its nearest-crop L1 pair across
+these three seeds; the jolt reverses that comparison, while the other settings show mixed tradeoffs. This is
+not a general advantage: the texture, scene geometry, motion and sampler are all deliberately narrow, and
+crop matching in path units does not force exact equality of the rendered valid coverage. Across all 60
+default pairs the largest crop-proxy mismatch was **0.04983**, within the fixed **0.05** tolerance. The focused
+suite passed **30 tests** and `.claude/verify.sh` passed **1,012 tests in 69.07 s**.
+
+Limitations. Single-layer **static** scene; **translation-only** bilinear warps; a **fixed procedural texture**;
+no depth, rotation, scale, perspective, rolling shutter, subject motion, occlusion or media decode; not the
+production renderer and **not perceptual quality or a human preference study**; coverage is a geometric source
+validity fraction, not a real stabilizer crop. The four multiscale weights and the L1 budget grid are reported
+verbatim and nothing is tuned or ranked; each pair is reported separately with no pooled score or winner.
+Errors here do not translate directly to real footage.
+
+Next gate: repeat this rendered comparison on distinct real source windows with human-reviewed crops and
+layer/subject-motion stress tests before considering any multiscale advantage; keep fractal scaling out of
+scope until the non-fractal results are repeatable beyond this synthetic scene.
+
 ## What works
 
 - `mlxstab/warp.py`: Metal sampler (bilinear / Catmull-Rom / Lanczos-3, zeros/border, align_corners). `grid_sample` max abs error vs torch 1.2e-7 .. 2.4e-7. Forward only.
