@@ -1843,10 +1843,39 @@ energy. Reconstruction is exact up to floating-point round-off; all-one detail r
 signal exactly. The synthetic pan-plus-shake fixture makes a slow pan and two faster components inspectable.
 
 This is only the Stage 4 measurement baseline. It does not estimate a fractal/Hurst exponent, select a band,
-compare against the L1 path planner, consume real footage or change production behavior. The 25 focused tests
-passed. Next decision: compare fixed multiscale retention weights with the L1 path on known-truth synthetic
-motion and real windows at matched crop and delay. Consider a fractal prior only if the best multiscale method
-shows a measurable gain and a scaling relationship survives shuffled and non-fractal controls.
+consume real footage or change production behavior. Its 25 focused tests passed.
+
+### E10 first fixed-grid synthetic comparison
+
+Added `bench/multiscale_motion_audit.py`, comparing four fixed multiscale-retention settings with three L1
+budgets on deterministic, uniform-clock synthetic translation. The report keeps every condition, seed and
+variant separate and records path error against the known pan, second-difference residual jitter proxy, and
+maximum-translation crop proxy. The fixed grids are not tuned or ranked. The L1 control uses fidelity `0.1`,
+matching the current production default; an initial zero-fidelity run exposed a free constant-offset ambiguity
+on static input, so that run is not used as evidence.
+
+In the initial 180-sample, 60 fps pilot (three shake seeds), every method preserved the static control exactly.
+The pan-only control showed small but different path errors from the smoothers. On the pan-plus-shake control,
+the following min-to-max ranges across the three seeds illustrate the tradeoff; units are synthetic path units,
+not rendered pixels or perceptual scores:
+
+| family / fixed setting | pan error RMS | residual second-difference RMS | max correction |
+| --- | ---: | ---: | ---: |
+| multiscale `drop_all_detail` | 0.120–0.129 | 0.000082–0.000085 | 1.50–1.70 |
+| multiscale `drop_finest` | 0.502–0.504 | 0.09223–0.09229 | 0.443–0.543 |
+| multiscale `drop_finest_and_medium` | 0.0148–0.0408 | 0.00126–0.00135 | 1.13–1.29 |
+| multiscale `keep_all_detail` | 0.622 | 0.756–0.757 | 0 |
+| L1 budget `0.05` | 0.604–0.605 | 0.627–0.629 | 0.05 |
+| L1 budget `0.3` | 0.551–0.554 | 0.119–0.128 | 0.3 |
+| L1 budget `1.5` | 0.187–0.195 | 0.000163–0.000275 | 1.5 |
+
+This short cartoon suggests a tradeoff, not a winner: multiscale retention can reduce pan error sharply at the
+cost of larger correction, while the high-budget L1 setting has lower residual jitter. The crop proxies are
+not matched closely enough to claim a quality advantage, and the scene contains only translation with two
+sinusoidal shake bands. The audit tests passed **20 tests**; together with the decomposition tests, the focused
+suite passed **45 tests**. Next: compare on longer, varied known-truth motion, match correction/coverage and
+delay more carefully, then inspect full rendered frames on synthetic and real windows. Only consider the
+fractal experiment after the strongest non-fractal multiscale baseline has a repeatable advantage over L1.
 
 ## What works
 
