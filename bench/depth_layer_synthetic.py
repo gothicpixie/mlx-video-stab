@@ -80,6 +80,29 @@ same pooled estimate, not a claim that the pooled baseline knows or selects a ta
 (``downstream_available=False`` with a machine-readable ``downstream_reason``) and every entry is ``None``;
 no partial or fabricated path is substituted.
 
+Robustness controls (E10)
+-------------------------
+Three opt-in, default-off robustness controls stress the same fixture without changing the default
+(all-zero) behaviour:
+
+* ``flow_noise_px`` adds zero-mean i.i.d. Gaussian **measurement noise** (sigma in pixels) to the *observed*
+  ``fwd_flow`` only, under a fixed named-offset seeded RNG; the known ``layer_flow`` ground truth is never
+  perturbed, so noisy observations yet exact scoring remain separable.
+* ``depth_error_frac`` deterministically flips that fraction of the **visible ranked** pixel labels between the
+  two raw depth classes (fixed seeded permutation). It applies to ``depth_mode="ranked"`` only: the
+  uninformative and shuffled regimes are left untouched. The realized flipped count/fraction is reported. It
+  changes the *observed* per-pixel rank (what fitting consumes) but never the ground-truth layer labels, the
+  layer transforms or the known flow.
+* ``fg_nonaffine_px`` adds a deterministic **smooth, spatially varying** (sinusoidal, frame-varying) foreground
+  displacement. It is folded into the known ``layer_flow`` ground truth and the observed ``fwd_flow``, but the
+  affine ``layer_transform`` is kept separately as the affine component. Downstream coordinate evaluation
+  applies the true sampled non-affine displacement to the warped point *before* the inverse estimated ``E``, so
+  residual jitter and displacement-vs-intent error stay meaningfully distinct from coverage.
+
+All three default to zero, so :func:`run_experiment` on the default spec is bit-for-bit the E09 fixture. The
+truth layer labels are still used only to define the corruption/synthetic generation and to score; they are
+never used to fit.
+
 Determinism, JSON and scope
 ---------------------------
 Everything is float64 NumPy with fixed seeds/permutations; :func:`run_experiment` is a pure function of its
@@ -118,6 +141,11 @@ MIN_EVAL_SAMPLES = 3
 # margin (synthetic pixels) in the majority of comparable frames to be recorded as a material gain. Fixed.
 MATERIAL_GAIN_PX = 1e-6
 
+# Named seed offsets: independent deterministic RNG streams derived from ``spec.seed`` so the flow-noise and
+# depth-corruption draws never alias each other or the existing shuffled-permutation stream (``seed + 7919``).
+SEED_FLOW_NOISE = 104729
+SEED_DEPTH_ERROR = 130363
+
 LIMITATIONS = (
     "all results are SYNTHETIC: a deterministic coordinate model with known ground-truth layer transforms; "
     "they say nothing about real footage, RAFT accuracy, or metric depth",
@@ -131,6 +159,8 @@ LIMITATIONS = (
     "frame is rendered and no production stabilizer is run",
     "no threshold is selected or swept, no policy is declared a winner, and no production wiring or default "
     "change is implied",
+    "the E10 robustness controls (flow_noise_px, depth_error_frac, fg_nonaffine_px) are synthetic corruptions "
+    "of the coordinate model, not calibrated models of real sensor noise, depth errors or non-rigid motion",
 )
 
 
@@ -228,6 +258,32 @@ def _fg_local(T: int, W: int, H: int, *, amp: float) -> np.ndarray:
     return L
 
 
+# Fixed spatial frequencies / temporal rate for the deterministic non-affine foreground field. Smooth by
+# construction (a low-order sinusoidal basis), so the local deformation is genuinely non-affine yet bounded.
+_NONAFFINE_KX = 2.0 * np.pi * 1.5
+_NONAFFINE_KY = 2.0 * np.pi * 1.0
+_NONAFFINE_OMEGA = 0.7
+
+
+def fg_nonaffine_displacement(pts: np.ndarray, t: int, W: int, H: int, *, amp: float,
+                              seed: int) -> np.ndarray:
+    """Deterministic smooth foreground displacement field ``[K,2]`` at reference points ``pts [K,2]``.
+
+    A fixed sinusoidal x/y field that also varies with frame ``t`` (phase seeded by ``seed``). ``amp`` is the
+    peak displacement in pixels; ``amp == 0`` returns exact zeros, so the default fixture is unchanged. The
+    field is spatially varying (not an affine map), which is why it lives outside ``layer_transform``.
+    """
+    pts = np.asarray(pts, np.float64)
+    if amp == 0.0:
+        return np.zeros((pts.shape[0], 2), np.float64)
+    x = pts[:, 0] / float(max(W, 1))
+    y = pts[:, 1] / float(max(H, 1))
+    ph = 0.13 * float(seed)
+    u = amp * np.sin(_NONAFFINE_KX * x + _NONAFFINE_OMEGA * float(t) + ph) * np.cos(_NONAFFINE_KY * y)
+    v = amp * np.cos(_NONAFFINE_KY * y + _NONAFFINE_OMEGA * float(t)) * np.sin(_NONAFFINE_KX * x + ph)
+    return np.stack([u, v], axis=-1)
+
+
 class SyntheticSpec:
     """Immutable description of the deterministic two-layer synthetic sequence."""
 
@@ -235,7 +291,8 @@ class SyntheticSpec:
                  rank_orientation: str = "low_raw_low_rank", depth_mode: str = "ranked",
                  lock_rank: int = 0, preserve_rank: int = 1, jitter_px: float = 3.0, drift_px: float = 10.0,
                  rot_deg: float = 0.4, zoom: float = 0.02, fg_amp: float = 0.25, border: int = 3,
-                 occlusion_hole: bool = True, seed: int = 0):
+                 occlusion_hole: bool = True, seed: int = 0, flow_noise_px: float = 0.0,
+                 depth_error_frac: float = 0.0, fg_nonaffine_px: float = 0.0):
         if T < 3:
             raise ValueError("T must be >= 3 so a residual second difference is defined")
         if W < 8 or H < 8:
@@ -249,6 +306,15 @@ class SyntheticSpec:
             raise ValueError(f"depth_mode must be one of {DEPTH_MODES}")
         if border < 0:
             raise ValueError("border must be >= 0")
+        flow_noise_px = float(flow_noise_px)
+        depth_error_frac = float(depth_error_frac)
+        fg_nonaffine_px = float(fg_nonaffine_px)
+        if not np.isfinite(flow_noise_px) or flow_noise_px < 0.0:
+            raise ValueError("flow_noise_px must be finite and >= 0")
+        if not np.isfinite(depth_error_frac) or not 0.0 <= depth_error_frac <= 1.0:
+            raise ValueError("depth_error_frac must be finite and in [0, 1]")
+        if not np.isfinite(fg_nonaffine_px) or fg_nonaffine_px < 0.0:
+            raise ValueError("fg_nonaffine_px must be finite and >= 0")
         self.T, self.W, self.H = int(T), int(W), int(H)
         self.depths = depths
         self.rank_orientation = rank_orientation
@@ -263,6 +329,9 @@ class SyntheticSpec:
         self.border = int(border)
         self.occlusion_hole = bool(occlusion_hole)
         self.seed = int(seed)
+        self.flow_noise_px = flow_noise_px
+        self.depth_error_frac = depth_error_frac
+        self.fg_nonaffine_px = fg_nonaffine_px
 
     def as_dict(self) -> dict:
         """JSON-safe, path-free description of the spec (for the report's ``spec`` block)."""
@@ -273,6 +342,8 @@ class SyntheticSpec:
             "jitter_px": self.jitter_px, "drift_px": self.drift_px, "rot_deg": self.rot_deg,
             "zoom": self.zoom, "fg_amp": self.fg_amp, "border": self.border,
             "occlusion_hole": self.occlusion_hole, "seed": self.seed,
+            "flow_noise_px": self.flow_noise_px, "depth_error_frac": self.depth_error_frac,
+            "fg_nonaffine_px": self.fg_nonaffine_px,
         }
 
 
@@ -359,15 +430,29 @@ class Sequence:
         self.intended_layer[1] = P
 
         # Observed flow at reference coords (displacement of the visible layer), and known per-layer flow.
+        # Known flow folds in the true (non-affine) foreground displacement, but the affine ``layer_transform``
+        # above is kept separately as the affine component of that motion.
         vis_flat = visible.reshape(-1)
+        self.layer_nonaffine = np.zeros((2, T, H * W, 2), np.float64)
         self.fwd_flow = np.zeros((T, H * W, 2), np.float64)
         self.layer_flow = np.zeros((2, T, H * W, 2), np.float64)
         for t in range(T):
             for l in range(2):
                 self.layer_flow[l, t] = apply_affine(self.layer_transform[l, t], self.coords) - self.coords
+                if l == 1:
+                    d = fg_nonaffine_displacement(self.coords, t, W, H, amp=spec.fg_nonaffine_px,
+                                                  seed=spec.seed)
+                    self.layer_nonaffine[l, t] = d
+                    self.layer_flow[l, t] = self.layer_flow[l, t] + d
                 sel = vis_flat == l
                 if sel.any():
                     self.fwd_flow[t, sel] = self.layer_flow[l, t][sel]
+
+        # Observed-flow measurement noise: fixed-offset seeded Gaussian applied to ``fwd_flow`` only. The known
+        # ``layer_flow`` ground truth above is never perturbed, and a zero sigma adds nothing (bit-exact).
+        if spec.flow_noise_px > 0.0:
+            rng = np.random.RandomState(spec.seed + SEED_FLOW_NOISE)
+            self.fwd_flow = self.fwd_flow + spec.flow_noise_px * rng.standard_normal(self.fwd_flow.shape)
 
         # Source depth per pixel = raw depth value of the visible layer (collapsed/shuffled per depth_mode).
         raw = np.asarray(spec.depths, np.float64)
@@ -378,6 +463,25 @@ class Sequence:
         if spec.depth_mode == "shuffled":
             rng = np.random.RandomState(spec.seed + 7919)
             depth_flat = depth_flat[rng.permutation(H * W)]
+        # Depth-rank corruption (ranked mode only): deterministically flip a fraction of the visible pixel
+        # labels between the two raw depth classes. Fixed offset seeded permutation; never touches the ground
+        # truth (layer labels/transforms/flow) and is skipped entirely for zero fraction or degenerate modes.
+        self.depth_error_flipped_count = 0
+        self.depth_error_flipped_frac = 0.0
+        if spec.depth_error_frac > 0.0 and spec.depth_mode == "ranked":
+            n_pix = H * W
+            n_flip = int(round(spec.depth_error_frac * n_pix))
+            n_flip = max(0, min(n_flip, n_pix))
+            if n_flip > 0:
+                rng = np.random.RandomState(spec.seed + SEED_DEPTH_ERROR)
+                flip_idx = rng.permutation(n_pix)[:n_flip]
+                # Flip between the two raw classes via the nominal raw-value ordering of the two layers.
+                two = np.asarray(spec.depths, np.float64)
+                lo, hi = float(min(two)), float(max(two))
+                cur = depth_flat[flip_idx]
+                depth_flat[flip_idx] = np.where(cur >= hi, lo, hi)
+                self.depth_error_flipped_count = int(n_flip)
+                self.depth_error_flipped_frac = float(n_flip) / float(n_pix)
         self.source_depth = depth_flat.reshape(H, W)
 
         # Per-layer rank of the *nominal* layer raw values (used only for rank->layer resolution claims), and
@@ -542,9 +646,11 @@ def _layer_downstream(seq: Sequence, E_by_frame: np.ndarray, layer: int, locked_
                       *, n_points: int = 25) -> dict:
     """Downstream metrics for one layer under per-frame estimated transforms ``E_by_frame [T,3,3]``.
 
-    Residual path ``R_l[t] = E[t]^-1 . M[l][t]`` at ``layer``'s reference sample points; intended residual is
-    identity for a locked layer and the layer's intended in-frame motion otherwise. Reports residual jitter,
-    displacement error vs intent and mean valid warp coverage."""
+    Residual path ``R_l[t] = E[t]^-1(warp_true(p)) - p`` at ``layer``'s reference sample points, where
+    ``warp_true(p) = M[l][t](p) + d_l(p)`` is the affine layer transform composed with the known sampled
+    **non-affine** displacement ``d_l`` (the true displacement is applied *before* the inverse estimated
+    ``E``). Intended residual is identity for a locked layer and the layer's intended in-frame motion
+    otherwise. Reports residual jitter, displacement error vs intent and mean valid warp coverage."""
     pts = seq.layer_points(layer, n_points)
     if pts.shape[0] == 0:
         return {"layer": int(layer), "n_points": 0, "residual_jitter_px": None,
@@ -556,7 +662,11 @@ def _layer_downstream(seq: Sequence, E_by_frame: np.ndarray, layer: int, locked_
     covs = []
     for t in range(T):
         Einv = np.linalg.inv(E_by_frame[t])
-        moved = apply_affine(compose_affine(Einv, seq.layer_transform[layer, t]), pts)
+        warped = apply_affine(seq.layer_transform[layer, t], pts)
+        if layer == 1:
+            warped = warped + fg_nonaffine_displacement(
+                pts, t, seq.W, seq.H, amp=seq.spec.fg_nonaffine_px, seed=seq.spec.seed)
+        moved = apply_affine(Einv, warped)
         residual[t] = moved - pts
         if layer == locked_layer:
             intended[t] = 0.0
@@ -829,6 +939,14 @@ def run_experiment(spec: Optional[SyntheticSpec] = None) -> dict:
         "depth_mode": spec.depth_mode,
         "n_layers": int(seq.n_layers),
         "layer_rank": [int(r) for r in seq.layer_rank],
+        "corruption": {
+            "flow_noise_px": spec.flow_noise_px,
+            "depth_error_frac": spec.depth_error_frac,
+            "depth_error_applied": bool(spec.depth_error_frac > 0.0 and spec.depth_mode == "ranked"),
+            "depth_error_realized_count": int(seq.depth_error_flipped_count),
+            "depth_error_realized_frac": float(seq.depth_error_flipped_frac),
+            "fg_nonaffine_px": spec.fg_nonaffine_px,
+        },
         "baseline": {
             "scope": "pooled",
             "frames": baseline_frames,
@@ -878,6 +996,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--rot-deg", type=float, default=0.4)
     p.add_argument("--zoom", type=float, default=0.02)
     p.add_argument("--fg-amp", type=float, default=0.25)
+    p.add_argument("--flow-noise-px", type=float, default=0.0,
+                   help="sigma of Gaussian measurement noise added to observed fwd_flow only (>= 0)")
+    p.add_argument("--depth-error-frac", type=float, default=0.0,
+                   help="fraction in [0,1] of visible ranked pixel labels flipped between raw depth classes")
+    p.add_argument("--fg-nonaffine-px", type=float, default=0.0,
+                   help="peak amplitude of the deterministic non-affine foreground displacement (>= 0)")
     p.add_argument("--border", type=int, default=3)
     p.add_argument("--no-occlusion-hole", action="store_true", help="omit the rectangular invalid-support hole")
     p.add_argument("--seed", type=int, default=0)
@@ -905,7 +1029,9 @@ def spec_from_args(a: argparse.Namespace) -> SyntheticSpec:
         T=a.T, W=a.W, H=a.H, depths=parse_depths(a.depths), rank_orientation=a.rank_orientation,
         depth_mode=a.depth_mode, lock_rank=a.lock_rank, preserve_rank=a.preserve_rank,
         jitter_px=a.jitter_px, drift_px=a.drift_px, rot_deg=a.rot_deg, zoom=a.zoom, fg_amp=a.fg_amp,
-        border=a.border, occlusion_hole=not a.no_occlusion_hole, seed=a.seed)
+        border=a.border, occlusion_hole=not a.no_occlusion_hole, seed=a.seed,
+        flow_noise_px=a.flow_noise_px, depth_error_frac=a.depth_error_frac,
+        fg_nonaffine_px=a.fg_nonaffine_px)
 
 
 def run(opts: argparse.Namespace, log=print) -> dict:

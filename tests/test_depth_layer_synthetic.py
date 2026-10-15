@@ -536,6 +536,170 @@ def test_json_safe_handles_nonfinite_floats():
 
 
 # --------------------------------------------------------------------------------------
+# E10 robustness controls
+# --------------------------------------------------------------------------------------
+
+def test_e10_zero_controls_reproduce_the_ideal_fixture():
+    # all new parameters default to zero, so the sequence and report are the E09 fixture exactly
+    seq = D.build_sequence(D.SyntheticSpec())
+    assert seq.depth_error_flipped_count == 0 and seq.depth_error_flipped_frac == 0.0
+    np.testing.assert_array_equal(seq.layer_nonaffine[1], np.zeros_like(seq.layer_nonaffine[1]))
+    rep = D.run_experiment(D.SyntheticSpec(flow_noise_px=0.0, depth_error_frac=0.0, fg_nonaffine_px=0.0))
+    # exact affine recovery on the noiseless fixture
+    for p in rep["policies"]:
+        assert p["available"] is True
+        assert p["target_error"]["frame_median_median"] < 1e-6
+        assert p["downstream"]["locked_layer_residual_jitter_px"] < 1e-9
+
+
+def test_e10_as_dict_records_new_controls_and_is_json_safe():
+    d = D.SyntheticSpec(flow_noise_px=0.7, depth_error_frac=0.3, fg_nonaffine_px=1.5).as_dict()
+    assert d["flow_noise_px"] == 0.7 and d["depth_error_frac"] == 0.3 and d["fg_nonaffine_px"] == 1.5
+    json.dumps(d)
+    assert "path" not in json.dumps(d).lower()
+
+
+def test_e10_fixed_settings_are_deterministic_and_json_safe():
+    spec = D.SyntheticSpec(flow_noise_px=0.5, depth_error_frac=0.25, fg_nonaffine_px=1.5)
+    a = D.dumps_report(D.run_experiment(spec))
+    b = D.dumps_report(D.run_experiment(spec))
+    assert a == b  # fixed named seed offsets make the corruption deterministic
+    assert "NaN" not in a and "Infinity" not in a
+    parsed = json.loads(a)
+    assert parsed["corruption"]["flow_noise_px"] == 0.5
+    assert parsed["corruption"]["fg_nonaffine_px"] == 1.5
+
+
+def test_e10_flow_noise_perturbs_observation_not_truth():
+    base = D.build_sequence(D.SyntheticSpec())
+    noisy = D.build_sequence(D.SyntheticSpec(flow_noise_px=0.5))
+    # known layer_flow ground truth is identical; only the observed fwd_flow is perturbed
+    np.testing.assert_array_equal(base.layer_flow, noisy.layer_flow)
+    assert not np.allclose(base.fwd_flow, noisy.fwd_flow)
+    assert np.abs(noisy.fwd_flow - base.fwd_flow).max() > 0.0
+
+
+def test_e10_flow_noise_produces_nonzero_heldout_error():
+    rep = D.run_experiment(D.SyntheticSpec(flow_noise_px=0.5))
+    for p in rep["policies"]:
+        assert p["available"] is True
+        # an affine fit can no longer match the known truth exactly under noisy observations
+        assert p["target_error"]["frame_median_median"] > 1e-6
+
+
+def test_e10_nonaffine_is_in_ground_truth_and_observed_flow_but_not_affine_transform():
+    base = D.build_sequence(D.SyntheticSpec())
+    na = D.build_sequence(D.SyntheticSpec(fg_nonaffine_px=2.0))
+    # the affine layer_transform is unchanged (non-affine is kept separate)
+    np.testing.assert_array_equal(base.layer_transform, na.layer_transform)
+    # the known ground-truth layer_flow and the observed fwd_flow both carry the non-affine part
+    assert not np.allclose(base.layer_flow[1], na.layer_flow[1])
+    assert not np.allclose(base.fwd_flow, na.fwd_flow)
+    # and the field is spatially varying (not an affine map): it varies within a frame
+    d = na.layer_nonaffine[1, 0]
+    assert np.abs(d).max() > 0.0
+    assert not np.allclose(d, d[0])  # different pixels get different displacements
+
+
+def test_e10_nonaffine_produces_nonzero_heldout_and_downstream_error():
+    rep = D.run_experiment(D.SyntheticSpec(fg_nonaffine_px=2.0))
+    fp = {p["policy"]: p for p in rep["policies"]}["foreground_preserve"]
+    assert fp["available"] is True
+    assert fp["target_error"]["frame_median_median"] > 1e-6
+    # a locked affine path cannot absorb the non-affine deformation, so jitter/error are nonzero
+    assert fp["downstream"]["locked_layer_residual_jitter_px"] > 0.0
+    assert fp["downstream"]["locked_layer_displacement_error_px"] > 0.0
+    # background layer has no non-affine field, so its residual stays ~0 (meaningfully distinct)
+    bl = {p["policy"]: p for p in rep["policies"]}["background_lock"]
+    assert bl["downstream"]["locked_layer_residual_jitter_px"] < 1e-9
+
+
+def test_e10_depth_rank_corruption_changes_observed_but_not_ground_truth():
+    spec = D.SyntheticSpec(depth_error_frac=0.25, depths=(0.2, 0.8))
+    base = D.build_sequence(D.SyntheticSpec())
+    seq = D.build_sequence(spec)
+    n_pix = seq.H * seq.W
+    expected = int(round(0.25 * n_pix))
+    assert seq.depth_error_flipped_count == expected
+    assert math.isclose(seq.depth_error_flipped_frac, expected / n_pix)
+    # observed rank labels differ from the ground-truth visible-layer ranks
+    truth_rank = np.array([0, 1])[seq.visible_layer.reshape(-1)]
+    flipped = int((seq.rank_flat != truth_rank).sum())
+    assert flipped > 0 and flipped <= expected
+    # ground truth (layer labels, transforms, known flow) is untouched
+    np.testing.assert_array_equal(base.visible_layer, seq.visible_layer)
+    np.testing.assert_array_equal(base.layer_rank, seq.layer_rank)
+    np.testing.assert_array_equal(base.layer_flow, seq.layer_flow)
+    np.testing.assert_array_equal(base.layer_transform, seq.layer_transform)
+
+
+def test_e10_depth_rank_corruption_produces_nonzero_heldout_error():
+    rep = D.run_experiment(D.SyntheticSpec(depth_error_frac=0.25))
+    for p in rep["policies"]:
+        assert p["available"] is True
+        assert p["target_error"]["frame_median_median"] > 1e-6
+
+
+def test_e10_depth_corruption_not_applied_to_degenerate_modes():
+    for mode in ("uninformative", "shuffled"):
+        seq = D.build_sequence(D.SyntheticSpec(depth_mode=mode, depth_error_frac=0.5))
+        assert seq.depth_error_flipped_count == 0
+        assert seq.depth_error_flipped_frac == 0.0
+        rep = D.run_experiment(D.SyntheticSpec(depth_mode=mode, depth_error_frac=0.5))
+        assert rep["corruption"]["depth_error_applied"] is False
+        assert rep["corruption"]["depth_error_realized_count"] == 0
+
+
+def test_e10_degenerate_negative_controls_still_decline():
+    for mode in ("uninformative", "shuffled"):
+        rep = D.run_experiment(D.SyntheticSpec(depth_mode=mode, flow_noise_px=0.4, fg_nonaffine_px=1.0,
+                                               depth_error_frac=0.3))
+        for p in rep["policies"]:
+            assert p["available"] is False
+            assert p["downstream"] is None
+            assert p["target_error"]["material_win_frames"] == 0
+    # the shuffled control keeps its machine-readable reason under the new controls
+    sh = D.run_experiment(D.SyntheticSpec(depth_mode="shuffled", flow_noise_px=0.4))
+    assert all(p["reason"] == "rank_layer_association_destroyed" for p in sh["policies"])
+    # the counterfactual pooled downstream stays available for the shuffled diagnostic
+    assert sh["baseline"]["downstream_available"] is True
+    assert set(sh["baseline"]["downstream_by_target_layer"]) == {"0", "1"}
+
+
+def test_e10_invalid_controls_fail():
+    with pytest.raises(ValueError):
+        D.SyntheticSpec(flow_noise_px=-0.1)
+    with pytest.raises(ValueError):
+        D.SyntheticSpec(flow_noise_px=float("nan"))
+    with pytest.raises(ValueError):
+        D.SyntheticSpec(flow_noise_px=float("inf"))
+    with pytest.raises(ValueError):
+        D.SyntheticSpec(depth_error_frac=-0.01)
+    with pytest.raises(ValueError):
+        D.SyntheticSpec(depth_error_frac=1.01)
+    with pytest.raises(ValueError):
+        D.SyntheticSpec(depth_error_frac=float("nan"))
+    with pytest.raises(ValueError):
+        D.SyntheticSpec(fg_nonaffine_px=-1.0)
+    with pytest.raises(ValueError):
+        D.SyntheticSpec(fg_nonaffine_px=float("inf"))
+    # boundary values are accepted
+    assert D.SyntheticSpec(depth_error_frac=0.0).depth_error_frac == 0.0
+    assert D.SyntheticSpec(depth_error_frac=1.0).depth_error_frac == 1.0
+
+
+def test_e10_named_seed_offsets_are_distinct():
+    assert D.SEED_FLOW_NOISE != D.SEED_DEPTH_ERROR
+    assert D.SEED_FLOW_NOISE != 7919 and D.SEED_DEPTH_ERROR != 7919
+
+
+def test_e10_fg_nonaffine_displacement_zero_amp_is_exact_zeros():
+    pts = np.array([[0.0, 0.0], [5.0, 7.0]])
+    d = D.fg_nonaffine_displacement(pts, 3, 48, 36, amp=0.0, seed=1)
+    np.testing.assert_array_equal(d, np.zeros_like(d))
+
+
+# --------------------------------------------------------------------------------------
 # CLI
 # --------------------------------------------------------------------------------------
 
@@ -575,3 +739,47 @@ def test_cli_main_reports_failure_as_json(capsys):
     assert rc == 1
     payload = json.loads(capsys.readouterr().out)
     assert payload["status"] == "failure" and payload["error"]["type"] == "ValueError"
+
+
+def test_cli_includes_e10_controls_and_roundtrips():
+    a = D.build_parser().parse_args([
+        "--flow-noise-px", "0.5", "--depth-error-frac", "0.25", "--fg-nonaffine-px", "1.5",
+        "--T", "5", "--W", "24", "--H", "20"])
+    spec = D.spec_from_args(a)
+    assert spec.flow_noise_px == 0.5
+    assert spec.depth_error_frac == 0.25
+    assert spec.fg_nonaffine_px == 1.5
+    d = spec.as_dict()
+    assert d["flow_noise_px"] == 0.5 and d["depth_error_frac"] == 0.25 and d["fg_nonaffine_px"] == 1.5
+
+
+def test_cli_defaults_are_zero_controls():
+    spec = D.spec_from_args(D.build_parser().parse_args([]))
+    assert spec.flow_noise_px == 0.0 and spec.depth_error_frac == 0.0 and spec.fg_nonaffine_px == 0.0
+
+
+def test_cli_dry_run_prints_e10_controls(capsys):
+    rc = D.main(["--flow-noise-px", "0.5", "--depth-error-frac", "0.25", "--fg-nonaffine-px", "1.5",
+                 "--dry-run"])
+    assert rc == 0
+    printed = json.loads(capsys.readouterr().out)
+    assert printed["flow_noise_px"] == 0.5
+    assert printed["depth_error_frac"] == 0.25
+    assert printed["fg_nonaffine_px"] == 1.5
+
+
+def test_cli_rejects_invalid_e10_controls(capsys):
+    rc = D.main(["--flow-noise-px", "-1.0"])
+    assert rc == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "failure" and payload["error"]["type"] == "ValueError"
+
+
+def test_cli_writes_e10_corruption_block(tmp_path):
+    out = tmp_path / "report.json"
+    rc = D.main(["--T", "5", "--W", "24", "--H", "20", "--depth-error-frac", "0.25", "--out", str(out)])
+    assert rc == 0
+    saved = json.loads(out.read_text())
+    assert saved["corruption"]["depth_error_frac"] == 0.25
+    assert saved["corruption"]["depth_error_applied"] is True
+    assert saved["corruption"]["depth_error_realized_count"] > 0
