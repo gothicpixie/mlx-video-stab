@@ -42,7 +42,14 @@ def frame_pts(path):
 
 
 def decode(path, info=None, start=None, duration=None, deinterlace=True, vf=None):
-    """Yield RGB uint8 frames [H,W,3]. Returns (generator, effective_fps, (W,H))."""
+    """Yield RGB uint8 frames [H,W,3]. Returns (generator, effective_fps, (W,H)).
+
+    Failure handling (mirrors :class:`Encoder`): the ffmpeg child is always reaped and its stdout closed. On a
+    natural end of stream the generator waits for ffmpeg and raises ``subprocess.CalledProcessError`` for a
+    nonzero exit. A trailing short read (fewer than one raw RGB frame) is reported instead of dropping bytes.
+    If the generator is closed early, or the consumer/read raises, a still-running child is terminated and
+    waited for; the primary exception (including ``GeneratorExit``) is preserved even if that cleanup fails.
+    """
     info = info or probe(path)
     filt = []
     if info["interlaced"] and deinterlace: filt.append("bwdif=mode=send_field:parity=auto:deint=all")
@@ -60,13 +67,53 @@ def decode(path, info=None, start=None, duration=None, deinterlace=True, vf=None
     def gen():
         p = subprocess.Popen(cmd, stdout=subprocess.PIPE)
         n = W * H * 3
+        primary = None
+        natural_eof = False
         try:
             while True:
                 b = p.stdout.read(n)
-                if len(b) < n: break
+                if not b:
+                    natural_eof = True
+                    break
+                if len(b) < n:
+                    raise RuntimeError(
+                        f"ffmpeg raw RGB stream ended with a partial frame: "
+                        f"{len(b)} of {n} bytes for {str(path)!r}")
                 yield np.frombuffer(b, np.uint8).reshape(H, W, 3)
+        except BaseException as exc:                      # consumer throw/close, read error or partial frame
+            primary = exc
+            raise
         finally:
-            p.stdout.close(); p.terminate(); p.wait()
+            failure = None
+            try:
+                p.stdout.close()
+            except BaseException as exc:
+                failure = exc
+            if natural_eof:
+                returncode = None
+                try:
+                    returncode = p.wait()
+                except BaseException as exc:
+                    if failure is None: failure = exc
+                if returncode is not None and returncode != 0 and failure is None:
+                    failure = subprocess.CalledProcessError(returncode, getattr(p, "args", None))
+            else:
+                running = True                            # only signal a child that has not already exited
+                try:
+                    running = p.poll() is None
+                except BaseException as exc:
+                    if failure is None: failure = exc
+                if running:
+                    try:
+                        p.terminate()
+                    except BaseException as exc:
+                        if failure is None: failure = exc
+                try:
+                    p.wait()
+                except BaseException as exc:
+                    if failure is None: failure = exc
+            if failure is not None and primary is None:
+                raise failure
     return gen(), fps, (W, H)
 
 

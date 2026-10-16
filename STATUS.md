@@ -2197,13 +2197,16 @@ writer/flush/close/nonzero-child-exit errors from `write`, `drain` or `close`, a
 The `close_all` helper attempts every owned encoder before reporting the first close failure. Stabilization and
 the paired/multiscale review builders use it on success; their failure cleanup closes every sibling while
 preserving the original render/build exception. The local A/B position-reversal writer follows the same
-primary-exception rule for its single encoder. Successful frame bytes, cadence and rendered pixels are
-unchanged.
+primary-exception rule for its single encoder. `media.decode` now waits for ffmpeg on natural EOF, surfaces
+nonzero exit status, rejects trailing partial raw frames, and closes/reaps the child after early generator close
+or consumer/read errors without masking the primary exception. Successful frame bytes, cadence and rendered
+pixels are unchanged.
 
-Commits `455eb1c` and `dd41808` add the lifecycle, owner-cleanup and exception-precedence coverage. Direct
-verification passed: 108 media/stabilizer/review tests, 84 border-fill/reversal/composition tests, and 26
-reversal/media-failure tests (overlapping suites were rerun separately). CodeGraph is synced; `affected`
-reported no pytest links, so callers were exercised directly. This is a reliability change only and makes no
+Commits `455eb1c` and `dd41808` add encoder lifecycle, owner-cleanup and exception-precedence coverage. The
+current decoder change adds deterministic process-lifecycle and malformed-stream tests. The complete suite
+passed **1308 tests**; an independent media decode/cadence rerun passed **17 tests**. A real-ffmpeg smoke
+verified natural EOF, early-close reap and truncated-input failure. CodeGraph is synced; `affected` reported no
+pytest links, so callers were exercised directly. This is a reliability change only and makes no
 stabilization-quality claim.
 
 The current-source 800–810 s, 10 s baseline capture remains queued at `stage=source`, `status=running` while
