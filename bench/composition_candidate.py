@@ -69,8 +69,8 @@ Limitations
   ``CompositionScopeError`` rather than silently composing interpolated maps. Stride>1 defines its global
   path by ``dlt`` of interpolated quads, so an exact composed analogue needs its own interpolation decision.
 - The render order differs from production ``source_coords`` (which samples the mesh at the *source*
-  coordinate and then samples rows after the mesh shift); this candidate applies the fit order
-  global -> rows(p_y) -> mesh(p) at the source position.
+  coordinate and then samples rows at the mesh-shifted row); this candidate applies the fit order
+  global -> mesh(p) -> rows(p_y), i.e. both residuals evaluated at the source position ``p``.
 - Support/fold reporting is finite-difference based on the rendered pixel grid. ``nonfinite_cells`` (a
   source-coordinate difference is non-finite) and ``overflow_cells`` (finite differences but a non-finite
   corner determinant) are reported separately and excluded from the finite summaries; it is a detector, not a

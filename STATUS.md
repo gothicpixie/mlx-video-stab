@@ -2531,3 +2531,21 @@ and the caller previously passed its empty mask into `geometry.fit_model`, produ
 falling back. `pair_similarity` now returns the explicit fallback before that empty fit; a regression test pins
 the behavior. The 00177 ten-second KLT pass was rerun with `RuntimeWarning` promoted to error and completed
 without warnings, while still reporting path metrics unavailable for the documented failed-pair reason.
+
+## Projective residual-composition oracle guard (2026-10-16)
+
+The existing E02 synthetic audit already showed that the production fixed-grid residual sum differs from exact
+composition under rotation and two-layer parallax. It had not isolated a projective global with a nonzero
+residual, and its `transported_field` helper applied an affine-only displacement recursion without refusing
+projective homographies. Added a projective-plus-residual fixture and made that helper reject non-affine globals;
+the report marks the transported comparison as not applicable instead of emitting a misleading oracle. The
+fixed-grid sum differs from full composition by **1.07837 px mean / 1.62170 px max** on the analytic frame-2
+fixture, while production `source_coords` matches the independent fixed-grid replication within **9.6e-06 px**.
+A zero-residual projective control remains exact. This demonstrates a production representation mismatch, not
+that the resulting image is visibly worse on real footage. No stabilization defaults or production fitting
+behavior changed. The candidate composition module's stale mesh/row evaluation-order note was corrected.
+
+Verification. The focused audit/candidate/shape tests passed **62 tests**; the composition/plan/render group
+passed **281 tests**; `.claude/verify.sh` passed **1,536 tests**. CodeGraph was synced and current; its affected
+test heuristic found no tests, so importing tests were run directly. The composition candidate can express the
+full composed map, but real-footage quality and runtime impact remain unmeasured.

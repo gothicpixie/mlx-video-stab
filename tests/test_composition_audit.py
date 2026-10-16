@@ -173,13 +173,63 @@ def test_support_fraction_is_reported_not_silently_dropped(fixtures):
 
 
 # --------------------------------------------------------------------------------------
+# projective (non-affine) global: only the full composition is exact
+# --------------------------------------------------------------------------------------
+
+def test_affine_globals_detects_projective_perspective_row(fixtures):
+    assert CA.affine_globals(fixtures["constant_residual_rotation"].pairs) is True
+    assert CA.affine_globals(fixtures["parallax_two_layer"].pairs) is True
+    assert CA.affine_globals(fixtures["projective_residual_transport"].pairs) is False
+
+
+def test_transported_field_rejects_projective_global(fixtures):
+    """The affine displacement recursion must fail loudly, not silently return a wrong 'exact' oracle."""
+    fx = fixtures["projective_residual_transport"]
+    with pytest.raises(ValueError, match="projective"):
+        CA.transported_field(fx.pairs, 2, CA.output_grid(fx.W, fx.H), fx.W, fx.H)
+
+
+def test_projective_global_fixed_grid_sum_is_wrong(fixtures):
+    """Fixed-grid addition is wrong under a projective global; the composition is the only exact oracle."""
+    fx = fixtures["projective_residual_transport"]
+    W, H = fx.W, fx.H
+    pts = CA.output_grid(W, H)
+    plan, _ = CA.build_plan(fx)
+    oracle = CA.compose_oracle(fx.pairs, 2, pts, W, H)
+    naive = CA.naive_from_plan(plan, 2, pts, W, H)
+    err = CA.error_stats(naive, oracle)
+    assert err["max_px"] > 1.0            # measured ~1.622 px
+    assert err["mean_px"] > 0.5           # measured ~1.078 px
+    res = CA.audit_fixture(fx)
+    assert res["transported_applicable"] is False
+    assert res["errors"]["frame_2"]["transported_vs_oracle"] is None
+    assert res["errors"]["frame_2"]["naive_vs_oracle"]["max_px"] > 1.0
+
+
+def test_projective_global_without_residual_composes_exactly(fixtures):
+    """Control: a projective global composes exactly when the residuals are zero (the globals are not the bug)."""
+    fx = fixtures["projective_residual_transport"]
+    W, H, T = fx.W, fx.H, fx.T
+    gc, gr = fx.mesh_cells
+    zero = np.zeros((gr + 1, gc + 1, 2))
+    pairs = [CA.PairMotion(p.H.copy(), zero.copy()) for p in fx.pairs]
+    ctrl = CA.Fixture("projective_control", "projective globals, zero residuals", W, H, T, pairs, (gc, gr))
+    plan, _ = CA.build_plan(ctrl)
+    pts = CA.output_grid(W, H)
+    for t in range(T):
+        np.testing.assert_allclose(CA.naive_from_plan(plan, t, pts, W, H),
+                                   CA.compose_oracle(pairs, t, pts, W, H), atol=1e-9)
+
+
+# --------------------------------------------------------------------------------------
 # the actual production path (MLX/Metal; run under the heavy lock)
 # --------------------------------------------------------------------------------------
 
 def test_production_path_matches_independent_numpy_replication(fixtures):
     pytest.importorskip("mlx.core")
     for name in ("rigid_rotation_control", "translation_only_residual", "constant_residual_rotation",
-                 "spatial_ramp_translation", "parallax_two_layer", "rows_mesh_order"):
+                 "spatial_ramp_translation", "parallax_two_layer", "rows_mesh_order",
+                 "projective_residual_transport"):
         fx = fixtures[name]
         plan, _ = CA.build_plan(fx)
         for t in range(fx.T):

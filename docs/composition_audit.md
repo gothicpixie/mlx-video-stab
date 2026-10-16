@@ -85,6 +85,7 @@ All fixtures are deterministic and built in memory. `mesh=(gc,gr)` and `rs_rows`
 | `parallax_two_layer` | 6 deg rotation + background translation | supported two-layer differential | transport + location + support boundary |
 | `rows_mesh_order` | identity | constant mesh y-shift 3 px + linear row field | mesh/row evaluation order |
 | `rotation_translation_border` | 10 deg rotation + 20 px x translation | constant `u=[8,0]` on pair 0 | transport error with large border exclusion |
+| `projective_residual_transport` | 8 deg rotation + perspective (non-affine) | constant `u=[8,0]` on pair 0 | projective global with a residual; the affine transport recursion is invalid |
 
 The parallax fixture states its own physical convention explicitly: `displacement_px = (f_px / Z) *
 translation`, with `f_px = 100`, `Z_bg = 5.0`, `Z_fg = 1.25` in arbitrary units, so `f_px/Z` is inverse depth.
@@ -107,6 +108,7 @@ replication (a numerical-agreement check, not a quality metric).
 | `parallax_two_layer` | 0.09988 / 0.78964 | 1.2e-05 |
 | `rows_mesh_order` (frame 1) | 0.05000 / 0.06000 | 1.7e-06 |
 | `rotation_translation_border` | 1.39449 / 1.39449 | 8.6e-06 |
+| `projective_residual_transport` | 1.07837 / 1.62170 | 9.6e-06 |
 
 Frame 1 of `constant_residual_rotation` is exact (constant residual: the sampling position is irrelevant);
 frame 2 is wrong by exactly `||u - R_linear u||`. `spatial_ramp_translation` frame 1 is wrong by the
@@ -123,9 +125,19 @@ at frame 2 under the oracle composition. The transport error remains on the supp
 (`1.39449 px`), so this is not fixed by cropping the border. Error counts are always over all output pixels,
 with a separate in-bounds figure.
 
-The affine transport recursion reproduces the composition to `<= 3.2e-14 px` on every fixture, including the
-spatially varying ones, so the frame-consistency of the displacement representation is exact for
-similarity/affine globals (a projective `H` would require the full composed map).
+The affine transport recursion reproduces the composition to `<= 3.2e-14 px` on every **affine** fixture,
+including the spatially varying ones, so the frame-consistency of the displacement representation is exact for
+similarity/affine globals. It is **not** exact for the projective global: `transported_field` uses only the
+linear part `A_k`, while a projective `H` requires the full composed map. The audit therefore detects the
+perspective row (`affine_globals`, perspective row `[0, 0, 1]`), refuses the recursion with a `ValueError`, and
+records `transported_vs_oracle = null` with `transported_applicable = false` for
+`projective_residual_transport`. Its fixed-grid error is `1.07837 px` mean / `1.62170 px` max at frame 2, so
+the production fixed-grid sum is wrong under a projective global too (`production_vs_naive = 9.6e-06 px`, i.e.
+the real `source_coords` still matches the NumPy fixed-grid replication). Production `G` can be projective
+(its per-frame homography is `geometry.dlt` of a four-corner path), so this is a production case, not only an
+analytic curiosity. This closes the audit's previous "projective `H` ... not isolated as its own fixture" gap;
+the designed Stage 1 fix is the full composition (`compose_oracle` / `composition_candidate`), not the affine
+recursion.
 
 ## When simple addition is valid
 
@@ -141,7 +153,9 @@ The controls pin both: `rigid_rotation_control` and `translation_only_residual` 
 `constant_residual_rotation` and `spatial_ramp_translation` violate (1) and (2) respectively and are wrong by
 the closed-form amounts. If only (1) holds but the field varies (translation globals + ramp), the error is
 `r(x+T) - r(x)`, i.e. the location error. If only (2) holds but the globals rotate, the error is the vector
-transport `(I - A) delta`.
+transport `(I - A) delta`. A **projective** global violates a third condition the affine recursion assumes --
+that the accumulated displacement maps through `A_k` -- so `projective_residual_transport` is wrong by neither
+of the two closed forms above and only `compose_oracle` is exact there.
 
 ## Inverse convergence
 
@@ -216,17 +230,18 @@ Outputs (under ignored `out/`, no private media): `fixtures.npz` (per-pair homog
 vertex fields) and `results.json` (JSON-safe, `allow_nan=False`), plus the same data returned by
 `run_audit()`. The committed source of truth is the module and tests; the JSON is regenerable evidence.
 
-Focused tests: `tests/test_composition_audit.py` (15 tests) covers the closed-form oracle, the affine
+Focused tests: `tests/test_composition_audit.py` (20 tests) covers the closed-form oracle, the affine
 transport recursion, the pinned plan's global composition, the addition-valid controls, the transport
-counterexample, the location error, the two-layer localisation, mesh/row order, support/visibility, the
-inverse convergence/failure modes, JSON safety, and the actual production path. Several tests assert that
-the naive result is *wrong* and that the oracle matches the independent closed form, rather than freezing the
-current output as desired.
+counterexample, the location error, the two-layer localisation, mesh/row order, the projective-global
+counterexample and the `transported_field` affine guard, support/visibility, the inverse convergence/failure
+modes, JSON safety, and the actual production path. Several tests assert that the naive result is *wrong* and
+that the oracle matches the independent closed form, rather than freezing the current output as desired.
 
 ## Limitations
 
-- Analytic 2D fixtures with similarity/affine globals; a projective `H` is composed by the oracle but not
-  isolated as its own fixture.
+- Analytic 2D fixtures; the affine/similarity fixtures use vector transport, and
+  `projective_residual_transport` isolates a projective global with a residual (the affine transport recursion
+  is refused there, so only the composed oracle is used).
 - Residual fields are discrete mesh/row vertex fields, so a layer boundary is one cell wide and is excluded
   from exact-vector assertions; the audit reports regional means rather than sub-cell truth.
 - The border/support fractions are those of the locked virtual camera in each fixture, not of a real

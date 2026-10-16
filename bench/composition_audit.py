@@ -214,8 +214,28 @@ def compose_globals(pairs, t):
     return Gm
 
 
+def affine_globals(pairs, atol=1e-9):
+    """True when every pair's global is affine, i.e. its perspective row is ``[0, 0, 1]``.
+
+    The displacement recursion in :func:`transported_field` is exact only for affine globals: it replaces the
+    frame-``k`` map of the accumulated displacement with its linear part ``A_k``. A projective global has a
+    non-zero ``H[2, 0]``/``H[2, 1]`` and the perspective division must be composed in full, so the recursion --
+    and hence that function as an oracle -- is invalid there. Check before treating its output as ground truth.
+    """
+    return all(abs(float(p.H[2, 0])) <= atol and abs(float(p.H[2, 1])) <= atol
+               and abs(float(p.H[2, 2]) - 1.0) <= atol for p in pairs)
+
+
 def transported_field(pairs, t, pts, W, H):
-    """Exact displacement transport for affine/similarity globals: ``delta_{k+1} = A_k delta_k + r_k(G_k+delta_k)``."""
+    """Exact displacement transport for **affine/similarity** globals: ``delta_{k+1} = A_k delta_k + r_k(G_k+delta_k)``.
+
+    Raises ``ValueError`` for a projective global (see :func:`affine_globals`), where only the full composition
+    :func:`compose_oracle` is exact, so the recursion cannot silently return a wrong oracle.
+    """
+    if not affine_globals(pairs):
+        raise ValueError(
+            "transported_field's affine displacement recursion is invalid for a projective global; "
+            "use compose_oracle for the exact composition")
     pts = np.asarray(pts, np.float64)
     delta = np.zeros_like(pts)
     for k in range(t):
@@ -363,6 +383,24 @@ def build_fixtures():
         Wb, Hb, Tb, [PairMotion(Hbk.copy(), _const(gc, gr, (8.0, 0.0))),
                      PairMotion(Hbk.copy(), zero.copy())], (gc, gr))
 
+    # Projective (non-affine) global with a residual. Unlike every fixture above, the global has a non-zero
+    # perspective row, so the displacement recursion in ``transported_field`` is invalid: ``A_k`` alone cannot
+    # carry a residual through a projective map. Only the full composition ``compose_oracle`` is exact here.
+    # This isolates the projective-H case the audit previously covered only implicitly (the oracle composed it
+    # but no fixture exercised a projective global *with* a residual). Production ``G`` can be projective (its
+    # per-frame homography comes from ``geometry.dlt`` of a four-corner path), so the fixed-grid error under a
+    # projective global is a real production case, not only an analytic curiosity.
+    Wpr, Hpr, Tpr = 64, 48, 3
+    persp = np.eye(3); persp[2, 0] = 1.5e-3; persp[2, 1] = -1.2e-3
+    Hproj = persp @ rotation_about_clockwise(Wpr, Hpr, 8.0)
+    fx["projective_residual_transport"] = Fixture(
+        "projective_residual_transport",
+        "8 deg rotation with added perspective (non-affine global), constant u=[8,0] residual on pair 0. "
+        "The affine transport recursion is invalid; only the full composition is the exact oracle.",
+        Wpr, Hpr, Tpr, [PairMotion(Hproj.copy(), _const(gc, gr, (8.0, 0.0))),
+                        PairMotion(Hproj.copy(), zero.copy())], (gc, gr),
+        notes="H[2,0]=1.5e-3 and H[2,1]=-1.2e-3 are non-zero, so the affine transport recursion is invalid.")
+
     return fx
 
 
@@ -431,7 +469,9 @@ def audit_fixture(fx, with_production=False):
     plan, _cfg = build_plan(fx)
     oracle = [compose_oracle(fx.pairs, t, pts, fx.W, fx.H) for t in range(fx.T)]
     naive = [naive_from_plan(plan, t, pts, fx.W, fx.H) for t in range(fx.T)]
-    transported = [transported_field(fx.pairs, t, pts, fx.W, fx.H) for t in range(fx.T)]
+    transport_ok = affine_globals(fx.pairs)
+    transported = ([transported_field(fx.pairs, t, pts, fx.W, fx.H) for t in range(fx.T)] if transport_ok
+                   else [None] * fx.T)
     region = fx.region(pts) if fx.region is not None else np.zeros(len(pts), int)
     support = in_bounds(oracle[-1], fx.W, fx.H)
 
@@ -439,13 +479,15 @@ def audit_fixture(fx, with_production=False):
         "name": fx.name, "description": fx.description, "notes": fx.notes,
         "W": fx.W, "H": fx.H, "frames": fx.T, "mesh_cells": list(fx.mesh_cells), "rs_rows": fx.rs_rows,
         "plan_check": _fixture_plan_check(fx, plan),
+        "transported_applicable": transport_ok,
         "errors": {}, "support": {},
     }
     for t in range(fx.T):
         tag = f"frame_{t}"
         res["errors"][tag] = {
             "naive_vs_oracle": error_stats(naive[t], oracle[t]),
-            "transported_vs_oracle": error_stats(transported[t], oracle[t]),
+            "transported_vs_oracle": (error_stats(transported[t], oracle[t]) if transported[t] is not None
+                                      else None),
             "naive_vs_oracle_in_bounds": error_stats(naive[t], oracle[t], in_bounds(oracle[t], fx.W, fx.H)),
             "by_region": region_error(naive[t], oracle[t], region),
         }
