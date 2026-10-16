@@ -2632,3 +2632,62 @@ composition component on this window (the existing border-component audit) to te
 inherently enlarges the invalid support, and only then consider a border-aware or coverage-constrained variant;
 re-test any variant on a further distinct source/window with the matched masked evaluator and a position-
 reversed review. No production wiring, default change or mode selection follows from this entry.
+
+## E02 source_highpass invalid-support attribution on `00177.MTS` t090 10 s (2026-10-16)
+
+Read-only CPU/NumPy attribution of the extra border invalids recorded in the held-out E02 entry above. A
+local, ignored script `out/bench/e02_source_highpass_00177_t090_10s_heldout/mask_attribution.py` reconstructed
+the per-pixel center-out-of-bounds (`invalid support`) mask of three output->source fields on the **identical**
+300 output indices of `out/bench/current_source_00177_t090_10s_baseline/`: the production plan
+(`stabilize._source_coords_ts_scales_np` + `_valid_mask_np`), the exact composed candidate (`highpass=False`),
+and `source_highpass`, the latter two through the renderer's `ForwardComposedMap` (dense-grid interpolated
+forward composition). No source footage was decoded for rendering, no video was re-rendered, no heavy lock was
+acquired, and no production default or artifact changed.
+
+Verification gates (all passed, otherwise the comparison would stop): the reconstructed output indices equal the
+render report's `pairing.frame_indices` (300 frames, 59.94->29.97, step 2); the reconstructed production mask is
+**pixel-exact against `mask_r0.mp4`** (0 differing pixels over 300 x 2,073,600); and the reconstructed
+`source_highpass` per-frame invalid counts match `composition_source_highpass_r0.json` exactly (0/300
+mismatches; 8,556,066 total).
+
+Pooled over 300 output frames (622,080,000 pixels):
+
+| field | invalid pixels | pooled invalid |
+| --- | ---: | ---: |
+| production baseline | 7,185,290 | 1.155 % |
+| exact composition (`highpass=False`) | 49,447,376 | 7.949 % |
+| source_highpass | 8,556,066 | 1.375 % |
+
+Paired per-pixel transitions (valid -> invalid / invalid -> valid / net invalid):
+
+| pair | valid -> invalid | invalid -> valid | net invalid | net pooled |
+| --- | ---: | ---: | ---: | ---: |
+| baseline -> exact | 43,973,048 | 1,710,962 | **+42,262,086** | +6.79 pp |
+| exact -> source_highpass | 2,089,386 | 42,980,696 | **-40,891,310** | -6.57 pp |
+| baseline -> source_highpass | 2,922,938 | 1,552,162 | **+1,370,776** | +0.22 pp |
+
+The three nets add exactly (`baseline -> exact` + `exact -> source_highpass` = `baseline -> source_highpass`).
+On the baseline -> source_highpass pair the net regression is concentrated at the fixed 4 px edge strips
+(overlapping corners counted per strip, the renderer's convention): bottom valid->invalid pooled **21.5 %**
+(invalid->valid 5.8 %), right 15.4 % (4.4 %), left 5.3 % (19.4 %), top 2.7 % (8.7 %); pooled strip invalid
+fractions move bottom 37.7 % -> 53.4 % and right 34.9 % -> 45.9 %, matching the renderer report. The per-frame
+net flips at about output frame 120: frames 0-120 have fewer candidate invalids (nets -219,002 and -390,384),
+frames 120-300 more (+668,174, +685,046, +626,942), and `source_highpass > baseline` on 174/300 frames.
+
+Reading. On this window the high-pass chart does **not** inherently enlarge invalid support. Relative to the
+exact composition it removes 42,980,696 pixels from the invalid set (net -6.57 pp), cancelling **97.7 %** of the
+exact composition's 43,973,048 newly-invalid pixels. The raw exact composition is what blows coverage up
+(1.155 % -> 7.949 %); the temporal high-pass is precisely its coverage control. The candidate's residual net
+regression versus production (1,370,776 px, +0.22 pp pooled, +19.1 % relative) is a small second-order
+difference between the composed-then-high-passed source chart and production's fixed-grid smoothed residual
+plan, concentrated at the bottom/right edges and after frame ~120. This is a geometry/coverage attribution, not
+perceptual quality; baseline -> exact also conflates fixed-grid-vs-composed residual placement with
+smoothed-vs-raw residuals, and the exact field uses the same dense-grid interpolation approximation as the
+renderer. It is one reserved 10 s window of one source and nothing is tuned on it.
+
+Next decision. Do **not** treat "the high-pass chart inherently enlarges support" as the cause, and do **not**
+integrate or select `source_highpass` on this evidence. If a composed variant is revisited, target the
+bottom/right border residual placement (e.g. a border-aware or coverage-constrained correction) and re-test on a
+further distinct source/window with the matched masked evaluator and a position-reversed review. Script and
+report are ignored under `out/bench/e02_source_highpass_00177_t090_10s_heldout/` (`mask_attribution.py`,
+`mask_attribution.json`); no production wiring, default change or mode selection follows.
