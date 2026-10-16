@@ -269,6 +269,33 @@ the other be sampled at its composed coordinate. The interaction term reports ex
 The full-resolution values are a coverage diagnostic, not a perceptual/quality/distortion metric, and the
 tool must not be used by itself to choose a production stabilization policy.
 
+### Output crop zoom (opt-in)
+
+`Config.crop_zoom` (CLI `--crop-zoom`, default `1.0`) is an opt-in isotropic center zoom on output
+coordinates, composed on the right of the global map (`G @ Z`); `1.0` is the exact identity and the mesh/row
+residual arrays are unchanged. Commit `964ae44` adds it (full suite **1499 tests**, focused crop-zoom suite
+**98 tests**). A three-run `run_case` development screen used the existing `--set` override on the 61.3 s, 1.0 s
+window of `00176.MTS` (SHA `e4b1f80d...`, 1920x1080, `30000/1001`, 30 progressive outputs, code revision
+`964ae4411b1a1349fcfe5fb5cdde7bf28639a08c`):
+
+```bash
+python -I bench/run_case.py --case baseline --source /path/to/local/00176.MTS \
+    --start 61.3 --duration 1 --diag-every 1 --dump-plan --lock on \
+    --set crop_zoom=1.10 --out-dir out/bench/cropzoom_t0613_z110 --log out/bench/cropzoom_t0613_z110.log
+```
+
+Runs: `out/bench/cropzoom_t0613_baseline` (`1.0`), `cropzoom_t0613_z110` (`1.10`), `cropzoom_t0613_z115`
+(`1.15`). The `warp_diag` full-support Lanczos-3 fraction was mean/min `0.9760902456 / 0.9388276427` at `1.0`
+and `1.0 / 1.0` at both zoom ratios; all runs had zero fit fallback frames. Output jitter/wobble px were
+`0.0613283537 / 0.0305879680` (baseline), `0.0676948740 / 0.0328344449` (`1.10`, **+10.4% / +7.3%**) and
+`0.0790517982 / 0.0349467526` (`1.15`, **+28.9% / +14.3%**). Blinded, position-reversed
+`baseline_vs_cropzoom` reviews at `1.10` and `1.15` each followed the screen side
+(`side_following_pairs=1`, `method_agreement_pairs=0`), so they give no usable preference. This is one targeted
+development window, not held-out evidence; `crop_zoom` stays opt-in at default `1.0` and no ratio is selected.
+`1.10` was the lowest tested value with full support here, not a proven minimum. Next: hold `1.10` and validate
+on a distinct source file (e.g. `STREAM_00016`/`STREAM_00025`) for border/crop, jitter/wobble, coverage,
+cadence and blind review; do not tune further on `00176`. Artifacts stay in ignored `out/bench/`.
+
 ## Rendered composition candidate (E02 perceptual gate)
 
 The geometry-only composition audit above renders no pixels, so the next E02 gate is a perceptual check on

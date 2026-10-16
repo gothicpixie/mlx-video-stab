@@ -2401,3 +2401,42 @@ orders), but that judgment is at **limited resolution and a ten-second duration*
 small measured regressions. A promising speed result with small regressions and a perceptual review that
 cannot tell the methods apart is **insufficient to change a default**. Reports and clips remain in the
 ignored `out/` tree.
+
+## Opt-in output crop zoom and t0613 development screen (2026-10-16)
+
+Implementation. Commit `964ae44` adds an opt-in output-side center zoom. `Config.crop_zoom` defaults to `1.0`
+(validated finite and `>= 1`), `python -m mlxstab` gains `--crop-zoom`, and the zoom is composed on the right
+of the global map (`G @ Z`), so `x -> c + (x - c)/crop_zoom` acts on output coordinates with
+`c = (W/2 - .5, H/2 - .5)` before the output-to-source homography; `1.0` is the exact identity. The mesh and
+row residual arrays are left untouched and re-evaluated under the new `G`. The full suite passed **1499
+tests** and the focused crop-zoom suite passed **98 tests**; the branch was pushed. This is an opt-in flag,
+not a default change.
+
+Development screen. Three `run_case` manifests completed `status=success` on the same 61.3 s, 1.0 s window of
+local `00176.MTS` (SHA-256 `e4b1f80d54dfa9089741486be297c6fe74d754fe127ec04dfe5a7edcf8d9fbb3`, the window
+behind the earlier lower-edge wedge), each with **30 progressive outputs at 1920x1080 and `30000/1001`** and
+code revision `964ae4411b1a1349fcfe5fb5cdde7bf28639a08c`. The runs are `out/bench/cropzoom_t0613_baseline`
+(`crop_zoom=1`), `out/bench/cropzoom_t0613_z110` (`1.10`) and `out/bench/cropzoom_t0613_z115` (`1.15`); the
+zoomed runs set the value through `--set crop_zoom=...`.
+
+Mask/support diagnostics. The current-render `warp_diag` full-support Lanczos-3 fraction was mean
+**0.9760902456**, min **0.9388276427** at `crop_zoom=1`; both `1.10` and `1.15` measured mean/min **1.0**. All
+three runs had **zero fit fallback frames**.
+
+Output metrics. Baseline jitter/wobble were **0.0613283537 / 0.0305879680 px**. At `1.10` they were
+**0.0676948740 / 0.0328344449 px** (**+10.4% / +7.3%**; absolute **+0.006367 / +0.002246 px**), and at `1.15`
+**0.0790517982 / 0.0349467526 px** (**+28.9% / +14.3%**). On this window the zoom removes the border exposure
+at a measured jitter/wobble cost.
+
+Blinded review. Gemini via the Vertex API reviewed position-reversed, blinded `baseline_vs_cropzoom` pairs for
+both zoom ratios. Each review followed the screen side (the mapped choice flipped between the original and the
+reversal), and the position-bias audit records `side_following_pairs=1` and `method_agreement_pairs=0` for each,
+so there is **no usable visual preference** from this review.
+
+Reading. This is a **single targeted development interval, not a held-out window and not a general quality
+result**. `crop_zoom` stays **opt-in with default `1.0`**, and no preset or default is selected. `1.10` was the
+lowest tested ratio that achieved full support on this window, but it is **not claimed to be mathematically
+minimal**. Artifacts stay in the ignored `out/bench/` tree.
+
+Next step. Hold `1.10` fixed and validate on a distinct source file (e.g. `STREAM_00016` / `STREAM_00025`),
+reporting border/crop, jitter/wobble, coverage, cadence and a blind review; do not tune further on `00176`.
