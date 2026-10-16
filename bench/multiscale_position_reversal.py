@@ -274,7 +274,18 @@ def _reverse_clip(source_path, out_path, *, write):
             if encoder is not None:
                 encoder.write(swap_and_relabel(frame))
             frames += 1
-    finally:
+    except BaseException:
+        # A decode/write/frame-validation failure is the primary error. Still release the encoder, but a
+        # close failure must not mask it: the caller needs the specific decode/write reason, and a failure to
+        # flush a clip that is already abandoned is secondary.
+        if encoder is not None:
+            try:
+                encoder.close()
+            except BaseException:
+                pass
+        raise
+    else:
+        # Success path: a close failure (e.g. a dropped ffmpeg pipe) is the only error and must propagate.
         if encoder is not None:
             encoder.close()
     _require(frames > 0, "clip_no_frames", f"source clip {source_path.name!r} decoded zero frames")

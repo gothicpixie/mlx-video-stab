@@ -25,6 +25,10 @@ from bench import multiscale_real_review as R
 
 class _FakeEncoder:
     instances = []
+    #: Class-level toggles let a test make writes or the final flush fail without a bespoke fake; both are
+    #: reset by :func:`_mock_media` so ordinary tests keep the success behavior.
+    write_exc = None
+    close_exc = None
 
     def __init__(self, path, width, height, fps, **kwargs):
         self.path = str(path)
@@ -33,13 +37,19 @@ class _FakeEncoder:
         self.fps = fps
         self.frames = []
         self.closed = False
+        self.close_attempts = 0
         _FakeEncoder.instances.append(self)
 
     def write(self, frame):
+        if _FakeEncoder.write_exc is not None:
+            raise _FakeEncoder.write_exc
         self.frames.append(np.asarray(frame).copy())
 
     def close(self):
         self.closed = True
+        self.close_attempts += 1
+        if _FakeEncoder.close_exc is not None:
+            raise _FakeEncoder.close_exc
         # Emulate a real encoder writing an MP4 so downstream digests/existence checks are exercised.
         Path(self.path).write_bytes(b"fake-mp4" + bytes(len(self.frames)))
 
@@ -56,6 +66,8 @@ def _frames(count, height, width, *, left=40, right=200):
 
 def _mock_media(monkeypatch, width, height, fps, frames):
     _FakeEncoder.instances = []
+    _FakeEncoder.write_exc = None
+    _FakeEncoder.close_exc = None
     monkeypatch.setattr(media, "probe",
                         lambda path: {"width": width, "height": height, "fps": fps, "interlaced": False,
                                       "field_order": "progressive", "duration": 1.0})
@@ -239,6 +251,37 @@ def test_run_reversal_single_selected_pair_end_to_end(tmp_path, monkeypatch):
     assert (out_dir / "pair_01_ab_posrev.mp4").parent == out_dir
     assert (out_dir / "review.json").is_file()
     assert sorted(path.name for path in out_dir.iterdir()) == ["pair_01_ab_posrev.mp4", "review.json"]
+
+
+def test_run_reversal_propagates_encoder_close_failure_on_success(tmp_path, monkeypatch):
+    """With no decode/write error, a failing close is the primary error and must propagate."""
+    review_path, _ = _write_review(tmp_path / "r", pairs=1)
+    _mock_media(monkeypatch, 48, 40, 30.0, _frames(2, 40, 48))
+    _FakeEncoder.close_exc = RuntimeError("close boom")
+
+    with pytest.raises(RuntimeError, match="close boom"):
+        P.run_reversal(review_path, out_dir=tmp_path / "out")
+
+    # Close was attempted exactly once and the failure was not swallowed.
+    assert len(_FakeEncoder.instances) == 1
+    assert _FakeEncoder.instances[0].closed is True
+    assert _FakeEncoder.instances[0].close_attempts == 1
+
+
+def test_run_reversal_preserves_write_error_when_close_also_fails(tmp_path, monkeypatch):
+    """A write/decode failure is primary: close is still attempted, but its failure cannot mask the write."""
+    review_path, _ = _write_review(tmp_path / "r", pairs=1)
+    _mock_media(monkeypatch, 48, 40, 30.0, _frames(2, 40, 48))
+    _FakeEncoder.write_exc = RuntimeError("write boom")
+    _FakeEncoder.close_exc = RuntimeError("close boom")
+
+    with pytest.raises(RuntimeError, match="write boom"):
+        P.run_reversal(review_path, out_dir=tmp_path / "out")
+
+    # The cleanup path still tried to release the encoder despite the close failure.
+    assert len(_FakeEncoder.instances) == 1
+    assert _FakeEncoder.instances[0].closed is True
+    assert _FakeEncoder.instances[0].close_attempts == 1
 
 
 def test_run_reversal_write_false_skips_clips_and_report(tmp_path, monkeypatch):
