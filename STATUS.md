@@ -2883,3 +2883,40 @@ localization and local image resampling before considering any map regularizatio
 `out/bench/e02_source_highpass_s13_t032_10s/` (`geometry_map_dense_probe.json`,
 `source_fixed_geometry_probe.json`, `klt_tile_audit.json`, `local_map_flow_audit.json`,
 `klt_map_decomposition.json`).
+
+## Pre-registered disjoint-window replication: `STREAM_00024.MTS` t109–119 (2026-10-16)
+
+This window was selected before running the candidate. Baseline-only anchors at t109 and t114 both passed the
+reliability gate with zero fit fallbacks and 29/29 supported output pairs. Their input motion was 0.452 and
+0.823 px/frame, respectively. The full 10 s baseline capture is running at
+`out/bench/e02_baseline_s24_t109_10s/`; its paired `source_highpass` render has not been inspected or run yet.
+
+DeepSeek Flash via Pi reviewed the protocol before candidate results existed. It endorsed the disjoint paired
+window as a reproducibility check, while warning that one new interval cannot establish generality, baseline
+reliability alone does not guarantee an informative event, and Gemini should remain secondary to quantitative
+metrics. It also advised freezing the contrast and thresholds before the paired candidate run.
+
+Frozen comparison: use full-window masked KLT and RAFT jitter on the same 300 output frames at 30000/1001 fps,
+with each rendition's aligned validity mask. The primary contrast is
+`delta_KLT = KLT_candidate - KLT_baseline` in px; the supporting KLT-specific contrast is
+`delta_KLT - delta_RAFT` in px. A reliable baseline must have zero fit fallbacks, at least 270/299 supported
+pairs for both evaluators, and mean input motion >= 0.4 px/frame. A candidate is not compared if baseline or
+candidate alignment/reliability fails.
+
+Decision thresholds are anchored to the original held-out KLT increase of 0.220 px (0.724 -> 0.944 px):
+
+- **Replicates the material KLT-specific increase:** `delta_KLT >= 0.110 px` and
+  `delta_KLT - delta_RAFT >= 0.110 px`, with both captures reliable and aligned. Then run the same local-map / KLT
+  feature-location decomposition on this disjoint window. A blind Gemini comparison is a secondary perceptual
+  check and cannot override these measurements.
+- **Does not replicate at the pre-set material scale:** both absolute contrasts are <= 0.055 px, with both
+  captures reliable and aligned. Do not make a mechanism claim from this window; classify the original as
+  sequence-specific or unreproduced pending additional anchors.
+- **Inconclusive:** either contrast falls between the thresholds, the KLT and RAFT contrasts conflict, or any
+  reliability/alignment gate fails. Do not choose a favorable subwindow after seeing results; select another
+  anchor without candidate screening or revise the protocol before a new paired run.
+
+This single disjoint window tests replication only, not generality or causality. Any rolling 2 s breakdown,
+Gemini preference, or local feature/map analysis will be labeled secondary or exploratory. The original
+t032–042 effect remains the positive reference; its event window was data-selected, so it is not used to tune
+the thresholds.
