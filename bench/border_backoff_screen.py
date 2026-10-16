@@ -27,21 +27,25 @@ Method in brief
 1. Reconstruct the baseline Plan from ``manifest.config`` and the loaded Motion.
 2. Verify: the reconstructed invalid mask (NumPy) must equal the decoded ``mask_r0.mp4`` boolean mask
    (gray ``> 127``) on all output frames (plan indices ``0, 2, 4, ...``, since the cache analyses at 59.94p but
-   encodes output at 29.97p). If any pixel differs the candidate comparison is stopped and the mismatch is
-   reported.
+   encodes output at 29.97p). The decoded mask and the reconstructed baseline masks are streamed in bounded
+   chunks (``MEASURE_CHUNK`` frames at a time) so no full-sequence mask list is materialized. If any pixel
+   differs the candidate comparison is stopped and the mismatch is reported.
 3. For the baseline and for each requested ``max_sampled_border_frac`` limit
    (:data:`DEFAULT_LIMITS`), run ``sampled_border_backoff`` over the full plan and measure, on every output
-   frame, the full-resolution invalid fraction and the bottom-four-row invalid fraction. Candidate scales apply
-   jointly to the global correction ``G -> I + s*(G-I)`` and to the mesh and row residuals.
+   frame, the full-resolution invalid fraction and the bottom-four-row invalid fraction. Candidate masks are
+   likewise reconstructed and measured in bounded chunks, retaining only per-frame statistics. Candidate scales
+   apply jointly to the global correction ``G -> I + s*(G-I)`` and to the mesh and row residuals.
 
 Limitations
 -----------
 - The backoff probe grid is a fixed, coarse set (corners, edge samples and a small interior grid) that heavily
   over-weights the frame boundary; its worst sampled fraction is **not** the full-resolution fraction and the
   selected scale is driven by the probe worst, not by the reported full-resolution value.
-- The reported full-resolution fractions come from the NumPy reconstruction of the production sampler. They were
-  verified pixel-identical to the encoded mask on this run's output frames only; other caches, the queued
-  10-second run and unencoded analysis frames are not covered.
+- The reported full-resolution fractions come from the NumPy reconstruction of the production sampler. The
+  decoded mask and the reconstructed baseline/candidate masks are streamed in bounded chunks and never
+  materialized across all outputs, so clip length (including the queued 10-second cache) is not a limit; the
+  pixel-identical check above is evidence for this run's output frames only, and other caches and unencoded
+  analysis frames are not covered.
 - A single clip-wide scale is applied to ``G``, mesh and rows together, so a selected candidate is not a
   minimal-change correction; reducing the scale towards 0 drives the correction towards identity.
 - This is a geometry/coverage diagnostic, not a perceptual or quality metric. It does not prevent foldover, does
@@ -165,52 +169,98 @@ def _require_artifact_fps(name, value):
     return fps
 
 
-def _decode_mask_bool(path):
-    """Decode the encoded gray validity mask to a list of boolean ``[H,W]`` arrays (True = no source)."""
+def _close_quietly(obj):
+    """Best-effort close of a decode/sample iterator; used on every streaming exit path.
+
+    Real :func:`mlxstab.media.decode` generators have a ``close``; test fakes may be plain iterators and are
+    simply left to the garbage collector. Closing can only fail while already unwinding an error, so a
+    secondary close failure is swallowed rather than masking the primary exception."""
+    close = getattr(obj, "close", None)
+    if callable(close):
+        try:
+            close()
+        except Exception:
+            pass
+
+
+def _iter_decode_mask_bool(path):
+    """Streaming decode of the encoded gray validity mask to boolean ``[H,W]`` arrays (True = no source).
+
+    Returns ``(masks, meta)`` where ``masks`` is a lazy iterator and ``meta`` is a mutable dict with the static
+    ``width``/``height``/``fps`` plus a ``frames`` count that is incremented as frames are consumed. The
+    underlying FFmpeg generator is closed when ``masks`` is closed or fully exhausted."""
     info = media.probe(str(path))
     gen, fps, (W, H) = media.decode(str(path), info)
-    frames = [f[..., 0] > 127 for f in gen]
-    return frames, {"width": int(W), "height": int(H), "fps": float(fps), "frames": len(frames)}
+    meta = {"width": int(W), "height": int(H), "fps": float(fps), "frames": 0}
+
+    def masks():
+        try:
+            for f in gen:
+                meta["frames"] += 1
+                yield f[..., 0] > 127
+        finally:
+            _close_quietly(gen)
+
+    return masks(), meta
 
 
-def _reconstructed_masks(pl, ts, W, H, grid, chunk=MEASURE_CHUNK):
-    """NumPy invalid masks (True = out of source) for plan frames ``ts`` at full resolution.
+def _decode_mask_bool(path):
+    """Decode the encoded gray validity mask to a list of boolean ``[H,W]`` arrays (True = no source).
+
+    Materialized form of :func:`_iter_decode_mask_bool`, kept for callers/tests that want the whole mask;
+    :func:`run_screen` uses the streaming iterator."""
+    it, meta = _iter_decode_mask_bool(path)
+    frames = list(it)
+    return frames, {"width": meta["width"], "height": meta["height"], "fps": meta["fps"],
+                    "frames": len(frames)}
+
+
+def _iter_reconstructed_masks(pl, ts, W, H, grid, chunk=MEASURE_CHUNK):
+    """Lazily yield NumPy invalid masks (True = out of source) for plan frames ``ts`` at full resolution.
 
     Uses the production-convention NumPy probe ``_source_coords_ts_scales_np`` at scale 1.0 and the local
-    ``_valid_mask_np``; the returned masks match the encoded ``mask_r0.mp4`` classification (verified)."""
+    ``_valid_mask_np``; the yielded masks match the encoded ``mask_r0.mp4`` classification (verified). Only one
+    bounded ``chunk`` of frames is held at a time, so aggregates never retain the whole sequence."""
     xx, yy = grid
-    out = []
+    ts = list(ts)
     for i in range(0, len(ts), chunk):
         tsc = list(ts[i:i + chunk])
         src = S._source_coords_ts_scales_np(pl, tsc, W, H, [1.0], (xx, yy))[:, 0]   # [n,H,W,2]
         bad = ~S._valid_mask_np(src, H, W)                                          # [n,H,W]
         for k in range(len(tsc)):
-            out.append(bad[k])
-    return out
+            yield bad[k]
 
 
-def _measure_masks(masks, plan_indices, bottom_rows):
-    """Per-frame and aggregate invalid fractions over every pixel and over the bottom ``bottom_rows`` rows."""
-    per_frame = []
-    full_px = full_bad = bot_px = bot_bad = 0
-    H, W = masks[0].shape if masks else (0, 0)
+def _reconstructed_masks(pl, ts, W, H, grid, chunk=MEASURE_CHUNK):
+    """Materialize :func:`_iter_reconstructed_masks`; kept for callers/tests that want the whole list."""
+    return list(_iter_reconstructed_masks(pl, ts, W, H, grid, chunk))
+
+
+def _frame_measure(mask, output_frame, plan_frame, bottom_rows):
+    """One frame's invalid counts/fractions over every pixel and over the bottom ``bottom_rows`` rows."""
+    H, W = mask.shape
     s = min(int(bottom_rows), H)
-    for mask, t in zip(masks, plan_indices):
-        n = int(mask.size)
-        nb = int(np.count_nonzero(mask))
-        bottom = mask[H - s:, :] if s > 0 else mask[0:0]
-        bn = int(bottom.size)
-        bb = int(np.count_nonzero(bottom))
-        full_px += n; full_bad += nb; bot_px += bn; bot_bad += bb
-        per_frame.append({
-            "output_frame": None,
-            "plan_frame": int(t),
-            "invalid_pixels": nb, "frame_pixels": n, "invalid_fraction": (nb / n) if n else 0.0,
-            "bottom_invalid_pixels": bb, "bottom_pixels": bn,
-            "bottom_invalid_fraction": (bb / bn) if bn else 0.0,
-        })
-    for j, row in enumerate(per_frame):
-        row["output_frame"] = j
+    n = int(mask.size)
+    nb = int(np.count_nonzero(mask))
+    bottom = mask[H - s:, :] if s > 0 else mask[0:0]
+    bn = int(bottom.size)
+    bb = int(np.count_nonzero(bottom))
+    return {
+        "output_frame": int(output_frame),
+        "plan_frame": int(plan_frame),
+        "invalid_pixels": nb, "frame_pixels": n, "invalid_fraction": (nb / n) if n else 0.0,
+        "bottom_invalid_pixels": bb, "bottom_pixels": bn,
+        "bottom_invalid_fraction": (bb / bn) if bn else 0.0,
+    }
+
+
+def _aggregate_measures(per_frame, H, W, bottom_rows):
+    """Aggregate one mask series' per-frame counts/fractions (same numbers as the materialized version)."""
+    s = min(int(bottom_rows), H) if H else 0
+    full_px = sum(r["frame_pixels"] for r in per_frame)
+    full_bad = sum(r["invalid_pixels"] for r in per_frame)
+    bot_px = sum(r["bottom_pixels"] for r in per_frame)
+    bot_bad = sum(r["bottom_invalid_pixels"] for r in per_frame)
     full_fractions = [r["invalid_fraction"] for r in per_frame]
     bot_fractions = [r["bottom_invalid_fraction"] for r in per_frame]
     return {
@@ -232,6 +282,41 @@ def _measure_masks(masks, plan_indices, bottom_rows):
     }
 
 
+#: Unique marker used to detect an over-long streaming mask source without relying on truthiness.
+_SENTINEL = object()
+
+
+def _measure_masks(masks, plan_indices, bottom_rows):
+    """Per-frame and aggregate invalid fractions over every pixel and over the bottom ``bottom_rows`` rows.
+
+    ``masks`` may be a bounded streaming iterator; only per-frame counts/fractions are retained, never the
+    arrays. The mask iterator and ``plan_indices`` are consumed in lockstep and must contain exactly the same
+    number of frames: an early EOF (short stream) or any extra mask frame is refused with
+    ``frame_count_mismatch`` rather than silently truncated by ``zip``. The iterator is closed on every exit
+    (success, refusal or any other exception)."""
+    per_frame = []
+    H = W = 0
+    it = iter(masks)
+    try:
+        for j, t in enumerate(plan_indices):
+            try:
+                mask = next(it)
+            except StopIteration:
+                raise BorderBackoffScreenError(
+                    "frame_count_mismatch",
+                    f"mask stream ended after {j} frames but {len(plan_indices)} plan output frames were expected")
+            if not per_frame:
+                H, W = mask.shape
+            per_frame.append(_frame_measure(mask, len(per_frame), t, bottom_rows))
+        if next(it, _SENTINEL) is not _SENTINEL:
+            raise BorderBackoffScreenError(
+                "frame_count_mismatch",
+                f"mask stream has more than the {len(plan_indices)} plan output frames")
+    finally:
+        _close_quietly(it)
+    return _aggregate_measures(per_frame, H, W, bottom_rows)
+
+
 def _verify_masks(reconstructed, encoded, plan_indices):
     """Exact comparison of the reconstructed and encoded invalid masks on every output frame."""
     diffs = []
@@ -244,6 +329,49 @@ def _verify_masks(reconstructed, encoded, plan_indices):
     exact = total == 0 and len(reconstructed) == len(encoded)
     return {"exact": bool(exact), "frames_checked": len(diffs), "differing_pixels_total": total,
             "per_frame": diffs}
+
+
+def _verify_and_measure_full(pl, plan_indices, decoded, W, H, grid, bottom_rows, chunk=MEASURE_CHUNK):
+    """Stream decoded and reconstructed full-plan masks in lockstep, exactly verifying and measuring them.
+
+    Returns ``(verification, baseline_measure)``. The decoded stream must contain exactly
+    ``len(plan_indices)`` frames: an early EOF (short stream) or any extra frame is refused with
+    ``frame_count_mismatch`` before a report can be built. Only per-frame counts/diffs are retained; both
+    iterators are closed on every exit (including an exception or interruption)."""
+    reconstructed = _iter_reconstructed_masks(pl, plan_indices, W, H, grid, chunk)
+    diffs = []
+    per_frame = []
+    try:
+        for j, t in enumerate(plan_indices):
+            try:
+                enc = next(decoded)
+            except StopIteration:
+                raise BorderBackoffScreenError(
+                    "frame_count_mismatch",
+                    f"decoded mask stream ended after {j} frames but the plan maps "
+                    f"{len(plan_indices)} output frames")
+            try:
+                mask = next(reconstructed)
+            except StopIteration:
+                raise BorderBackoffScreenError(
+                    "frame_count_mismatch",
+                    f"reconstructed mask stream ended after {j} of {len(plan_indices)} plan output frames")
+            diffs.append({"output_frame": j, "plan_frame": int(t),
+                          "differing_pixels": int(np.count_nonzero(mask != enc)),
+                          "reconstructed_invalid_pixels": int(np.count_nonzero(mask)),
+                          "encoded_invalid_pixels": int(np.count_nonzero(enc))})
+            per_frame.append(_frame_measure(mask, j, t, bottom_rows))
+        if next(decoded, _SENTINEL) is not _SENTINEL:
+            raise BorderBackoffScreenError(
+                "frame_count_mismatch",
+                f"decoded mask stream has more than the {len(plan_indices)} plan output frames")
+    finally:
+        _close_quietly(reconstructed)
+        _close_quietly(decoded)
+    total = int(sum(d["differing_pixels"] for d in diffs))
+    verification = {"exact": bool(total == 0 and len(diffs) == len(plan_indices)),
+                    "frames_checked": len(diffs), "differing_pixels_total": total, "per_frame": diffs}
+    return verification, _aggregate_measures(per_frame, H, W, bottom_rows)
 
 
 def run_screen(manifest_path, *, motion_name=DEFAULT_MOTION_NAME, mask_name=DEFAULT_MASK_NAME,
@@ -291,22 +419,27 @@ def run_screen(manifest_path, *, motion_name=DEFAULT_MOTION_NAME, mask_name=DEFA
              f"motion fps {motion_fps!r} != manifest analysis fps {analysis_fps!r} "
              f"(tolerance {FPS_AGREEMENT_TOL:g}); the plan indices would be misaligned")
 
-    encoded, mask_info = _decode_mask_bool(run_dir / mask_name)
-    mask_fps = _require_artifact_fps("mask", mask_info.get("fps"))
-    _require(abs(mask_fps - output_fps) <= FPS_AGREEMENT_TOL, "mask_cadence_mismatch",
-             f"decoded mask fps {mask_fps!r} != manifest output fps {output_fps!r} "
-             f"(tolerance {FPS_AGREEMENT_TOL:g}); the output frames would be misaligned")
-    _require(len(encoded) == len(plan_indices), "cadence_mismatch",
-             f"decoded mask has {len(encoded)} frames but the plan maps {len(plan_indices)} output frames")
-    _require(mask_info["width"] == W and mask_info["height"] == H, "shape_mismatch",
-             f"decoded mask is {mask_info['width']}x{mask_info['height']}, motion is {W}x{H}")
-    identity["output_frames"] = len(encoded)
+    encoded, mask_info = _iter_decode_mask_bool(run_dir / mask_name)
+    try:
+        mask_fps = _require_artifact_fps("mask", mask_info.get("fps"))
+        _require(abs(mask_fps - output_fps) <= FPS_AGREEMENT_TOL, "mask_cadence_mismatch",
+                 f"decoded mask fps {mask_fps!r} != manifest output fps {output_fps!r} "
+                 f"(tolerance {FPS_AGREEMENT_TOL:g}); the output frames would be misaligned")
+        _require(mask_info["width"] == W and mask_info["height"] == H, "shape_mismatch",
+                 f"decoded mask is {mask_info['width']}x{mask_info['height']}, motion is {W}x{H}")
 
-    xx, yy = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32))
-    log(f"screen: reconstructed {len(pl.G)}-frame plan from {identity['run_id']!r}; "
-        f"{len(plan_indices)} output frames; verifying against {mask_name}")
-    reconstructed = _reconstructed_masks(pl, plan_indices, W, H, (xx, yy))
-    verification = _verify_masks(reconstructed, encoded, plan_indices)
+        xx, yy = np.meshgrid(np.arange(W, dtype=np.float32), np.arange(H, dtype=np.float32))
+        log(f"screen: reconstructed {len(pl.G)}-frame plan from {identity['run_id']!r}; "
+            f"{len(plan_indices)} output frames; verifying against {mask_name}")
+        # One bounded streaming pass: the decoded mask and the reconstructed baseline masks are compared
+        # frame by frame, retaining only per-frame counts/diffs. An early EOF or extra decoded frames are
+        # refused with ``frame_count_mismatch`` before the report is built; both iterators are closed on
+        # every exit path, including refusals above and any exception during the stream.
+        verification, baseline_measure = _verify_and_measure_full(
+            pl, plan_indices, encoded, W, H, (xx, yy), bottom_rows)
+        identity["output_frames"] = int(mask_info["frames"])
+    finally:
+        _close_quietly(encoded)
 
     baseline_worst = float(S._sampled_worst_border_frac_batch(
         pl, W, H, S._probe_grid(W, H), [1.0])[0])
@@ -339,9 +472,11 @@ def run_screen(manifest_path, *, motion_name=DEFAULT_MOTION_NAME, mask_name=DEFA
             "Backoff probe grid is coarse (corners, edge samples, small interior grid) and over-weights the "
             "frame boundary; its worst sampled fraction is not the full-resolution fraction and drives the "
             "selected scale.",
-            "Full-resolution fractions come from the NumPy reconstruction of the production sampler and were "
-            "verified pixel-identical to the encoded mask on this run's output frames only; other caches, the "
-            "queued 10-second run and unencoded analysis frames are not covered.",
+            "Full-resolution fractions come from the NumPy reconstruction of the production sampler; the decoded "
+            "mask and the reconstructed baseline/candidate masks are streamed in bounded chunks and never "
+            "materialized across all outputs, so clip length (including the queued 10-second cache) is not a "
+            "limit. The pixel-identical check is evidence for this run's output frames only; other caches and "
+            "unencoded analysis frames are not covered.",
             "A single clip-wide scale is applied to G, mesh and rows jointly, so a candidate is not a "
             "minimal-change correction; scale 0 is the identity fallback.",
             "Geometry/coverage diagnostic only: no rendering, no perceptual or quality metric, no foldover "
@@ -360,7 +495,6 @@ def run_screen(manifest_path, *, motion_name=DEFAULT_MOTION_NAME, mask_name=DEFA
             f"pixel(s) across {verification['frames_checked']} frames; candidate comparison stopped")
         return _validate_report(report)
 
-    baseline_measure = _measure_masks(reconstructed, plan_indices, bottom_rows)
     report["baseline"] = {
         "limit": None, "selected_scale": 1.0, "sampled_worst_frac": baseline_worst,
         "sampled_border_measured": False, **baseline_measure,
@@ -369,7 +503,7 @@ def run_screen(manifest_path, *, motion_name=DEFAULT_MOTION_NAME, mask_name=DEFA
     for limit in limits:
         log(f"screen: sampled_border_backoff limit={limit}")
         cand = S.sampled_border_backoff(pl, W, H, limit)
-        cand_masks = _reconstructed_masks(cand, plan_indices, W, H, (xx, yy))
+        cand_masks = _iter_reconstructed_masks(cand, plan_indices, W, H, (xx, yy))
         measure = _measure_masks(cand_masks, plan_indices, bottom_rows)
         report["candidates"].append({
             "limit": limit,

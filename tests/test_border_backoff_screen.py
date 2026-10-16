@@ -209,6 +209,183 @@ def test_decode_mask_uses_strict_greater_than_127(monkeypatch, tmp_path):
 
 
 # --------------------------------------------------------------------------------------
+# bounded streaming: chunked reconstruction, close-on-error, EOF/extra refusal
+# --------------------------------------------------------------------------------------
+
+def test_iter_reconstructed_masks_matches_materialized_across_chunk_sizes():
+    """The lazy per-frame iterator yields the same masks regardless of the bounded chunk size."""
+    plan = _make_plan()
+    reference = P._reconstructed_masks(plan, PLAN_INDICES, W, H, _grid())
+    for chunk in (1, 2, 3, 100):
+        got = list(P._iter_reconstructed_masks(plan, PLAN_INDICES, W, H, _grid(), chunk=chunk))
+        assert len(got) == len(reference)
+        assert all(np.array_equal(a, b) for a, b in zip(got, reference))
+
+
+def test_iter_decode_mask_bool_closes_ffmpeg_generator_on_partial_close(monkeypatch, tmp_path):
+    """Closing the streaming decoder early must close the underlying FFmpeg generator (no leak)."""
+    closed = {"v": False}
+
+    def source():
+        try:
+            yield np.array([[[0, 0, 0], [255, 0, 0]]], np.uint8)
+            yield np.array([[[0, 0, 0], [0, 0, 0]]], np.uint8)
+        finally:
+            closed["v"] = True
+
+    monkeypatch.setattr(P.media, "probe", lambda path: {"width": 2, "height": 1, "fps": OUTPUT_FPS})
+    monkeypatch.setattr(P.media, "decode", lambda path, info: (source(), OUTPUT_FPS, (2, 1)))
+    it, meta = P._iter_decode_mask_bool(tmp_path / "mask_r0.mp4")
+    assert next(it).tolist() == [[False, True]]
+    assert meta["frames"] == 1
+    it.close()
+    assert closed["v"] is True
+
+
+def test_verify_and_measure_full_matches_materialized_path():
+    """One streaming pass gives the same verification and baseline measurement as the materialized path."""
+    plan = _make_plan()
+    reference_masks = P._reconstructed_masks(plan, PLAN_INDICES, W, H, _grid())
+    encoded = [f[..., 0] > 127 for f in _encoded(plan)]
+    ver_reference = P._verify_masks(reference_masks, encoded, PLAN_INDICES)
+    measure_reference = P._measure_masks(reference_masks, PLAN_INDICES, 2)
+    verification, measured = P._verify_and_measure_full(
+        plan, PLAN_INDICES, iter(encoded), W, H, _grid(), 2)
+    assert verification == ver_reference
+    assert measured == measure_reference
+
+
+def test_run_screen_refuses_extra_mask_frames(monkeypatch, tmp_path):
+    """A decoded mask with more frames than the plan maps is refused, not silently truncated."""
+    plan = _make_plan(tx=4.0)
+    encoded = _encoded(plan) + [_gray(np.zeros((H, W), bool))]     # 3 frames vs 2 plan indices
+    _install(monkeypatch, plan=plan, encoded=encoded)
+    with pytest.raises(P.BorderBackoffScreenError) as excinfo:
+        P.run_screen(_write_manifest(tmp_path), limits=(0.2,), bottom_rows=2, log=lambda *a: None)
+    assert excinfo.value.code == "frame_count_mismatch"
+
+
+def test_run_screen_refuses_early_eof_and_closes_decode_generator(monkeypatch, tmp_path):
+    """A short decoded stream is refused and the FFmpeg generator is closed (no partial report/leak)."""
+    plan = _make_plan(tx=4.0)
+    closed = {"v": False}
+
+    def short_stream():
+        try:
+            yield _gray(P._reconstructed_masks(plan, PLAN_INDICES[:1], W, H, _grid())[0])
+        finally:
+            closed["v"] = True
+
+    _install(monkeypatch, plan=plan, encoded=_encoded(plan))
+    monkeypatch.setattr(P.media, "decode",
+                        lambda path, info: (short_stream(), OUTPUT_FPS, (W, H)))
+    with pytest.raises(P.BorderBackoffScreenError) as excinfo:
+        P.run_screen(_write_manifest(tmp_path), limits=(0.2,), bottom_rows=2, log=lambda *a: None)
+    assert excinfo.value.code == "frame_count_mismatch"
+    assert closed["v"] is True
+
+
+def test_cli_propagates_decode_error_without_writing_report(monkeypatch, tmp_path, capsys):
+    """A decode failure mid-stream aborts with no partial output report and closes the generator."""
+    plan = _make_plan(tx=4.0)
+    closed = {"v": False}
+
+    def failing_stream():
+        try:
+            yield _gray(P._reconstructed_masks(plan, PLAN_INDICES[:1], W, H, _grid())[0])
+            raise RuntimeError("decoder failed")
+        finally:
+            closed["v"] = True
+
+    _install(monkeypatch, plan=plan, encoded=_encoded(plan))
+    monkeypatch.setattr(P.media, "decode",
+                        lambda path, info: (failing_stream(), OUTPUT_FPS, (W, H)))
+    out = tmp_path / "report.json"
+    rc = P.main([str(_write_manifest(tmp_path)), "--out", str(out),
+                 "--limits", "0.2", "--bottom-rows", "2"])
+    assert rc == 1
+    assert not out.exists()
+    assert closed["v"] is True
+    payload = json.loads(capsys.readouterr().out.strip())
+    assert payload["status"] == "failure" and payload["error"]["type"] == "RuntimeError"
+
+
+def test_measure_masks_streams_chunked_iterator_like_a_list():
+    """``_measure_masks`` over a chunk=1 generator equals the materialized list result exactly."""
+    plan = _make_plan()
+    reference = P._measure_masks(P._reconstructed_masks(plan, PLAN_INDICES, W, H, _grid()), PLAN_INDICES, 2)
+    streamed = P._measure_masks(
+        P._iter_reconstructed_masks(plan, PLAN_INDICES, W, H, _grid(), chunk=1), PLAN_INDICES, 2)
+    assert streamed == reference
+
+
+def test_measure_masks_refuses_early_eof_and_closes_iterator():
+    """A mask stream shorter than ``plan_indices`` is refused with ``frame_count_mismatch`` and closed."""
+    closed = {"v": False}
+
+    def short_stream():
+        try:
+            yield np.zeros((2, 2), bool)
+        finally:
+            closed["v"] = True
+
+    with pytest.raises(P.BorderBackoffScreenError) as excinfo:
+        P._measure_masks(short_stream(), [0, 2], bottom_rows=1)
+    assert excinfo.value.code == "frame_count_mismatch"
+    assert closed["v"] is True
+
+
+def test_measure_masks_refuses_extra_frames_and_closes_iterator():
+    """A mask stream longer than ``plan_indices`` is refused, not silently truncated, and closed."""
+    closed = {"v": False}
+
+    def long_stream():
+        try:
+            for _ in range(3):
+                yield np.zeros((2, 2), bool)
+        finally:
+            closed["v"] = True
+
+    with pytest.raises(P.BorderBackoffScreenError) as excinfo:
+        P._measure_masks(long_stream(), [0, 2], bottom_rows=1)
+    assert excinfo.value.code == "frame_count_mismatch"
+    assert closed["v"] is True
+
+
+def test_measure_masks_closes_iterator_on_success():
+    """Consuming exactly ``plan_indices`` masks still closes the iterator (no leak on the success path)."""
+    closed = {"v": False}
+
+    def exact_stream():
+        try:
+            yield np.zeros((2, 2), bool)
+            yield np.zeros((2, 2), bool)
+        finally:
+            closed["v"] = True
+
+    measured = P._measure_masks(exact_stream(), [0, 2], bottom_rows=1)
+    assert measured["full_resolution"]["frames"] == 2
+    assert measured["full_resolution"]["total_invalid_pixels"] == 0
+    assert closed["v"] is True
+
+
+def test_measure_masks_closes_iterator_when_source_raises():
+    """An exception raised by the mask source propagates but the iterator is still closed on the way out."""
+    closed = {"v": False}
+
+    def failing_stream():
+        try:
+            yield np.zeros((2, 2), bool)
+            raise RuntimeError("mask source failed")
+        finally:
+            closed["v"] = True
+
+    with pytest.raises(RuntimeError, match="mask source failed"):
+        P._measure_masks(failing_stream(), [0, 2], bottom_rows=1)
+    assert closed["v"] is True
+
+
+# --------------------------------------------------------------------------------------
 # report invariants
 # --------------------------------------------------------------------------------------
 
@@ -331,7 +508,7 @@ def test_run_screen_refuses_mask_frame_count_mismatch(monkeypatch, tmp_path):
     _install(monkeypatch, plan=plan, encoded=[_gray(np.zeros((H, W), bool))])   # 1 frame vs 2 plan indices
     with pytest.raises(P.BorderBackoffScreenError) as excinfo:
         P.run_screen(_write_manifest(tmp_path), limits=(0.2,), log=lambda *a: None)
-    assert excinfo.value.code == "cadence_mismatch"
+    assert excinfo.value.code == "frame_count_mismatch"
 
 
 def test_run_screen_refuses_mask_shape_mismatch(monkeypatch, tmp_path):
