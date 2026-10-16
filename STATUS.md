@@ -2830,3 +2830,56 @@ not account for the measured increase, audit rendered-image resampling and evalu
 on the already-inspected t039–041 event. Detailed ignored artifacts and per-pair data are under
 `out/bench/e02_source_highpass_s13_t032_10s/`, `out/bench/e02_anchor_s13_t571_1s/`, and
 `out/bench/e02_anchor_s30_t087_1s/`.
+
+## Source-map and feature-location decomposition of the E02 event (2026-10-16)
+
+Follow-up probes use the exact captured plan/motion and renderer cadence for `STREAM_00013.MTS` t032–042. The
+analysis stream has 600 deinterlaced frames at 59.94006 fps; the encoded video has 300 frames at 29.97003 fps.
+The renderer's rational source-index mapping advances two analysis frames per output frame. This avoids comparing
+plan-frame derivatives at 59.94 Hz with output-image metrics at 29.97 Hz.
+
+The renderer-equivalent dense `source_highpass` map and production `source_coords` were compared on a shared 9x5
+interior output grid. At source-fixed points, all 45 Newton inversions converged and remained visible over output
+frames 150–299 (baseline inverse residual p95 0.000061 px; candidate below 4e-13 px). Applying the exact
+`mlxstab.metrics.jitter` Gaussian high-pass (sigma 15 output frames) to those source-fixed trajectories gives
+1.6660 px for baseline and 1.5930 px for the candidate (-4.4%). The result does not support a noisier coherent
+camera path in the candidate. It is sparse and does not measure local texture-weighted deformation.
+
+A 3x3 KLT audit on the same 60 rendered event frames found candidate jitter higher in each of the five tiles
+with reliable tracks: top-center +15%, middle-left +22%, middle-center +29%, bottom-left +13%, and bottom-center
++70%. The other four edge tiles already had many KLT fallbacks in both clips and are not reliable comparisons.
+The five supported tiles had modestly fewer candidate tracks (about 4–9%); inlier fractions stayed similar or
+rose slightly. Per-tile source-fixed geometry jitter was flat or lower in the regions with the clearest KLT
+regression, including bottom-center (1.723 -> 1.494 px). A pairwise local-affine map-flow audit also found
+mostly flat/lower affine jitter; its non-affine map-flow residual increased modestly in some middle tiles but
+not in the bottom-center tile with the largest KLT increase. These map grids therefore do not by themselves
+explain the KLT pattern.
+
+An instrumented KLT run on those 60 frames reproduced the saved evaluator result (0.6325 vs 0.6411 px baseline;
+1.4518 vs 1.4097 px candidate), with zero fallbacks. For each detected feature, the renderer-equivalent map
+predicted its next output position by solving `M_(t+1)(q) = M_t(p)`. The map-predicted global similarity jitter
+was effectively unchanged (2.1353 -> 2.1302 px), as was the fitted residual transform jitter (2.5205 -> 2.5281).
+However, the spatial non-similarity residual of the map at actual KLT feature locations rose from 0.406 to
+0.606 px RMS (+49%); the high-passed temporal variation of that per-pair RMS rose from 0.119 to 0.229 (+93%).
+This supports a time-varying local-warp interaction at tracked features, though the residual is not independent
+ground truth and the audit uses the features selected in each rendered condition.
+
+The fitted residual transform composed with the map-predicted transform reproduces observed KLT jitter almost
+exactly: 0.6332 px vs 0.6325 baseline and 1.4562 px vs 1.4518 candidate. The high-passed geometry and residual
+velocity vectors were strongly opposed in baseline (cosine -0.971) and less opposed in the candidate (-0.770).
+That phase change explains how similar component magnitudes can combine into very different observed jitter.
+It is a decomposition of the measured estimator, not proof that the residual is an independent physical signal.
+Other track-quality measures were close: median forward-backward error 0.00974 -> 0.00971 px, p90 0.0481 ->
+0.0505 px; median patch ZNCC 0.9945 -> 0.9947; median structure-tensor conditioning 2.370 -> 2.417. These do
+not show a gross tracking failure, but do not exclude subtler local localization effects.
+
+Decision: the evidence now weighs against a globally rougher candidate path. The leading explanation is an
+interaction between the changed composition map's local, time-varying non-similarity and feature-based motion
+estimation; do not label it an appearance-only filter effect. Keep `source_highpass` experimental and make no
+default change. Next, repeat the feature-location map/track decomposition on a predeclared, disjoint window that
+passes the same baseline motion and reliability gates. Check whether local map residual variation and the
+geometry/residual phase shift recur in the same image regions as KLT jitter. If they do not, instrument feature
+localization and local image resampling before considering any map regularization. Ignored diagnostics are under
+`out/bench/e02_source_highpass_s13_t032_10s/` (`geometry_map_dense_probe.json`,
+`source_fixed_geometry_probe.json`, `klt_tile_audit.json`, `local_map_flow_audit.json`,
+`klt_map_decomposition.json`).
