@@ -2751,3 +2751,45 @@ candidate only from the predeclared window; use t032–042 once as confirmation,
 whether the effect follows the detected feature set, the tracking appearance, or their interaction before any
 production change is considered. Reports, comparison clips, and evaluator files remain ignored under
 `out/bench/e02_{anchor_screen,baseline_s13_t032_10s,source_highpass_s13_t032_10s}/`.
+
+## KLT detector/tracker-domain audit (2026-10-16)
+
+The purpose is to locate the KLT portion of the `source_highpass` regression from E02, without changing the
+stabilizer. `mlxstab.tracks.pair_similarity_domains` now exposes an explicit detection image and two LK images;
+the existing `pair_similarity` wrapper still sends luminance to both stages. `bench.track_domain_audit` runs
+the 2x2 luminance/high-pass factorial, records detection/tracking/inlier counts and failures, respects the same
+invalid-pixel masks across cells, and computes contrasts on the longest contiguous segment supported by all
+four cells. LK uses uint8 only (verified against the installed OpenCV 4.13, which rejects float32). High-pass
+uses a signed midpoint encoding with one fixed scale per run; `--hp-scale` reuses the calibration scale. This
+is an audit path, not a production option.
+
+The scale was calibrated on decoded `STREAM_00013.MTS` t029–031. A baseline-only 1 s anchor at t029 had
+2.385 px/frame motion, zero KLT fallbacks, and RAFT/KLT agreement on direction. Over the 2 s calibration cache,
+the four cells shared 57 consecutive pairs; the last two luminance-detection pairs fell back. On those 57 pairs,
+the KLT tracking-image main effect was -0.0086 px (high-pass minus luminance), interaction -0.0087 px, and
+detection-image main effect -0.0165 px. This was raw-input calibration, not independent output validation.
+
+The first masked output diagnostic decoded the same first 2 s of the E02 baseline and `source_highpass` outputs
+at identical 30000/1001 cadence and used each output's aligned invalid mask. All four cells supported all 59
+pairs. The frozen t029 high-pass scale and all KLT parameters were the same for both output sequences:
+
+| detector / tracker | baseline jitter px | source_highpass jitter px | candidate minus baseline |
+| --- | ---: | ---: | ---: |
+| luminance / luminance (LL) | 0.343187 | 0.374797 | +0.031610 (+9.2%) |
+| luminance / high-pass (LH) | 0.340667 | 0.378368 | +0.037701 (+11.1%) |
+| high-pass / luminance (HL) | 0.345238 | 0.332412 | -0.012826 (-3.7%) |
+| high-pass / high-pass (HH) | 0.346004 | 0.338344 | -0.007660 (-2.2%) |
+
+On this one 2 s output window, changing the LK image had a small effect (0.0048 px within the candidate);
+changing the detection representation was larger. The candidate-versus-baseline KLT regression appeared in
+both luminance-detection cells and disappeared in both high-pass-detection cells. However, high-pass detection
+hit the 500-corner cap in both sequences, while luminance detected only about 286 corners in baseline and 279
+in candidate. The detector effect is therefore confounded by candidate count and feature selection. This does
+not show that high-pass improves stabilization, and it does not generalize beyond this one output window.
+
+Next experiment: use a fresh set of disjoint windows, freeze all tracking and representation parameters, and
+cross detector representation with an equalized corner count (primary comparison at a count both detectors
+can supply, with the 500-cap cell as a secondary density comparison). Aggregate paired contrasts by window,
+not by pretending adjacent pairs are independent. Keep the current t032 result as a diagnostic lead only; do
+not tune a production default from it. Test commands passed: `tests/test_tracks.py` and
+`tests/test_track_domain_audit.py` (run before commit).

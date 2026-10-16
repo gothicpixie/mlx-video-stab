@@ -168,6 +168,23 @@ The audit reports point-displacement differences at five frame-spanning probes a
 deltas, alongside the input path-jitter cross-check. These are measurements on a single window, not independent
 samples or evidence that stabilization improved. Keep caches, motion geometry and reports in ignored `out/`.
 
+For a research-only KLT factorization, `bench.track_domain_audit` crosses luminance/high-pass feature detection
+with luminance/high-pass LK tracking on the same decoded frames. A frame cache may also contain
+`invalid_masks` (`true` means no source), which are applied identically to all cells. The tracking-domain
+contrast is paired within a fixed detected feature set; the detection-domain contrast changes the selected
+corners. The report exposes detected/tracked/inlier counts and uses only the longest contiguous segment
+supported by all four cells for its factorial contrasts. High-pass encoding is signed about mid-gray and
+window-wide; use `--hp-scale` to reuse a frozen scale on a later window. This remains an estimator diagnostic,
+not ground truth or a production setting:
+
+```bash
+python -m bench.track_domain_audit --frames-npz out/bench/frames_with_optional_masks.npz \
+    --out out/bench/klt_domain.json
+python -m bench.track_domain_audit --frames-npz out/bench/heldout_frames.npz \
+    --hp-scale 16.32877386889077 --max-corners 286 \
+    --out out/bench/klt_domain_heldout.json
+```
+
 ## Cadence
 
 The historical preset renders at the source processing rate and encodes the output at `30000/1001` using an

@@ -126,18 +126,29 @@ def _ransac_similarity(src, dst, thr, rng, iters=300, min_inliers=8):
     return best_H, best_inl
 
 
-def pair_similarity(prev_gray, next_gray, *, prev_invalid=None, next_invalid=None,
-                    max_corners=500, quality=0.01, min_distance=8.0, block_size=7,
-                    win=21, levels=3, fb_tol=1.0, ransac_thr=1.5, min_tracks=8, ransac_iters=300, rng=None):
-    """Independent ``prev -> next`` inter-frame similarity from sparse KLT tracks (grayscale uint8 inputs).
+def pair_similarity_domains(prev_detect_gray, prev_track_gray, next_track_gray, *,
+                            prev_invalid=None, next_invalid=None,
+                            max_corners=500, quality=0.01, min_distance=8.0, block_size=7,
+                            win=21, levels=3, fb_tol=1.0, ransac_thr=1.5, min_tracks=8,
+                            ransac_iters=300, rng=None):
+    """Experimental sparse-KLT pair fit with separate detection and LK image domains.
 
-    Returns ``(H, fallback, inlier_frac, n_tracks)``. ``H`` is identity when ``fallback`` is True. Tracks
-    failing the forward-backward consistency check (or the image bounds) are dropped before fitting. This is a
-    motion *estimator*, not a flow field: it does not produce per-pixel correspondences.
+    ``prev_detect_gray`` is used only by ``goodFeaturesToTrack``. The other two images are passed to forward
+    and backward LK. All inputs are same-size grayscale uint8 images because OpenCV's pyramidal LK requires
+    CV_8U. Returns ``(H, fallback, inlier_frac, n_tracks, details)``. This is for controlled diagnostics; the
+    production/evaluation entry point :func:`pair_similarity` keeps its original luminance/luminance behavior.
     """
     _require_cv2()
     rng = rng if rng is not None else np.random.default_rng(0)
-    Hh, Ww = prev_gray.shape[:2]
+    prev_detect_gray = np.ascontiguousarray(prev_detect_gray)
+    prev_track_gray = np.ascontiguousarray(prev_track_gray)
+    next_track_gray = np.ascontiguousarray(next_track_gray)
+    if (prev_detect_gray.ndim != 2 or prev_track_gray.ndim != 2 or next_track_gray.ndim != 2 or
+            prev_detect_gray.shape != prev_track_gray.shape or prev_track_gray.shape != next_track_gray.shape):
+        raise ValueError("detection and tracking images must be same-size grayscale arrays")
+    if any(x.dtype != np.uint8 for x in (prev_detect_gray, prev_track_gray, next_track_gray)):
+        raise ValueError("detection and tracking images must have dtype uint8 (OpenCV LK requirement)")
+    Hh, Ww = prev_detect_gray.shape[:2]
     def checked_mask(mask, name):
         if mask is None:
             return None
@@ -148,19 +159,23 @@ def pair_similarity(prev_gray, next_gray, *, prev_invalid=None, next_invalid=Non
     prev_invalid = checked_mask(prev_invalid, "prev_invalid")
     next_invalid = checked_mask(next_invalid, "next_invalid")
     detect_mask = None if prev_invalid is None else np.where(prev_invalid, 0, 255).astype(np.uint8)
-    p0 = cv2.goodFeaturesToTrack(prev_gray, maxCorners=int(max_corners), qualityLevel=float(quality),
+    p0 = cv2.goodFeaturesToTrack(prev_detect_gray, maxCorners=int(max_corners), qualityLevel=float(quality),
                                  mask=detect_mask,
                                  minDistance=float(min_distance), blockSize=int(block_size))
     if p0 is None or len(p0) < min_tracks:
-        return np.eye(3), True, 0.0, 0
+        n = 0 if p0 is None else int(len(p0))
+        return np.eye(3), True, 0.0, n, {"n_detected": n, "n_tracks": 0, "n_inliers": 0,
+                                          "failure_stage": "detection"}
     crit = (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 30, 0.01)
-    p1, st1, _ = cv2.calcOpticalFlowPyrLK(prev_gray, next_gray, p0, None,
+    p1, st1, _ = cv2.calcOpticalFlowPyrLK(prev_track_gray, next_track_gray, p0, None,
                                           winSize=(int(win), int(win)), maxLevel=int(levels), criteria=crit)
-    p0b, st2, _ = cv2.calcOpticalFlowPyrLK(next_gray, prev_gray, p1, None,
+    p0b, st2, _ = cv2.calcOpticalFlowPyrLK(next_track_gray, prev_track_gray, p1, None,
                                            winSize=(int(win), int(win)), maxLevel=int(levels), criteria=crit)
     ok = (st1.ravel() == 1) & (st2.ravel() == 1)
     if int(ok.sum()) < min_tracks:
-        return np.eye(3), True, 0.0, int(ok.sum())
+        n = int(ok.sum())
+        return np.eye(3), True, 0.0, n, {"n_detected": int(len(p0)), "n_tracks": n, "n_inliers": 0,
+                                          "failure_stage": "lk_status"}
     a = p0[ok, 0].astype(np.float64); b = p1[ok, 0].astype(np.float64); ab = p0b[ok, 0].astype(np.float64)
     fb = np.linalg.norm(a - ab, axis=1)
     ok = fb < fb_tol
@@ -176,19 +191,42 @@ def pair_similarity(prev_gray, next_gray, *, prev_invalid=None, next_invalid=Non
         MO.exclude_masked(obs, prev_invalid, next_invalid)
         ok &= obs.valid
     if int(ok.sum()) < min_tracks:
-        return np.eye(3), True, 0.0, int(ok.sum())
+        n = int(ok.sum())
+        return np.eye(3), True, 0.0, n, {"n_detected": int(len(p0)), "n_tracks": n, "n_inliers": 0,
+                                          "failure_stage": "track_filter"}
     a = a[ok]; b = b[ok]
     H, inl = _ransac_similarity(a, b, ransac_thr, rng, iters=ransac_iters, min_inliers=min_tracks)
     if not np.all(np.isfinite(H)):
-        return np.eye(3), True, 0.0, len(a)
+        return np.eye(3), True, 0.0, len(a), {"n_detected": int(len(p0)), "n_tracks": int(len(a)),
+                                               "n_inliers": 0, "failure_stage": "ransac"}
     if int(inl.sum()) < min_tracks:
         # RANSAC deliberately returns an empty inlier mask when refinement loses support. Do not pass empty
         # arrays to fit_model: its weighted-mean divisions would emit NaNs/warnings before the fallback.
-        return np.eye(3), True, 0.0, len(a)
+        return np.eye(3), True, 0.0, len(a), {"n_detected": int(len(p0)), "n_tracks": int(len(a)),
+                                               "n_inliers": 0, "failure_stage": "ransac"}
     H = G.fit_model(a[inl], b[inl], "similarity")
     if not np.all(np.isfinite(H)) or H[2, 2] == 0:
-        return np.eye(3), True, 0.0, len(a)
-    return H / H[2, 2], False, float(inl.mean()), int(len(a))
+        return np.eye(3), True, 0.0, len(a), {"n_detected": int(len(p0)), "n_tracks": int(len(a)),
+                                               "n_inliers": 0, "failure_stage": "fit"}
+    return H / H[2, 2], False, float(inl.mean()), int(len(a)), {
+        "n_detected": int(len(p0)), "n_tracks": int(len(a)), "n_inliers": int(inl.sum()), "failure_stage": None}
+
+
+def pair_similarity(prev_gray, next_gray, *, prev_invalid=None, next_invalid=None,
+                    max_corners=500, quality=0.01, min_distance=8.0, block_size=7,
+                    win=21, levels=3, fb_tol=1.0, ransac_thr=1.5, min_tracks=8, ransac_iters=300, rng=None):
+    """Independent ``prev -> next`` inter-frame similarity from sparse KLT tracks (grayscale uint8 inputs).
+
+    Returns ``(H, fallback, inlier_frac, n_tracks)``. ``H`` is identity when ``fallback`` is True. This wrapper
+    preserves the original luminance/luminance estimator; only explicit diagnostic callers should use
+    :func:`pair_similarity_domains`.
+    """
+    return pair_similarity_domains(
+        prev_gray, prev_gray, next_gray, prev_invalid=prev_invalid, next_invalid=next_invalid,
+        max_corners=max_corners, quality=quality, min_distance=min_distance, block_size=block_size,
+        win=win, levels=levels, fb_tol=fb_tol, ransac_thr=ransac_thr, min_tracks=min_tracks,
+        ransac_iters=ransac_iters, rng=rng,
+    )[:4]
 
 
 class TrackAccumulator:
