@@ -77,6 +77,7 @@ from mlxstab import media
 from mlxstab import stabilize as S
 
 from . import composition_candidate as CC
+from .heavylock import HeavyLock
 from . import manifest as MF
 from . import real_composition_audit as RCA
 from . import real_pair_review as RPR
@@ -87,6 +88,21 @@ SCHEMA = "mlxstab.real_composition_render/1"
 SUPPORTED_MODES = tuple(RCA.CANDIDATE_MODES)
 DEFAULT_CRF = 18
 DEFAULT_PRESET = "medium"
+
+#: Shared heavy lock (``bench.heavylock.HeavyLock``) chunked-yield defaults: ~30 output frames per chunk with a
+#: ~12 s gap, matching the anniversary-repo etiquette and ``bench.run_case --lock-chunk 30 --lock-pause 12``.
+DEFAULT_LOCK_CHUNK = 30
+DEFAULT_LOCK_PAUSE_S = 12.0
+
+#: Scope note recorded in the report's ``lock`` block.
+LOCK_SCOPE_NOTE = (
+    "The candidate is rendered under the anniversary project's shared heavy lock (bench.heavylock.HeavyLock, "
+    "reused from tools/heavy.py; a local ignored out/ fallback is used when unavailable). The lock is acquired "
+    "before the precomputed smoothing chart and every source decode/render step and released in all paths; "
+    "lock.on_step(rendered) is called after each output frame, so a long render yields for --lock-pause seconds "
+    "at every --lock-chunk boundary. Acquisition waits and chunk pauses are accounted separately and are not "
+    "processing time. The lock filesystem path is intentionally omitted from this report."
+)
 DEINTERLACE_FILTER = "bwdif=mode=send_field:parity=auto:deint=all"
 CFR_TOL_S = 1e-5
 
@@ -221,6 +237,25 @@ def verify_cfr(pts, count, fps, where, tol_s=CFR_TOL_S):
             reasons.append(f"{where} is not zero-based constant-frame-rate")
     return {"ok": not reasons, "reasons": reasons, "count": int(count), "fps": float(fps),
             "tolerance_s": tol_s}
+
+
+def lock_snapshot(lock):
+    """Report block for the shared heavy lock; the private lock filesystem path is deliberately omitted.
+
+    ``lock`` is an (optionally already acquired) ``bench.heavylock.HeavyLock`` or a compatible object. ``None``
+    records the disabled state used by the Python test seam: unit tests inject no lock and never acquire a real
+    one. Only the portable accounting is kept (backend/chunk/pause/release/acquire-wait/pause totals).
+    """
+    if lock is None:
+        return {"backend": "disabled", "enabled": False, "chunk": None, "pause_s": None, "held": False,
+                "releases": 0, "acquire_wait_s": 0.0, "pause_total_s": 0.0, "scope": LOCK_SCOPE_NOTE}
+    st = lock.status()
+    backend = st.get("backend")
+    return {"backend": backend, "enabled": backend != "disabled", "chunk": st.get("chunk"),
+            "pause_s": st.get("pause_s"), "held": bool(st.get("held")),
+            "releases": int(st.get("releases") or 0),
+            "acquire_wait_s": float(st.get("acquire_wait_s") or 0.0),
+            "pause_total_s": float(st.get("pause_total_s") or 0.0), "scope": LOCK_SCOPE_NOTE}
 
 
 # --------------------------------------------------------------------------------------
@@ -751,8 +786,15 @@ def dense_vs_exact_errors(composed_map, mot, plan, cfg, t, *, points, cells, hig
 
 
 def render_candidate(manifest_path, *, mode, out_video, out_json=None, crf=DEFAULT_CRF,
-                     preset=DEFAULT_PRESET):
-    """Render one explicit composition candidate MP4 from a captured run manifest."""
+                     preset=DEFAULT_PRESET, lock=None):
+    """Render one explicit composition candidate MP4 from a captured run manifest.
+
+    ``lock`` is an optional, already-constructed ``bench.heavylock.HeavyLock`` (or compatible object): the CLI
+    builds it from ``--lock/--lock-chunk/--lock-pause`` and passes it in, while the Python seam defaults to
+    ``None`` so unit tests never acquire a real shared lock. When supplied it is acquired before the smoothing
+    chart and any source decode/render, ``on_step(rendered)`` is called after every output frame, and it is
+    released on every path.
+    """
     _require(mode in SUPPORTED_MODES, "unsupported_mode",
              f"mode must be one of {SUPPORTED_MODES}, got {mode!r}")
     manifest, man_path = load_manifest(manifest_path)
@@ -791,25 +833,30 @@ def render_candidate(manifest_path, *, mode, out_video, out_json=None, crf=DEFAU
     highpass = bool(RCA.MODE_META[mode]["highpass"])
     smoothing_basis = RCA.MODE_META[mode]["smoothing_basis"]
     cells = CC.reference_cells(cfg)
-    smoothed = None
-    if highpass:
-        smoothed = CC.smoothed_delta(mot, plan, cfg, smoothing_basis=smoothing_basis)
 
-    src_info = media.probe(source["path"])
-    deinterlace = bool(source["preprocessing"].get("interlaced"))
-    frames_iter, decoded_fps, decoded_size = media.decode(
-        source["path"], src_info, source["window"]["start_s"], source["window"]["duration_s"],
-        deinterlace=deinterlace, vf=source["preprocessing"].get("decode_vf"))
-    _require(_close(decoded_fps, source["decoded"]["fps"]), "source_decode_fps",
-             f"decoded source fps {decoded_fps!r} disagrees with source.decoded fps "
-             f"{source['decoded']['fps']!r}")
-    _require(tuple(decoded_size) == (source["decoded"]["width"], source["decoded"]["height"]),
-             "source_decode_dims", "decoded source dimensions disagree with the manifest")
-
-    video_path.parent.mkdir(parents=True, exist_ok=True)
     tmp_path = None
     encoder = None
+    # Acquire the shared heavy lock before the precomputed smoothing chart and every source decode/render step,
+    # so this candidate render excludes the anniversary repo's own heavy jobs; it is released on every path.
+    if lock is not None:
+        lock.acquire()
     try:
+        smoothed = None
+        if highpass:
+            smoothed = CC.smoothed_delta(mot, plan, cfg, smoothing_basis=smoothing_basis)
+
+        src_info = media.probe(source["path"])
+        deinterlace = bool(source["preprocessing"].get("interlaced"))
+        frames_iter, decoded_fps, decoded_size = media.decode(
+            source["path"], src_info, source["window"]["start_s"], source["window"]["duration_s"],
+            deinterlace=deinterlace, vf=source["preprocessing"].get("decode_vf"))
+        _require(_close(decoded_fps, source["decoded"]["fps"]), "source_decode_fps",
+                 f"decoded source fps {decoded_fps!r} disagrees with source.decoded fps "
+                 f"{source['decoded']['fps']!r}")
+        _require(tuple(decoded_size) == (source["decoded"]["width"], source["decoded"]["height"]),
+                 "source_decode_dims", "decoded source dimensions disagree with the manifest")
+
+        video_path.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(prefix=f".{video_path.stem}.", suffix=".mp4", dir=video_path.parent)
         tmp_path = Path(tmp_name)
         os.close(fd)
@@ -872,6 +919,8 @@ def render_candidate(manifest_path, *, mode, out_video, out_json=None, crf=DEFAU
                                                  f"encoder write failed at source frame {decoded_index}: "
                                                  f"{type(exc).__name__}: {exc}") from exc
             rendered += 1
+            if lock is not None:
+                lock.on_step(rendered)   # yield at chunk boundaries; no-op for chunk == 0
 
         extra = sum(1 for _ in frames_iter)
         decoded_total = decoded_index + 1 + extra
@@ -1008,8 +1057,6 @@ def render_candidate(manifest_path, *, mode, out_video, out_json=None, crf=DEFAU
             "limitations": list(LIMITATIONS),
             "command": [sys.executable, *sys.argv],
         }
-        MF.write_manifest(json_path, report)
-        return report
     except BaseException:
         if encoder is not None:
             try:
@@ -1021,6 +1068,20 @@ def render_candidate(manifest_path, *, mode, out_video, out_json=None, crf=DEFAU
         video_path.unlink(missing_ok=True)
         json_path.unlink(missing_ok=True)
         raise
+    finally:
+        if lock is not None:
+            lock.release()
+    try:
+        # Snapshot the lock only after release and write the report atomically; a report-building or write
+        # failure here must not leave the finished video behind (same partial-output cleanup as a render
+        # failure).
+        report["lock"] = lock_snapshot(lock)
+        MF.write_manifest(json_path, report)
+    except BaseException:
+        video_path.unlink(missing_ok=True)
+        json_path.unlink(missing_ok=True)
+        raise
+    return report
 
 
 # --------------------------------------------------------------------------------------
@@ -1039,14 +1100,27 @@ def build_parser():
                    help="adjacent atomic provenance JSON (default: <out-video stem>.json)")
     p.add_argument("--crf", type=int, default=DEFAULT_CRF, help="libx264 CRF for the candidate")
     p.add_argument("--preset", default=DEFAULT_PRESET, help="libx264 preset for the candidate")
+    p.add_argument("--lock", choices=["auto", "on", "off"], default="auto",
+                   help="shared heavy lock: auto=on for file-backed manifests (this renderer only accepts "
+                        "local file sources), off disables it")
+    p.add_argument("--lock-chunk", type=int, default=DEFAULT_LOCK_CHUNK,
+                   help="release/re-acquire the shared lock every N output frames (default 30)")
+    p.add_argument("--lock-pause", type=float, default=DEFAULT_LOCK_PAUSE_S,
+                   help="seconds to yield between lock chunks (shared etiquette ~12 s)")
     return p
 
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
+    lock = None
+    if args.lock != "off":
+        # auto == on here: validate_source refuses anything but a local file-backed manifest, so every accepted
+        # run is file-backed and must cooperate with the anniversary repo's shared heavy lock.
+        lock = HeavyLock(what=f"mlxstab render {Path(args.manifest).parent.name}", enabled=True,
+                         chunk=args.lock_chunk, pause_s=args.lock_pause)
     try:
         report = render_candidate(args.manifest, mode=args.mode, out_video=args.out_video,
-                                  out_json=args.out_json, crf=args.crf, preset=args.preset)
+                                  out_json=args.out_json, crf=args.crf, preset=args.preset, lock=lock)
     except Exception as exc:  # structured refusal, nonzero; no partial artifact is left behind
         code = getattr(exc, "code", type(exc).__name__)
         payload = {"schema": SCHEMA, "ok": False, "error": {"code": code, "message": str(exc)}}

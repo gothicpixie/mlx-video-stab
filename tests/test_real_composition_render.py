@@ -109,6 +109,41 @@ def save_run(root, *, name="run", source_frames=6, output_frames=3, fps_source=S
     return run, manifest
 
 
+class FakeLock:
+    """Records the ``HeavyLock`` lifecycle without touching the filesystem or the anniversary repo.
+
+    Unit tests inject this through ``render_candidate(..., lock=fake)`` or by patching ``R.HeavyLock`` for the
+    CLI, so no real shared lock is ever acquired.
+    """
+
+    instances = []
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.acquires = 0
+        self.releases = 0
+        self.steps = []
+        self.held = False
+        FakeLock.instances.append(self)
+
+    def acquire(self):
+        self.acquires += 1
+        self.held = True
+
+    def release(self):
+        self.releases += 1
+        self.held = False
+
+    def on_step(self, step):
+        self.steps.append(int(step))
+
+    def status(self):
+        return {"backend": "fake", "path": "/private/anniversary/media/.heavy.lock",
+                "chunk": self.kwargs.get("chunk", 0), "pause_s": self.kwargs.get("pause_s", 0.0),
+                "held": self.held, "releases": self.releases,
+                "acquire_wait_s": 0.0, "pause_total_s": 0.0}
+
+
 class FakeEncoder:
     instances = []
 
@@ -843,7 +878,7 @@ def test_cli_success(tmp_path, monkeypatch, capsys):
     run, _ = _setup(monkeypatch, tmp_path)
     video, report = _out(tmp_path)
     rc = R.main([str(run / "manifest.json"), "--mode", "exact_composition",
-                 "--out-video", str(video), "--out-json", str(report)])
+                 "--out-video", str(video), "--out-json", str(report), "--lock", "off"])
     assert rc == 0
     out = json.loads(capsys.readouterr().out)
     assert out["status"] == "success" and out["mode"] == "exact_composition"
@@ -856,7 +891,7 @@ def test_cli_error_is_json_safe(tmp_path, monkeypatch, capsys):
     (run / "manifest.json").write_text(json.dumps(manifest))
     video, report = _out(tmp_path)
     rc = R.main([str(run / "manifest.json"), "--mode", "exact_composition",
-                 "--out-video", str(video), "--out-json", str(report)])
+                 "--out-video", str(video), "--out-json", str(report), "--lock", "off"])
     assert rc == 2
     out = json.loads(capsys.readouterr().out)
     assert out["ok"] is False and out["error"]["code"] == "manifest_status"
@@ -867,3 +902,165 @@ def test_cli_requires_mode_and_out_video():
         R.main(["manifest.json"])
     with pytest.raises(SystemExit):
         R.main(["manifest.json", "--mode", "exact_composition"])
+
+
+# --------------------------------------------------------------------------------------
+# shared heavy lock (injected fake; unit tests never acquire a real lock)
+# --------------------------------------------------------------------------------------
+
+def test_function_seam_defaults_to_no_lock(tmp_path, monkeypatch):
+    """The Python seam defaults to ``lock=None``: nothing is acquired and the report records disabled."""
+    run, _ = _setup(monkeypatch, tmp_path)
+    FakeLock.instances = []
+    video, report = _out(tmp_path)
+    rep = R.render_candidate(run / "manifest.json", mode="exact_composition", out_video=video,
+                             out_json=report)
+    assert FakeLock.instances == []                       # no real lock constructed/acquired
+    lock = rep["lock"]
+    assert lock["backend"] == "disabled" and lock["enabled"] is False
+    assert lock["chunk"] is None and lock["pause_s"] is None
+    assert lock["releases"] == 0 and lock["acquire_wait_s"] == 0.0 and lock["pause_total_s"] == 0.0
+    assert "path" not in lock                             # private lock paths are never published
+    assert "scope" in lock
+
+
+def test_lock_on_step_after_every_output_frame_and_release_on_success(tmp_path, monkeypatch):
+    run, _ = _setup(monkeypatch, tmp_path, source_frames=6, output_frames=3)
+    lock = FakeLock(chunk=30, pause_s=12.0)
+    video, report = _out(tmp_path)
+    rep = R.render_candidate(run / "manifest.json", mode="exact_composition", out_video=video,
+                             out_json=report, lock=lock)
+    assert lock.acquires == 1
+    assert lock.steps == [1, 2, 3]                        # after each output frame, 1-based
+    assert lock.releases == 1                             # final release (chunk=30 > 3 frames)
+    snap = rep["lock"]
+    assert snap["backend"] == "fake" and snap["enabled"] is True
+    assert snap["chunk"] == 30 and snap["pause_s"] == 12.0
+    assert snap["held"] is False and snap["releases"] == 1
+    assert "path" not in snap                             # FakeLock.status() has a path; it is dropped
+    assert json.loads(report.read_text())["lock"] == snap
+
+
+def test_lock_on_step_release_reacquire_at_chunk_boundaries(tmp_path, monkeypatch):
+    """A real HeavyLock-style chunk gate is exercised when the fake forwards on_step to release/acquire."""
+    run, _ = _setup(monkeypatch, tmp_path, source_frames=6, output_frames=3)
+
+    class ChunkyLock(FakeLock):
+        def on_step(self, step):
+            super().on_step(step)
+            if step % 2 == 0:
+                self.release()
+                self.acquire()
+
+    lock = ChunkyLock(chunk=2, pause_s=0.0)
+    video, report = _out(tmp_path)
+    R.render_candidate(run / "manifest.json", mode="exact_composition", out_video=video,
+                       out_json=report, lock=lock)
+    assert lock.steps == [1, 2, 3]
+    assert lock.releases == 2                             # chunk yield at frame 2 + final release
+    assert lock.acquires == 2                             # initial + re-acquire after the yield
+
+
+def test_lock_released_on_failure(tmp_path, monkeypatch):
+    run, _ = _setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(R, "build_candidate_field", lambda *a, **k: np.full((H, W, 2), np.nan))
+    lock = FakeLock(chunk=2, pause_s=0.0)
+    video, report = _out(tmp_path)
+    with pytest.raises(R.RealCompositionRenderError) as ei:
+        R.render_candidate(run / "manifest.json", mode="exact_composition", out_video=video,
+                           out_json=report, lock=lock)
+    assert ei.value.code == "nonfinite_field"
+    assert lock.acquires == 1 and lock.releases == 1 and lock.held is False
+    assert not video.exists() and not report.exists()
+
+
+def test_lock_released_when_source_decode_fails(tmp_path, monkeypatch):
+    """A failure between acquire and the render loop (decode validation) still releases the lock."""
+    run, _ = _setup(monkeypatch, tmp_path, decode_extra=-2)
+    lock = FakeLock(chunk=30, pause_s=0.0)
+    video, report = _out(tmp_path)
+    with pytest.raises(R.RealCompositionRenderError) as ei:
+        R.render_candidate(run / "manifest.json", mode="exact_composition", out_video=video,
+                           out_json=report, lock=lock)
+    assert ei.value.code == "early_decode"
+    assert lock.acquires == 1 and lock.releases == 1 and lock.held is False
+    assert not video.exists() and not report.exists()
+
+
+def test_lock_acquire_failure_leaves_no_partial_outputs(tmp_path, monkeypatch):
+    """If ``acquire()`` raises, the error surfaces before any output exists and nothing is released."""
+    run, _ = _setup(monkeypatch, tmp_path)
+
+    class RefusingLock(FakeLock):
+        def acquire(self):
+            self.acquires += 1
+            raise OSError("lock acquisition failed")
+
+    lock = RefusingLock(chunk=30, pause_s=0.0)
+    video, report = _out(tmp_path)
+    with pytest.raises(OSError):
+        R.render_candidate(run / "manifest.json", mode="exact_composition", out_video=video,
+                           out_json=report, lock=lock)
+    assert lock.acquires == 1 and lock.releases == 0   # a failed acquire was never held, so nothing to release
+    assert not video.exists() and not report.exists()
+    assert not list(tmp_path.glob(".candidate.*.mp4"))
+
+
+def test_lock_snapshot_failure_cleans_partial_outputs(tmp_path, monkeypatch):
+    """A report-building failure after a successful render still removes the video (no partial artifact)."""
+    run, _ = _setup(monkeypatch, tmp_path)
+
+    class BadStatusLock(FakeLock):
+        def status(self):
+            raise RuntimeError("lock status unavailable")
+
+    lock = BadStatusLock(chunk=30, pause_s=0.0)
+    video, report = _out(tmp_path)
+    with pytest.raises(RuntimeError, match="lock status unavailable"):
+        R.render_candidate(run / "manifest.json", mode="exact_composition", out_video=video,
+                           out_json=report, lock=lock)
+    assert lock.acquires == 1 and lock.releases == 1 and lock.held is False
+    assert not video.exists() and not report.exists()
+
+
+def test_cli_lock_defaults(tmp_path, monkeypatch):
+    run, _ = _setup(monkeypatch, tmp_path)
+    video, report = _out(tmp_path)
+    FakeLock.instances = []
+    monkeypatch.setattr(R, "HeavyLock", FakeLock)
+    rc = R.main([str(run / "manifest.json"), "--mode", "exact_composition",
+                 "--out-video", str(video), "--out-json", str(report)])
+    assert rc == 0
+    assert len(FakeLock.instances) == 1
+    built = FakeLock.instances[0]
+    assert built.kwargs["enabled"] is True                # auto == on for file-backed manifests
+    assert built.kwargs["chunk"] == R.DEFAULT_LOCK_CHUNK == 30
+    assert built.kwargs["pause_s"] == R.DEFAULT_LOCK_PAUSE_S == 12.0
+    assert built.kwargs["what"].startswith("mlxstab render ")
+    assert built.acquires == 1 and built.releases == 1
+    assert json.loads(report.read_text())["lock"]["backend"] == "fake"
+
+
+def test_cli_lock_chunk_pause_overrides(tmp_path, monkeypatch):
+    run, _ = _setup(monkeypatch, tmp_path)
+    video, report = _out(tmp_path)
+    FakeLock.instances = []
+    monkeypatch.setattr(R, "HeavyLock", FakeLock)
+    rc = R.main([str(run / "manifest.json"), "--mode", "exact_composition",
+                 "--out-video", str(video), "--out-json", str(report),
+                 "--lock", "on", "--lock-chunk", "2", "--lock-pause", "0.5"])
+    assert rc == 0
+    built = FakeLock.instances[0]
+    assert built.kwargs["chunk"] == 2 and built.kwargs["pause_s"] == 0.5
+
+
+def test_cli_lock_off_constructs_no_lock(tmp_path, monkeypatch):
+    run, _ = _setup(monkeypatch, tmp_path)
+    video, report = _out(tmp_path)
+    FakeLock.instances = []
+    monkeypatch.setattr(R, "HeavyLock", FakeLock)
+    rc = R.main([str(run / "manifest.json"), "--mode", "exact_composition",
+                 "--out-video", str(video), "--out-json", str(report), "--lock", "off"])
+    assert rc == 0
+    assert FakeLock.instances == []
+    assert json.loads(report.read_text())["lock"]["backend"] == "disabled"

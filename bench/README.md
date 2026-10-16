@@ -277,9 +277,25 @@ small per-frame scalars are retained, and **no mask video or mask artifact is wr
 wrong shape or an unsupported dtype is refused with a stable `bad_mask_shape`/`bad_mask_dtype` code and the
 usual partial-output cleanup.
 
+Because a full local source render is heavy, the renderer cooperates with the anniversary repo's shared heavy
+lock (`bench.heavylock.HeavyLock`, reused from `tools/heavy.py`; a local ignored `out/` fallback is used when
+`tools/heavy.py` is unavailable, exactly like `bench.run_case`). `--lock {auto,on,off}` defaults to `auto`,
+which is `on` here because the renderer only accepts local file-backed manifests; `--lock-chunk` (default 30
+output frames) and `--lock-pause` (default 12 s) release/re-acquire the lock and yield between chunks,
+matching the shared-project etiquette. The lock is acquired before the precomputed smoothing chart and any
+source decode/render, and it is released on **every** path (success and all error cleanup); `on_step(rendered)`
+runs after each output frame so a long render yields at every chunk boundary. The adjacent JSON `lock` block
+records the backend, chunk, pause, held/release state and acquisition-wait/chunk-pause totals but deliberately
+omits the lock filesystem path (private); it is snapshotted after the lock is released, so `lock.releases`
+counts the chunk yields plus the final release. The Python seam `render_candidate(..., lock=None)` is lock-free,
+so unit tests never acquire a real lock and instead inject a fake through the same parameter (or patch
+`bench.real_composition_render.HeavyLock` for CLI tests). A failure while snapshotting the lock or writing the
+report removes the finished video, so no partial artifact is left behind.
+
 ```bash
 .venv/bin/python -m bench.real_composition_render out/bench/RUN/manifest.json \
-    --mode exact_composition --out-video out/bench/RUN/composition_exact.mp4
+    --mode exact_composition --out-video out/bench/RUN/composition_exact.mp4 \
+    --lock auto --lock-chunk 30 --lock-pause 12
 ```
 
 ### Comparing and reviewing the rendered candidate
@@ -309,8 +325,12 @@ projective-horizon/non-finite/singular refusal, recorded error/`grid_origin`/`pa
 pairing, the invalid-support block (kept border mask; exact per-frame invalid counts/fractions and fixed 4-px
 edge-strip fractions, aggregate mean/max/pooled values and totals, and `bad_mask_shape`/`bad_mask_dtype`
 refusal), manifest/provenance/output hashes, early/extra decode, malformed timeline and unsupported cadence,
-non-finite/failure cleanup, output collision/overwrite refusal, output CFR and the CLI), all with fake
-media/render dependencies.
+non-finite/failure cleanup, output collision/overwrite refusal, output CFR and the CLI, and the shared heavy
+lock: no real lock acquisition through the `lock=None` seam, `on_step(rendered)` after every output frame,
+release on success and on failure (including a decode-time refusal before the render loop and a report-building
+failure after the video is renamed into place), no partial output when `acquire()` itself raises, and the CLI
+`--lock`/`--lock-chunk`/`--lock-pause` defaults and overrides with a patched `HeavyLock`), all with fake
+media/render/lock dependencies.
 
 ## Captured-motion field audit
 
