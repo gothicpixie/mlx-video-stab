@@ -350,3 +350,24 @@ is to run this real plan+motion audit on those same captured windows (capturing 
 `--dump-motion`) and review, per window, the candidate modes' curvature/coverage/displacement against
 production alongside longer and held-out windows with visual review; only then is production integration
 considered. Nothing here changes defaults or selects a chart.
+
+## Rendered companion: dense-map approximation
+
+The rendered companion `bench/real_composition_render.py` turns the same three candidate maps into pixels with
+the production sampler. Re-deriving the exact full-history composition `Phi_t` for every output frame is O(T^2)
+over the clip length and was impractical for the 300-output capture, so the renderer forward-propagates `Phi_t`
+**once per motion fit** on a **padded world-pixel lattice** with `composition_candidate.forward_apply`, then
+bilinearly interpolates it at `V_t(x) = inv(Psi_t) @ plan.G[t](x)`. The lattice is the output pixel-center
+rectangle's `V_t` image over every requested source frame (the four output pixel-center corners through `V_t`),
+grown by a one-pixel interpolation guard and stored in world pixel coordinates (a negative origin is allowed);
+this keeps every query inside the lattice even when `V_t(x)` leaves the frame (at frame 0 the current capture
+reaches `y ~ 1087` for `H=1080`), so no border clamp inflates the error. A projective horizon/sign change of
+`V_t` and a non-finite mapping are refused. This is a **dense-grid interpolation approximation to the
+continuous exact composition, not mathematically exact**: it is exact on lattice nodes and interpolated between
+them, and building every frame is O(T) instead of O(T^2). The provenance JSON names it
+(`approximation.name = dense_grid_interpolated_forward_composition`), records the grid, grid shape,
+`grid_origin`, `padding`, the raw corner query bounds, interpolation and reference-grid resolution, and compares
+the dense map directly against the exact `composition_candidate.candidate_source_coords` on a sparse inset grid
+of sub-pixel output points at five representative frames, recording per-frame and aggregate max/mean/p95 pixel
+error. The geometry-only audit above is unchanged and still evaluates the exact composition pointwise on its
+sparse probes; only the *rendered* companion uses the dense-map propagation.

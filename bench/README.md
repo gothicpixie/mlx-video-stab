@@ -219,6 +219,83 @@ artifact(s) (`outputs.plan`/`outputs.motion` basenames and the `experiment_ident
 warp-geometry proxies only: no media, no rendering, no production wiring, and no perceived-quality claim. See
 [`docs/shape_audit.md`](../docs/shape_audit.md) for the metric, contracts and limitations.
 
+## Rendered composition candidate (E02 perceptual gate)
+
+The geometry-only composition audit above renders no pixels, so the next E02 gate is a perceptual check on
+**rendered** candidates. `bench/real_composition_render.py` is that renderer: it is the **actual rendered
+version of the geometry-only candidate**. It loads the same captured `plan_r0.npz`/`motion_r0.npz` through the
+same strict loader and, for the chosen explicit mode (`exact_composition`, `source_highpass` or
+`reference_highpass`), builds the `bench.composition_candidate` output->source map and renders only the mapped
+source frames through the **production** `stabilize.render_from_src` sampler, padding and kernel. It does
+**not** re-derive the exact full-history composition per output frame (that is O(T^2) over the clip length and
+was impractical for 300 outputs): instead it forward-propagates the composed reference map `Phi_t` **once per
+motion fit** on a **padded world-pixel lattice** with `composition_candidate.forward_apply`, then bilinearly
+interpolates it at the candidate output->reference coordinates `V_t(x) = inv(Psi_t) @ plan.G[t](x)`. The
+lattice is not the frame grid: it is the output pixel-center rectangle's `V_t` image over every requested
+source frame (obtained from the four output pixel-center corners transformed through `V_t`), grown by a
+one-pixel interpolation guard and stored in world pixel coordinates (a negative origin is allowed). That way
+every query `V_t(x)` — which at some frames leaves `[0..W-1]x[0..H-1]`, e.g. reaching `y ~ 1087` for `H=1080`
+at frame 0 — is inside the lattice, so no query is border-clamped. A projective horizon or sign change of `V_t`
+(the homogeneous denominator vanishing or changing sign over the output rectangle) and a non-finite mapping are
+refused rather than silently clamped. Building every frame is therefore O(T) instead of O(T^2), at the price of
+resolving the composition only on, and interpolating between, the dense lattice nodes. This is a **dense-grid
+interpolation approximation to the continuous exact composition, not mathematically exact**; the report names it
+(`approximation.name = dense_grid_interpolated_forward_composition`) and records the grid, grid shape,
+`grid_origin`, `padding`, the raw corner query bounds and reference-grid resolution. To make the approximation
+auditable it also compares the dense map directly with the exact `CC.candidate_source_coords` on a sparse inset
+grid of sub-pixel output points at five representative frames, recording per-frame and aggregate max/mean/p95
+pixel error. No production code, default or output is changed,
+no mode is selected (the high-pass chart stays a decision experiment), and the tool makes no network call.
+
+This capture deinterlaces to the source processing rate (59.94 p) and encodes a 29.97 output, so each output
+frame pairs to the exact nearest source decoded frame via `bench.real_pair_review.source_indices` (half-frame
+ties, repeats and out-of-range indices are refused). For the current 60-70 s capture that is 300 outputs to 600
+source frames as `[0, 2, ..., 598]`; the full mapping is recorded in the adjacent JSON. The run manifest must
+be a successful `run_case` manifest with a matching source SHA, existing baseline video/plan/motion, plan and
+motion dimensions/fps/frame count agreeing with `source.decoded`, and a baseline video whose probe/PTS match
+the manifest's output dimensions/fps/`encoded_frames`. Unsupported modes, inconsistent cadence, malformed
+evidence, early/extra source decode, a bad/non-finite field/render or a non-finite dense map, a dense-map
+projective horizon/sign change, and encode/CFR failures are refused with a stable `code`; existing artifacts are
+never overwritten and temporary outputs are removed on failure. The adjacent atomic JSON records the
+source/baseline/plan/motion hashes, run/window identity, mode/chart, the named dense-map approximation (grid,
+grid shape, `grid_origin`, `padding`, corner query bounds, interpolation, reference-grid cells, recurrence and
+complexity), the exact-vs-dense comparison (comparison grid/inset, per-frame and aggregate max/mean/p95 pixel
+error), the map sampler and kernel, dimensions/fps/frame count, the full frame-index
+mapping, and the output SHA/size/CFR.
+
+```bash
+.venv/bin/python -m bench.real_composition_render out/bench/RUN/manifest.json \
+    --mode exact_composition --out-video out/bench/RUN/composition_exact.mp4
+```
+
+### Comparing and reviewing the rendered candidate
+
+Compare the rendered candidate against the manifest's stabilized `outputs.video` (the baseline) with the
+`real_pair_review --candidate-video` mode, which isolates the composition-map effect against the same
+stabilized frame count/rate/resolution and produces the blinded A/B position-reversal pair, then submit that
+report to Gemini with `bench.gemini_blind_review` (and optionally the position-bias audit):
+
+```bash
+.venv/bin/python -m bench.real_pair_review out/bench/RUN/manifest.json \
+    --candidate-video out/bench/RUN/composition_exact.mp4
+.venv/bin/python -m bench.gemini_blind_review out/bench/RUN/baseline_vs_candidate.json \
+    --out out/bench/RUN/gemini_review.json
+.venv/bin/python -m bench.gemini_position_bias_audit \
+    --paired-result out/bench/RUN/gemini_review.json \
+    --out out/bench/RUN/position_bias_audit.json
+```
+
+Honesty boundary: this is one explicit mode of one captured run/window, rendered from that window's fitted
+motion. It is the rendered counterpart of the geometry-only candidate, not a production default, quality score
+or mode selection; any visual result is scoped to that single setup/window and is not clip-wide or held-out
+evidence. Focused tests: `tests/test_real_composition_render.py` (source-index skip mapping, chosen mode and
+precomputed smoothing chart, dense-map recurrence and exact-vs-dense sampling within the interpolation bound on
+small smooth synthetic motion, off-frame `V_t` queries proving the padded lattice removes the border clamp,
+projective-horizon/non-finite/singular refusal, recorded error/`grid_origin`/`padding` fields, frame render
+pairing, manifest/provenance/output hashes, early/extra decode, malformed timeline and unsupported cadence,
+non-finite/failure cleanup, output collision/overwrite refusal, output CFR and the CLI), all with fake
+media/render dependencies.
+
 ## Captured-motion field audit
 
 `bench/real_motion_field_audit.py` is an **isolated** companion that looks inside the captured fitted motion
