@@ -2438,5 +2438,29 @@ result**. `crop_zoom` stays **opt-in with default `1.0`**, and no preset or defa
 lowest tested ratio that achieved full support on this window, but it is **not claimed to be mathematically
 minimal**. Artifacts stay in the ignored `out/bench/` tree.
 
-Next step. Hold `1.10` fixed and validate on a distinct source file (e.g. `STREAM_00016` / `STREAM_00025`),
-reporting border/crop, jitter/wobble, coverage, cadence and a blind review; do not tune further on `00176`.
+Distinct-source validation. `1.10` was held fixed with no tuning on two distinct source files, each a 1-second
+matched baseline/candidate pair with identical configs except `crop_zoom`, **30 outputs at 1920x1080 and
+`30000/1001`**, all runs `success` with **zero fit fallback frames**. `STREAM_00016.MTS` (SHA-256
+`49e0aab7021bd254f46f0226ac020d4c586c29825b47102acdfbb09657c127dd`, window 60-61 s): full-support Lanczos-3
+mean/min went from **0.9917992139 / 0.9900868056** at `1.0` to **1.0 / 1.0** at `1.10`; output jitter rose
+**0.1329892225 -> 0.1713887097 px** (**+28.9%**, **+0.038399 px**) and wobble fell **0.0331164615 ->
+0.0303146974 px** (**-8.5%**). `STREAM_00025.MTS` (SHA-256
+`d6744f20554b80cf93ac7e7a1310ce16bc1d567a7409eaf96cc6d272b2b97ca0`, window 25-26 s): support went from
+**0.9856643760 / 0.9712803819** to **1.0 / 1.0**; jitter rose **0.5568961500 -> 0.6741181918 px** (**+21.0%**,
+**+0.117222 px**, beyond the PLAN absolute 0.1 px gate) and wobble **0.2313849032 -> 0.2414798839 px**
+(**+4.4%**).
+
+Blinded review. Gemini via the Vertex API reviewed the baseline/candidate pairs with position reversals on
+both source files; all four judgments were **medium-confidence ties**, with zero side-following and no method
+agreement (the source short/low-light limitations).
+
+Artifacts. The four runs are `out/bench/cropzoom_holdout_s16_t060_baseline`,
+`out/bench/cropzoom_holdout_s16_t060_z110`, `out/bench/cropzoom_holdout_s25_t025_baseline` and
+`out/bench/cropzoom_holdout_s25_t025_z110`; reports and blinded clips remain ignored.
+
+Conclusion. `crop_zoom=1.10` generalizes to full-support coverage but not to matched stability: fixed `1.10`
+fails the jitter noninferiority gate on `STREAM_00025` and is **not a general preset**. Keep the default `1.0`
+and select no ratio. `1.10` remains **opt-in for user-selected framing only**.
+
+Next step. Investigate a per-clip minimal crop policy with a strict crop cap and a measured jitter tradeoff, or
+drop it if no settings meet the gate; do not tune on these reserved windows.

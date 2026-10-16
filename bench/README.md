@@ -292,9 +292,21 @@ and `1.0 / 1.0` at both zoom ratios; all runs had zero fit fallback frames. Outp
 `baseline_vs_cropzoom` reviews at `1.10` and `1.15` each followed the screen side
 (`side_following_pairs=1`, `method_agreement_pairs=0`), so they give no usable preference. This is one targeted
 development window, not held-out evidence; `crop_zoom` stays opt-in at default `1.0` and no ratio is selected.
-`1.10` was the lowest tested value with full support here, not a proven minimum. Next: hold `1.10` and validate
-on a distinct source file (e.g. `STREAM_00016`/`STREAM_00025`) for border/crop, jitter/wobble, coverage,
-cadence and blind review; do not tune further on `00176`. Artifacts stay in ignored `out/bench/`.
+`1.10` was the lowest tested value with full support here, not a proven minimum. Held fixed with no tuning on
+two distinct source files (1-second matched baseline/candidate pairs, 30 outputs at 1920x1080 and
+`30000/1001`, all runs `success`, zero fit fallbacks), it reached full-support Lanczos-3 mean/min `1.0 / 1.0`
+on both but failed matched stability: `STREAM_00016.MTS` jitter `0.1329892225 -> 0.1713887097 px` (**+28.9%**,
+`+0.038399 px`) with wobble `0.0331164615 -> 0.0303146974 px` (`-8.5%`), and `STREAM_00025.MTS` jitter
+`0.5568961500 -> 0.6741181918 px` (**+21.0%**, `+0.117222 px`, beyond the PLAN absolute 0.1 px gate) with wobble
+`0.2313849032 -> 0.2414798839 px` (`+4.4%`). Gemini via Vertex reviewed position-reversed baseline/candidate
+pairs on both sources; all four judgments were medium-confidence ties (no side-following, no method agreement),
+consistent with the short/low-light sources. `1.10` therefore generalizes to full-support coverage but not to
+matched stability and is **not a general preset**: the default stays `1.0` with no ratio selected, and `1.10`
+remains opt-in for user-selected framing only. Runs are `out/bench/cropzoom_holdout_s16_t060_baseline`,
+`out/bench/cropzoom_holdout_s16_t060_z110`, `out/bench/cropzoom_holdout_s25_t025_baseline` and
+`out/bench/cropzoom_holdout_s25_t025_z110`; reports and blinded clips stay in ignored `out/bench/`. Next:
+investigate a per-clip minimal crop policy with a strict crop cap and a measured jitter tradeoff, or drop it if
+no settings meet the gate; do not tune on these reserved windows.
 
 ## Rendered composition candidate (E02 perceptual gate)
 
