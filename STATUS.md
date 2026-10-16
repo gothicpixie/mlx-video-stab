@@ -2200,14 +2200,16 @@ preserving the original render/build exception. The local A/B position-reversal 
 primary-exception rule for its single encoder. `media.decode` now waits for ffmpeg on natural EOF, surfaces
 nonzero exit status, rejects trailing partial raw frames, and closes/reaps the child after early generator close
 or consumer/read errors without masking the primary exception. Successful frame bytes, cadence and rendered
-pixels are unchanged.
+pixels are unchanged. `media.prefetch` now forwards producer failures after queued frames, uses cancellation-aware
+bounded puts, closes its upstream iterator on the producer thread and joins that worker when the consumer exits.
+Non-positive queue capacities are refused because Python treats `Queue(0)` as unbounded.
 
-Commits `455eb1c` and `dd41808` add encoder lifecycle, owner-cleanup and exception-precedence coverage. The
-current decoder change adds deterministic process-lifecycle and malformed-stream tests. The complete suite
-passed **1308 tests**; an independent media decode/cadence rerun passed **17 tests**. A real-ffmpeg smoke
-verified natural EOF, early-close reap and truncated-input failure. CodeGraph is synced; `affected` reported no
-pytest links, so callers were exercised directly. This is a reliability change only and makes no
-stabilization-quality claim.
+Commits `455eb1c`, `dd41808` and `ebfef70` add encoder lifecycle, owner-cleanup, exception-precedence, and
+decode-process coverage. The full suite passed **1317 tests** after the main decode/prefetch changes. After
+adding eager queue-capacity validation and further exception-precedence cases, **77 directly affected tests**
+passed locally. A real-ffmpeg smoke verified natural EOF, early-close reap and truncated-input failure.
+CodeGraph is synced; `affected` found pytest links with the focused `*prefetch*` filter, and callers were run
+directly. This is a reliability change only and makes no stabilization-quality claim.
 
 The current-source 800–810 s, 10 s baseline capture remains queued at `stage=source`, `status=running` while
 the anniversary-video render owns the shared heavy lock. The runner is alive and will proceed when that lock is

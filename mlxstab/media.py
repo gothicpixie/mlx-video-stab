@@ -241,15 +241,80 @@ def close_all(encoders):
 
 
 def prefetch(gen, n=4):
-    """Run a frame generator in a thread so decoding overlaps with GPU/CPU work."""
+    """Run a frame generator in a background thread so decoding overlaps with GPU/CPU work.
+
+    Frames travel through a single bounded queue of ``n`` slots, in order: the producer reads ahead by at most
+    ``n`` frames and a second, unbounded buffer is never created. A producer failure is stashed on the worker and
+    re-raised by the consumer only after every frame queued before the failure has been yielded.
+
+    Cancellation: when the consumer closes this generator early (or an exception propagates out of it), the
+    producer is signalled so a blocked ``put`` can exit instead of wedging on a full queue. The upstream ``gen``
+    is closed by that same producer thread -- never cross-thread -- even when cancellation lands right after a
+    frame was returned, so ``media.decode`` can terminate and reap its ffmpeg child. A primary producer or
+    consumer exception is never masked by a failure while closing ``gen``.
+
+    A non-positive ``n`` is refused with ``ValueError``: Python's ``queue.Queue(0)`` (or any negative maxsize)
+    is unbounded, which would silently defeat the bounded read-ahead guarantee. The signature and every valid
+    ``n`` keep their normal behavior.
+    """
+    if n <= 0:
+        raise ValueError(f"prefetch capacity must be positive, got {n!r}")
+    return _prefetch(gen, n)
+
+
+def _prefetch(gen, n):
     import queue, threading
-    q = queue.Queue(n); end = object()
+    q = queue.Queue(n)
+    cancel = threading.Event()
+    end = object()
+    result = {"error": None}                                  # producer's primary failure, read after join()
+
+    def put(item):
+        # Bounded, cancellation-aware put: a full queue whose consumer has left must not block the worker forever.
+        while not cancel.is_set():
+            try:
+                q.put(item, timeout=0.05)                     # wakes on get() (not_full) or the cancel timeout
+                return True
+            except queue.Full:
+                pass
+        return False
+
     def run():
+        primary = None
+        src = None
         try:
-            for x in gen: q.put(x)
-        finally: q.put(end)
-    threading.Thread(target=run, daemon=True).start()
-    while True:
-        x = q.get()
-        if x is end: return
-        yield x
+            src = iter(gen)
+            while not cancel.is_set():
+                try:
+                    x = next(src)
+                except StopIteration:
+                    break
+                except BaseException as exc:                  # a real producer failure: keep it for the consumer
+                    primary = exc
+                    break
+                if not put(x):
+                    break
+        except BaseException as exc:                          # iter() or an unexpected worker failure
+            if primary is None: primary = exc
+        finally:
+            close = getattr(src, "close", None) if src is not None else None
+            if close is not None:
+                try:
+                    close()                                   # producer thread owns src: decode can reap
+                except BaseException as exc:
+                    if primary is None: primary = exc         # never mask the primary producer failure
+            result["error"] = primary
+            put(end)                                          # ordered trailer; no-op once the consumer has left
+
+    t = threading.Thread(target=run, daemon=True); t.start()
+    try:
+        while True:
+            x = q.get()
+            if x is end:
+                break
+            yield x
+    finally:
+        cancel.set()                                          # unblock a worker parked on a full queue
+        t.join()                                              # the worker owns and closes gen; never leave it unjoined
+    if result["error"] is not None:
+        raise result["error"]                                 # only after every queued frame has been yielded
