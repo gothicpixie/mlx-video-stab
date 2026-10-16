@@ -284,7 +284,11 @@ which is `on` here because the renderer only accepts local file-backed manifests
 output frames) and `--lock-pause` (default 12 s) release/re-acquire the lock and yield between chunks,
 matching the shared-project etiquette. The lock is acquired before the precomputed smoothing chart and any
 source decode/render, and it is released on **every** path (success and all error cleanup); `on_step(rendered)`
-runs after each output frame so a long render yields at every chunk boundary. The adjacent JSON `lock` block
+runs after each output frame so a long render yields at every chunk boundary. Immediately before each such
+yield the encoder writer queue is drained (`mlxstab.media.Encoder.drain`), so no output frame from the finished
+chunk is still queued for the writer thread; this barrier is deliberately narrow, and ffmpeg/x264 internal
+frame buffering plus the source-decode subprocess/OS pipe buffers can still hold frames, so a yield does not
+fully quiesce all media work. The adjacent JSON `lock` block
 records the backend, chunk, pause, held/release state and acquisition-wait/chunk-pause totals but deliberately
 omits the lock filesystem path (private); it is snapshotted after the lock is released, so `lock.releases`
 counts the chunk yields plus the final release. The Python seam `render_candidate(..., lock=None)` is lock-free,
@@ -327,7 +331,8 @@ edge-strip fractions, aggregate mean/max/pooled values and totals, and `bad_mask
 refusal), manifest/provenance/output hashes, early/extra decode, malformed timeline and unsupported cadence,
 non-finite/failure cleanup, output collision/overwrite refusal, output CFR and the CLI, and the shared heavy
 lock: no real lock acquisition through the `lock=None` seam, `on_step(rendered)` after every output frame,
-release on success and on failure (including a decode-time refusal before the render loop and a report-building
+the encoder queue drained at each chunk boundary and only there, immediately before the yield, release on
+success and on failure (including a decode-time refusal before the render loop and a report-building
 failure after the video is renamed into place), no partial output when `acquire()` itself raises, and the CLI
 `--lock`/`--lock-chunk`/`--lock-pause` defaults and overrides with a patched `HeavyLock`), all with fake
 media/render/lock dependencies.

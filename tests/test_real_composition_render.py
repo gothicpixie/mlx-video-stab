@@ -151,10 +151,14 @@ class FakeEncoder:
         self.path, self.width, self.height, self.fps = str(path), width, height, fps
         self.kwargs = kwargs
         self.frames = []
+        self.drains = 0
         FakeEncoder.instances.append(self)
 
     def write(self, frame):
         self.frames.append(np.array(frame, copy=True))
+
+    def drain(self):
+        self.drains += 1
 
     def close(self):
         Path(self.path).write_bytes(b"fake-mp4:%d" % len(self.frames))
@@ -922,6 +926,7 @@ def test_function_seam_defaults_to_no_lock(tmp_path, monkeypatch):
     assert lock["releases"] == 0 and lock["acquire_wait_s"] == 0.0 and lock["pause_total_s"] == 0.0
     assert "path" not in lock                             # private lock paths are never published
     assert "scope" in lock
+    assert FakeEncoder.instances[0].drains == 0           # no lock, so no chunk barrier is ever requested
 
 
 def test_lock_on_step_after_every_output_frame_and_release_on_success(tmp_path, monkeypatch):
@@ -959,6 +964,41 @@ def test_lock_on_step_release_reacquire_at_chunk_boundaries(tmp_path, monkeypatc
     assert lock.steps == [1, 2, 3]
     assert lock.releases == 2                             # chunk yield at frame 2 + final release
     assert lock.acquires == 2                             # initial + re-acquire after the yield
+
+
+def test_encoder_drained_before_every_chunk_yield_only(tmp_path, monkeypatch):
+    """The encoder queue is drained at each chunk boundary and only there, immediately before the lock yields."""
+    run, _ = _setup(monkeypatch, tmp_path, source_frames=12, output_frames=5)
+    events = []
+
+    class DrainingEncoder(FakeEncoder):
+        def drain(self):
+            super().drain()
+            events.append(("drain", len(self.frames)))
+
+    monkeypatch.setattr(media, "Encoder", DrainingEncoder)
+
+    class YieldingLock(FakeLock):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            self.chunk = int(kwargs.get("chunk", 0))
+
+        def on_step(self, step):
+            super().on_step(step)
+            if self.chunk and step % self.chunk == 0:
+                events.append(("yield", step))
+                self.release()
+                self.acquire()
+
+    lock = YieldingLock(chunk=2, pause_s=0.0)
+    video, report = _out(tmp_path)
+    R.render_candidate(run / "manifest.json", mode="exact_composition", out_video=video,
+                       out_json=report, lock=lock)
+    # Two boundaries (frames 2 and 4): each drain precedes its yield, and no drain happens on frames 1/3/5.
+    assert events == [("drain", 2), ("yield", 2), ("drain", 4), ("yield", 4)]
+    assert lock.steps == [1, 2, 3, 4, 5]
+    assert DrainingEncoder.instances[0].drains == 2
+    assert lock.releases == 3                             # two chunk yields + final release
 
 
 def test_lock_released_on_failure(tmp_path, monkeypatch):

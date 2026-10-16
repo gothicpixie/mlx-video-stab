@@ -88,13 +88,36 @@ class Encoder:
         import queue, threading
         self.p = subprocess.Popen(cmd + [str(path)], stdin=subprocess.PIPE)
         self.q = queue.Queue(6)                                   # writer thread: encoding overlaps with the next frame's GPU work
+        self._writer_error = None
         def run():
-            while True:
-                b = self.q.get()
-                if b is None: return
-                self.p.stdin.write(b)
+            try:
+                while True:
+                    b = self.q.get()
+                    try:
+                        if b is None: return
+                        self.p.stdin.write(b)
+                    finally:
+                        self.q.task_done()                        # unblock drain() as each frame reaches ffmpeg
+            except BaseException as exc:                          # write failed (e.g. ffmpeg died): unblock drain()
+                self._writer_error = exc
+                while True:
+                    try: self.q.get_nowait()
+                    except queue.Empty: break
+                    else: self.q.task_done()
+                raise
         self.t = threading.Thread(target=run, daemon=True); self.t.start()
     def write(self, frame): self.q.put(np.ascontiguousarray(frame, np.uint8).tobytes())
+    def drain(self):
+        """Barrier: block until every queued frame has been handed to ffmpeg's stdin (queue empty, writer idle).
+
+        Lets a chunked shared-lock yield release the lock only after the writer thread has consumed the
+        completed chunk, instead of leaving up to ``Queue(6)`` frames queued. Raises the writer's exception
+        (e.g. a broken pipe) rather than hanging when the writer has already failed. Note this drains only
+        this queue and the stdin buffer: ffmpeg/x264 internal frame buffering still spans the yield.
+        """
+        self.q.join()
+        if self._writer_error is not None: raise self._writer_error
+        self.p.stdin.flush()
     def close(self): self.q.put(None); self.t.join(); self.p.stdin.close(); self.p.wait()
 
 

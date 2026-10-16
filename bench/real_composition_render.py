@@ -100,8 +100,12 @@ LOCK_SCOPE_NOTE = (
     "reused from tools/heavy.py; a local ignored out/ fallback is used when unavailable). The lock is acquired "
     "before the precomputed smoothing chart and every source decode/render step and released in all paths; "
     "lock.on_step(rendered) is called after each output frame, so a long render yields for --lock-pause seconds "
-    "at every --lock-chunk boundary. Acquisition waits and chunk pauses are accounted separately and are not "
-    "processing time. The lock filesystem path is intentionally omitted from this report."
+    "at every --lock-chunk boundary. Immediately before each such yield the encoder writer queue is drained "
+    "(mlxstab.media.Encoder.drain), so no output frame from the finished chunk is still queued for the writer; "
+    "ffmpeg/x264 internal frame buffering and the source-decode subprocess/pipe buffers can still hold frames, "
+    "so the yield does not fully quiesce all media work. Acquisition waits and chunk pauses are accounted "
+    "separately and are not processing time. The lock filesystem path is intentionally omitted from this "
+    "report."
 )
 DEINTERLACE_FILTER = "bwdif=mode=send_field:parity=auto:deint=all"
 CFR_TOL_S = 1e-5
@@ -785,6 +789,15 @@ def dense_vs_exact_errors(composed_map, mot, plan, cfg, t, *, points, cells, hig
     return stats, err
 
 
+def at_lock_chunk_boundary(lock, step):
+    """Mirror ``bench.heavylock.HeavyLock.on_step``'s yield condition without mutating the lock.
+
+    ``chunk <= 0`` (or a compatible object without ``chunk``) never yields, so a barrier is never requested.
+    """
+    chunk = getattr(lock, "chunk", 0)
+    return bool(chunk) and bool(step) and step % int(chunk) == 0
+
+
 def render_candidate(manifest_path, *, mode, out_video, out_json=None, crf=DEFAULT_CRF,
                      preset=DEFAULT_PRESET, lock=None):
     """Render one explicit composition candidate MP4 from a captured run manifest.
@@ -793,7 +806,8 @@ def render_candidate(manifest_path, *, mode, out_video, out_json=None, crf=DEFAU
     builds it from ``--lock/--lock-chunk/--lock-pause`` and passes it in, while the Python seam defaults to
     ``None`` so unit tests never acquire a real shared lock. When supplied it is acquired before the smoothing
     chart and any source decode/render, ``on_step(rendered)`` is called after every output frame, and it is
-    released on every path.
+    released on every path. At each ``chunk`` boundary the encoder writer queue is drained first so the yield
+    does not overlap this render's own queued encoding work.
     """
     _require(mode in SUPPORTED_MODES, "unsupported_mode",
              f"mode must be one of {SUPPORTED_MODES}, got {mode!r}")
@@ -920,6 +934,16 @@ def render_candidate(manifest_path, *, mode, out_video, out_json=None, crf=DEFAU
                                                  f"{type(exc).__name__}: {exc}") from exc
             rendered += 1
             if lock is not None:
+                # Before a chunk yield, wait for the writer thread to hand the finished chunk to ffmpeg so the
+                # released shared lock is not still competing with our own queued encoding work.
+                if at_lock_chunk_boundary(lock, rendered):
+                    try:
+                        encoder.drain()
+                    except Exception as exc:
+                        raise RealCompositionRenderError(
+                            "encode_failure",
+                            f"encoder drain failed before lock yield at output frame {rendered}: "
+                            f"{type(exc).__name__}: {exc}") from exc
                 lock.on_step(rendered)   # yield at chunk boundaries; no-op for chunk == 0
 
         extra = sum(1 for _ in frames_iter)
