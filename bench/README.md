@@ -67,6 +67,8 @@ Useful options:
 
 - `--start`, `--duration` – precise source window.
 - `--eval-iters`, `--eval-downscale`, `--eval-flow-dtype`, `--eval-corr-dtype` – evaluation flow.
+- `--eval-tracks` – also measure output motion with independent sparse KLT features and report its agreement
+  with RAFT on the same input/output pair. This is opt-in and requires OpenCV.
 - `--output-fps VALUE` / `--eval-vf VALUE` – override the case output cadence (rational, or `native`) and the
   evaluation `fps` filter. The resolved values are recorded in `case` and folded into `experiment_identity`.
 - `--overwrite` – reuse an existing run directory. By default an existing `manifest.json` is protected and the
@@ -125,6 +127,46 @@ Useful options:
   shared-project etiquette is ~30 frames with a ~12 s gap) and re-acquires; acquisition wait and pause are
   accounted separately from processing. The default holds the lock for the whole run and always releases in
   a `finally`; cancellation writes a `cancelled` manifest before re-raising.
+
+## Independent sparse-track evaluation cross-check
+
+The benchmark's default jitter evaluator uses RAFT, the same flow family used to stabilize the clip. To expose
+single-estimator bias, `--eval-tracks` adds an independent sparse KLT plus robust similarity estimate during
+the same decode pass. Output tracks honor the decoded no-source mask: invalid source and destination regions
+are excluded conservatively, and out-of-frame tracks are rejected. If any pair fails, the KLT path jitter and
+stability are reported as unavailable; failed pairs are never replaced by identity or removed and joined as if
+they were adjacent. The report includes support and fallback counts. Agreement is a cross-check between two
+estimators, not ground truth; KLT can fail in blur, low texture, rolling shutter or large motion. It does not
+change stabilization behavior or defaults.
+
+```bash
+python -I bench/run_case.py --case baseline --source /path/to/clip.MTS \
+    --start 60 --duration 2 --dump-motion --eval-tracks --out-dir out/bench/klt_check
+```
+
+For direct input/output evaluation, `bench.evaluate` accepts `--tracks` and uses the optional output mask for
+the KLT estimator too:
+
+```bash
+python -m bench.evaluate input.MTS stabilized.mp4 mask.mp4 --start 60 --duration 2 \
+    --vf fps=30000/1001 --tracks --json out/bench/evaluation_with_tracks.json
+```
+
+The offline `bench.track_agreement_audit` compares a cached decoded frame window to a captured
+`motion_r0.npz` without RAFT inference or media decoding. Pass the successful run manifest to verify that the
+frame cache's content digest, source hash, time window, cadence, dimensions and motion file all match that run:
+
+```bash
+python -m bench.track_agreement_audit \
+    --frames-npz out/bench/FRAME_CACHE.npz \
+    --motion-npz out/bench/klt_check/motion_r0.npz \
+    --manifest out/bench/klt_check/manifest.json \
+    --out out/bench/klt_check/track_agreement.json
+```
+
+The audit reports point-displacement differences at five frame-spanning probes and global scale/rotation
+deltas, alongside the input path-jitter cross-check. These are measurements on a single window, not independent
+samples or evidence that stabilization improved. Keep caches, motion geometry and reports in ignored `out/`.
 
 ## Cadence
 

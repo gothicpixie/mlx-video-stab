@@ -288,6 +288,97 @@ def test_evaluate_clip_resets_flow_each_clip_and_reports_normalized_timeline(mon
     assert m2["_masks"] == 3
 
 
+def test_evaluate_clip_tracks_enabled_attaches_independent_metrics(monkeypatch):
+    """`--eval-tracks` measures the independent KLT estimator in the same single decode pass (opt-in)."""
+    pytest.importorskip("cv2")
+    rng = np.random.default_rng(0)
+    base = rng.integers(0, 256, (200, 200, 3), dtype=np.uint8)
+    frames = [np.ascontiguousarray(base[50:146, 50 + t:50 + t + 96]) for t in range(6)]
+    monkeypatch.setattr(runner.media, "probe", lambda p: {"fps": 30.0, "width": 96, "height": 96})
+    monkeypatch.setattr(runner.media, "decode", lambda *a, **k: (iter(frames), 30.0, (96, 96)))
+
+    def fake_measure(fs, flow, W, H, fps, masks=None, on_step=None):
+        n = sum(1 for _ in fs)
+        return {"stability": 1.0, "jitter_px": 0.0, "wobble_px": 0.0, "fallback_frames": 0, "support_frames": n}
+    monkeypatch.setattr(runner.metrics, "measure", fake_measure)
+
+    m, _ = runner.evaluate_clip("a.mp4", {}, None, None, None, _FakeFlow(), tracks_enabled=True)
+    assert m["tracks"]["method"] == "klt_similarity"
+    assert m["tracks"]["n_frames"] == 6 and m["tracks"]["support_frames"] == 5
+    assert m["tracks"]["fallback_frames"] == 0
+
+    m2, _ = runner.evaluate_clip("a.mp4", {}, None, None, None, _FakeFlow())
+    assert "tracks" not in m2                              # opt-in only
+
+
+def test_evaluate_clip_tracks_consume_the_same_invalid_mask_stream(monkeypatch):
+    pytest.importorskip("cv2")
+    rng = np.random.default_rng(2)
+    base = rng.integers(0, 256, (200, 200, 3), dtype=np.uint8)
+    frames = [np.ascontiguousarray(base[50:146, 50 + t:50 + t + 96]) for t in range(5)]
+    invalid = [np.full((96, 96, 3), 255, np.uint8) for _ in frames]
+    monkeypatch.setattr(runner.media, "probe", lambda p: {"fps": 30.0, "width": 96, "height": 96})
+    monkeypatch.setattr(runner.media, "decode",
+                        lambda p, *a, **k: (iter(invalid if p == "mask.mp4" else frames), 30.0, (96, 96)))
+
+    def fake_measure(fs, flow, W, H, fps, masks=None, on_step=None):
+        n = 0
+        for _ in fs:
+            if masks is not None:
+                next(masks)
+            n += 1
+        return {"stability": 1.0, "jitter_px": 0.0, "wobble_px": 0.0,
+                "fallback_frames": 0, "support_frames": n - 1}
+    monkeypatch.setattr(runner.metrics, "measure", fake_measure)
+
+    m, _ = runner.evaluate_clip("a.mp4", {}, None, None, None, _FakeFlow(),
+                                mask_path="mask.mp4", tracks_enabled=True)
+    assert m["tracks"]["fallback_frames"] == 4
+    assert m["tracks"]["jitter_px"] is None
+    assert "failed pair" in m["tracks"]["unavailable_reason"]
+
+
+def test_run_case_records_independent_evaluator_agreement_when_enabled(tmp_path, monkeypatch):
+    _patch_provenance(monkeypatch)
+    _patch_media(monkeypatch)
+    src = tmp_path / "in.mp4"; src.write_bytes(b"x")
+    w = tmp_path / "w.safetensors"; w.write_bytes(b"w")
+    monkeypatch.setattr(runner, "RaftFlow", _FakeFlow)
+    monkeypatch.setattr(runner, "stabilize", lambda *a, **k: {
+        "frames": 3, "decoded_frames": 3, "rendered_frames": 3,
+        "timing_s": {"analysis": 1.0, "plan": 0.1, "render": 0.2},
+        "fps": 30.0, "fallback_frames": 0, "diagnostics_total_s": 0.0, "observed_nondiag_render_s": 0.2})
+
+    man = runner.run_case(runner.RunOptions(case="baseline", source=str(src), weights=str(w),
+                                            out_dir=str(tmp_path / "tr"), lock="off", seed=17, command=["run_case"],
+                                            eval_tracks=True))
+    assert man["status"] == "success", man.get("error")
+    assert man["evaluation"]["independent_tracks"]["enabled"] is True
+    assert man["evaluation"]["independent_tracks"]["params"]["seed"] == 17
+    assert man["metrics"]["input"]["tracks"]["method"] == "klt_similarity"
+    ag = man["metrics"]["evaluator_agreement"]
+    assert ag["reliable"] is False and ag["raft_jitter_ratio"] is None   # 4x4 blank frames: no support
+    assert "estimators" in ag["note"]
+
+
+def test_run_case_omits_tracks_by_default(tmp_path, monkeypatch):
+    _patch_provenance(monkeypatch)
+    _patch_media(monkeypatch)
+    src = tmp_path / "in.mp4"; src.write_bytes(b"x")
+    w = tmp_path / "w.safetensors"; w.write_bytes(b"w")
+    monkeypatch.setattr(runner, "RaftFlow", _FakeFlow)
+    monkeypatch.setattr(runner, "stabilize", lambda *a, **k: {
+        "frames": 3, "decoded_frames": 3, "rendered_frames": 3,
+        "timing_s": {"analysis": 1.0, "plan": 0.1, "render": 0.2},
+        "fps": 30.0, "fallback_frames": 0, "diagnostics_total_s": 0.0, "observed_nondiag_render_s": 0.2})
+    man = runner.run_case(runner.RunOptions(case="baseline", source=str(src), weights=str(w),
+                                            out_dir=str(tmp_path / "notr"), lock="off", command=["run_case"]))
+    assert man["status"] == "success"
+    assert man["evaluation"]["independent_tracks"]["enabled"] is False
+    assert "tracks" not in man["metrics"]["input"]
+    assert "evaluator_agreement" not in man["metrics"]
+
+
 # --------------------------------------------------------------------------------------
 # lock accounting
 # --------------------------------------------------------------------------------------
@@ -646,6 +737,20 @@ def test_cli_forwards_dump_plan_option(tmp_path, monkeypatch, capsys):
     assert captured["opts"].dump_plan is True
     assert cli.main(["--source", "synthetic", "--lock", "off", "--out-dir", str(tmp_path / "d2")]) == 0
     assert captured["opts"].dump_plan is False
+
+
+def test_cli_forwards_eval_tracks_option(tmp_path, monkeypatch, capsys):
+    from bench import run_case as cli
+    captured = {}
+
+    def fake_run_case(opts):
+        captured["opts"] = opts
+        return {"status": "success", "case": {"name": opts.case}, "outputs": {"manifest": "m"}, "error": None}
+    monkeypatch.setattr(cli.runner, "run_case", fake_run_case)
+    assert cli.main(["--eval-tracks", "--source", "synthetic", "--lock", "off", "--out-dir", str(tmp_path / "et")]) == 0
+    assert captured["opts"].eval_tracks is True
+    assert cli.main(["--source", "synthetic", "--lock", "off", "--out-dir", str(tmp_path / "et2")]) == 0
+    assert captured["opts"].eval_tracks is False
 
 
 def test_cli_forwards_dump_motion_option(tmp_path, monkeypatch, capsys):

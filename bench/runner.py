@@ -17,11 +17,12 @@ import sys
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from itertools import tee
 from pathlib import Path
 
 import mlx.core as mx
 
-from mlxstab import media, metrics, synth, warpmetrics
+from mlxstab import media, metrics, synth, tracks, warpmetrics
 from mlxstab.stabilize import Config, RaftFlow, stabilize
 from mlxstab.__main__ import DEFAULT_WEIGHTS
 
@@ -48,6 +49,7 @@ class RunOptions:
     eval_flow_dtype: str = "float32"
     eval_corr_dtype: str = "float32"
     eval_vf: str | None = None
+    eval_tracks: bool = False         # opt-in: also measure the independent sparse-KLT estimator + agreement
     output_fps: str | None = None
     diag_every: int = 0
     dump_plan: bool = False            # capture the retained repeat's Plan as a compressed, non-pickle NPZ
@@ -92,11 +94,13 @@ def _normalized_timeline(n, fps, kind="frame_index_normalized"):
     return {"kind": kind, "frames": int(n), "first_s": 0.0 if n else None, "last_s": last}
 
 
-def evaluate_clip(path, info, start, duration, vf, flow, mask_path=None, on_step=None):
+def evaluate_clip(path, info, start, duration, vf, flow, mask_path=None, on_step=None, tracks_enabled=False, seed=0):
     """Measure one clip with a cold flow state. Returns (metrics, meta).
 
     The decode does not expose source PTS, so ``meta['timeline']`` is normalised frame-index time. Encoded
-    output/mask timelines are measured separately with ``media.frame_pts``."""
+    output/mask timelines are measured separately with ``media.frame_pts``. With ``tracks_enabled`` the same
+    single decode pass also feeds the independent sparse-KLT estimator, whose metrics are attached under
+    ``metrics['tracks']``."""
     frames, fps, (W, H) = media.decode(path, info, start, duration, vf=vf)
     count = {"n": 0}
 
@@ -115,7 +119,14 @@ def evaluate_clip(path, info, start, duration, vf, flow, mask_path=None, on_step
                 yield (m[..., 0] > 127)
         masks = safe_masks()
     flow.reset()
-    m = metrics.measure(counted(), flow, W, H, fps, masks=masks, on_step=on_step)
+    acc = tracks.TrackAccumulator(W, H, fps, seed=seed) if tracks_enabled else None
+    track_masks = None
+    if acc is not None and masks is not None:
+        track_masks, masks = tee(masks)
+    evaluated_frames = acc.wrap(counted(), track_masks) if acc else counted()
+    m = metrics.measure(evaluated_frames, flow, W, H, fps, masks=masks, on_step=on_step)
+    if acc:
+        m["tracks"] = acc.metrics()
     meta = {"frames": count["n"], "fps": float(fps), "width": int(W), "height": int(H),
             "duration_s": (count["n"] / fps) if fps else None,
             "timeline": _normalized_timeline(count["n"], fps)}
@@ -148,6 +159,8 @@ def validate_options(opts: RunOptions) -> list[str]:
         errs.append("--eval-iters must be >= 1")
     if opts.eval_downscale < 1:
         errs.append("--eval-downscale must be >= 1")
+    if opts.eval_tracks and not tracks.has_cv2():
+        errs.append("--eval-tracks needs OpenCV (cv2), which is not available in this environment")
     if opts.diag_every < 0:
         errs.append("--diag-every must be >= 0")
     if opts.lock not in ("auto", "on", "off"):
@@ -317,11 +330,14 @@ def run_case(opts: RunOptions) -> dict:
         man["timing"]["provenance_s"] = time.perf_counter() - tp
 
         eval_cfg_kwargs = {"mesh": [0, 0], "rs_rows": 18, "model": "similarity", "step": 8, "seed": 0}
+        track_eval_params = {**tracks.DEFAULTS, "seed": opts.seed}
         man["evaluation"] = {
             "flow_iters": opts.eval_iters, "flow_downscale": opts.eval_downscale,
             "flow_dtype": opts.eval_flow_dtype, "corr_dtype": opts.eval_corr_dtype,
             "reset": "per_clip", "vf": eval_vf, "metrics_version": man["metrics"]["definitions_version"],
             "metric_config": eval_cfg_kwargs,
+            "independent_tracks": ({"enabled": True, "estimator": "klt_similarity", "params": track_eval_params}
+                                   if opts.eval_tracks else {"enabled": False}),
             "note": ("evaluation uses a fresh RaftFlow reset at each clip boundary; mesh disabled and rows from Config. "
                      "Input timeline is normalised frame-index time; output/mask timelines are measured ffprobe PTS."),
         }
@@ -462,9 +478,11 @@ def run_case(opts: RunOptions) -> dict:
         ev_t0 = time.perf_counter()
         eval_flow = RaftFlow(opts.weights, opts.eval_iters, opts.eval_downscale, True,
                              getattr(mx, opts.eval_corr_dtype), getattr(mx, opts.eval_flow_dtype), None)
-        m_in, meta_in = evaluate_clip(str(src), info, opts.start, opts.duration, eval_vf, eval_flow, on_step=gate)
+        m_in, meta_in = evaluate_clip(str(src), info, opts.start, opts.duration, eval_vf, eval_flow,
+                                      on_step=gate, tracks_enabled=opts.eval_tracks, seed=opts.seed)
         m_out, meta_out = evaluate_clip(str(out_video), out_info, None, None, eval_vf, eval_flow,
-                                        mask_path=str(out_mask), on_step=gate)
+                                        mask_path=str(out_mask), on_step=gate,
+                                        tracks_enabled=opts.eval_tracks, seed=opts.seed)
         # Count the complete filtered mask, including any tail the metric loop did not consume.
         # Native output may be 59.94 fps while evaluation is 29.97 fps: compare each at its own clock.
         mask_meta = decode_meta(out_mask, mask_info, None, None, vf=eval_vf)
@@ -481,6 +499,11 @@ def run_case(opts: RunOptions) -> dict:
                                                       "video/mask PTS is separately checked at the encoded frame rate. Original "
                                                       "source PTS and VFR timing are not verified by this CFR benchmark.")
         man["metrics"]["reliability"] = MF.reliability(m_in, m_out, man["metrics"]["cadence"])
+        if opts.eval_tracks:
+            man["metrics"]["evaluator_agreement"] = tracks.agreement(m_in, m_out, m_in.get("tracks"), m_out.get("tracks"))
+            man["metrics"]["evaluator_agreement"]["note"] = (
+                "independent sparse-KLT estimator (mlxstab.tracks) vs the RAFT metrics; a cross-check between two "
+                "estimators, not ground truth. KLT fails on low texture, blur and large displacement.")
         man["runtime_s"]["evaluation"] = time.perf_counter() - ev_t0
         man["timing"]["end_to_end_with_evaluation_s"] = man["timing"]["end_to_end_stabilization_s"] + man["runtime_s"]["evaluation"]
 

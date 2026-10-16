@@ -76,6 +76,8 @@ def build_parser():
     p.add_argument("--eval-downscale", type=int, default=2, help="downscale for the evaluation flow")
     p.add_argument("--eval-flow-dtype", choices=["float32", "float16"], default="float32")
     p.add_argument("--eval-corr-dtype", choices=["float32", "float16"], default="float32")
+    p.add_argument("--eval-tracks", action="store_true",
+                   help="also measure the independent sparse-KLT estimator and report RAFT/track agreement (opt-in)")
     p.add_argument("--diag-every", type=int, default=0,
                    help="sample complete-warp diagnostics every K rendered frames from the actual plan (0=off)")
     p.add_argument("--dump-plan", action="store_true",
@@ -135,6 +137,7 @@ def main(argv=None):
         case=a.case, source=a.source, weights=a.weights, start=a.start, duration=a.duration, out_dir=a.out_dir,
         overwrite=a.overwrite, seed=a.seed, repeats=a.repeats, eval_iters=a.eval_iters, eval_downscale=a.eval_downscale,
         eval_flow_dtype=a.eval_flow_dtype, eval_corr_dtype=a.eval_corr_dtype, eval_vf=a.eval_vf, output_fps=a.output_fps,
+        eval_tracks=a.eval_tracks,
         diag_every=a.diag_every, dump_plan=a.dump_plan, dump_motion=a.dump_motion, lock=a.lock,
         lock_chunk=a.lock_chunk, lock_pause_s=a.lock_pause,
         synth_frames=a.synth_frames, synth_w=a.synth_w, synth_h=a.synth_h, synth_fps=a.synth_fps,

@@ -2464,3 +2464,38 @@ and select no ratio. `1.10` remains **opt-in for user-selected framing only**.
 
 Next step. Investigate a per-clip minimal crop policy with a strict crop cap and a measured jitter tradeoff, or
 drop it if no settings meet the gate; do not tune on these reserved windows.
+
+## Independent sparse-track evaluation cross-check (2026-10-16)
+
+Implementation. The evaluator now has an **opt-in** sparse KLT plus robust-similarity estimator in
+`mlxstab/tracks.py`. `--eval-tracks` wires it into the benchmark's same decode pass; `bench.evaluate --tracks`
+adds it to direct input/output evaluation; `bench.track_agreement_audit` compares it with a captured RAFT motion
+payload without another flow inference. This addresses the plan's requirement to judge at least some results
+with independent tracks. It changes no stabilization fit or default. Source/destination no-source masks use the
+existing conservative evaluator semantics, out-of-frame LK endpoints are dropped, and KLT path metrics are
+unavailable if any pair failed. We do not turn a failed pair into identity or collapse gaps into a false
+continuous path. The offline audit verifies a frame cache's content digest and can match its source hash, time
+window, frame count, dimensions, cadence and motion file to a successful run manifest.
+
+Verification. `tests/test_tracks.py`, `tests/test_track_agreement_audit.py` and `tests/test_bench_runner.py`
+cover transform direction, known translation, outliers, blank/partial failures, mask handling, bounds, cache
+and manifest mismatch, single-pass wiring and opt-in manifest identity. The focused set passed **84 tests**;
+`.claude/verify.sh` passed the full **1,531-test** suite. CodeGraph was synced after the source edits; it found
+no linked tests, so the focused tests were run directly as well.
+
+Real cross-check. On local `00176.MTS` (source SHA-256
+`e4b1f80d54dfa9089741486be297c6fe74d754fe127ec04dfe5a7edcf8d9fbb3`), window 60-62 s, the independently
+decoded 120-frame 1920x1080/59.94p cache was verified against the successful run manifest and captured
+`motion_r0.npz`. KLT fit all 119 pairs (mean 499.5 tracks and 0.918 inlier fraction). Its input path jitter was
+**0.41140 px** versus RAFT's **0.40619 px**; five-probe global-transform displacement EPE was **0.1343 px
+mean / 0.2890 p95 / 0.4478 max**. This is cross-estimator agreement on one short inferred window, not ground
+truth.
+
+Input/output check. The same source window, baseline stabilized output and decoded no-source mask were evaluated
+at `30000/1001` by `bench.evaluate --tracks`: RAFT jitter moved **0.86233 -> 0.04843 px** and KLT jitter
+moved **0.86797 -> 0.07187 px**. Both estimators had support on all 59 evaluation pairs, no failed fits, and
+agreed that output jitter improved; their output/input ratios were **0.0562** (RAFT) and **0.0828** (KLT).
+The estimator agreement flag is true, while the ratio relative gap is 0.322. This supports the direction of the
+metric result on this single two-second window only; it says nothing about other scenes, intentional-motion
+preservation, local mesh/row distortion, visual preference, or superiority to PyTorch. Reports and pixel caches
+remain local under ignored `out/bench/`.
