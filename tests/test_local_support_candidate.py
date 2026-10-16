@@ -9,6 +9,7 @@ from bench.local_support_candidate import (
     local_support_alpha,
     local_support_failure,
 )
+from mlxstab.warpmetrics import full_support_mask
 
 
 def _identity_map(height, width):
@@ -22,14 +23,14 @@ def test_local_backoff_repairs_recoverable_border_and_preserves_distant_map():
     full_src = global_src.copy()
     full_src[..., 0] -= 2.0
 
-    unsupported, unfixable = local_support_failure(full_src, global_src, width, height)
+    unsupported, unfixable = local_support_failure(full_src, global_src, width, height, kernel="bilinear")
     assert unsupported[:, :2].all()
     assert not unsupported[:, 2:].any()
     assert not unfixable.any()
 
     alpha = local_support_alpha(unsupported, radius_px=3.0)
     candidate = blend_source_maps(full_src, global_src, alpha)
-    _, candidate_unfixable = local_support_failure(candidate, global_src, width, height)
+    _, candidate_unfixable = local_support_failure(candidate, global_src, width, height, kernel="bilinear")
     assert not candidate_unfixable.any()
     assert alpha[:, :2].max() == 0.0
     assert np.array_equal(candidate[:, 8:], full_src[:, 8:])
@@ -42,7 +43,7 @@ def test_local_backoff_does_not_claim_to_fix_global_only_invalid_pixels():
     global_src[..., 0] -= 1.0
     full_src = global_src.copy()
     full_src[..., 0] -= 2.0
-    unsupported, unfixable = local_support_failure(full_src, global_src, width, height)
+    unsupported, unfixable = local_support_failure(full_src, global_src, width, height, kernel="bilinear")
     assert unsupported[:, 1:3].all()
     assert not unsupported[:, 0].any()
     assert unfixable[:, 0].all()
@@ -109,7 +110,7 @@ def test_nonfinite_full_map_is_replaced_only_where_local_alpha_is_zero():
     global_src = _identity_map(3, 4)
     full_src = global_src.copy()
     full_src[1, 1, 0] = np.nan
-    unsupported, unfixable = local_support_failure(full_src, global_src, 4, 3)
+    unsupported, unfixable = local_support_failure(full_src, global_src, 4, 3, kernel="bilinear")
     assert unsupported[1, 1]
     assert not unfixable.any()
     alpha = np.ones((3, 4), np.float32)
@@ -117,3 +118,26 @@ def test_nonfinite_full_map_is_replaced_only_where_local_alpha_is_zero():
     candidate = blend_source_maps(full_src, global_src, alpha)
     assert np.isfinite(candidate).all()
     assert np.array_equal(candidate[1, 1], global_src[1, 1])
+
+
+def test_full_support_mask_matches_the_reported_kernel_coverage():
+    from mlxstab import warpmetrics
+
+    src = _identity_map(13, 19)
+    for kernel in warpmetrics.KERNELS:
+        mask = full_support_mask(src, 13, 19, kernel)
+        report = warpmetrics.diagnose(src, 13, 19, kernel=kernel)
+        assert mask.mean() == pytest.approx(report["coverage"][f"full_support_{kernel}_frac"])
+    fractional = src.copy()
+    fractional[..., 0] += 0.25
+    assert full_support_mask(fractional, 13, 19, "bilinear").sum() > \
+        full_support_mask(fractional, 13, 19, "lanczos3").sum()
+
+
+def test_full_support_uses_fractional_nonzero_taps_and_rejects_nonfinite():
+    src = _identity_map(6, 8)
+    src[2, 3, 0] = -0.25
+    src[3, 4, 1] = np.nan
+    mask = full_support_mask(src, 6, 8, "bilinear")
+    assert not mask[2, 3]  # center is inside [-.5, W-.5], but the -1 tap carries weight
+    assert not mask[3, 4]

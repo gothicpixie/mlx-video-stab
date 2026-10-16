@@ -70,6 +70,32 @@ def _axis_full_support(coord, n, kernel, tol):
     return full
 
 
+def full_support_mask(src, H=None, W=None, kernel="lanczos3", tol=1e-6):
+    """Per-output-pixel mask for complete interpolation-kernel support inside the source image.
+
+    This uses the same tap locations and ``abs(weight) <= tol`` zero-tap rule as :func:`diagnose`. ``src`` must
+    be an ``[H,W,2]`` source-coordinate field. The public mask lets offline candidate renderers act on the actual
+    sampler footprint instead of approximating it with center-in-bounds checks.
+    """
+    a = np.asarray(src)
+    if a.ndim != 3 or a.shape[-1] != 2:
+        raise ValueError("src must have shape [H,W,2]")
+    h, w = a.shape[:2]
+    H = h if H is None else int(H)
+    W = w if W is None else int(W)
+    if H < 1 or W < 1:
+        raise ValueError("source dimensions must be positive")
+    if kernel not in KERNELS:
+        raise ValueError(f"unknown kernel {kernel!r}; expected one of {KERNELS}")
+    tolerance = float(tol)
+    if not np.isfinite(tolerance) or tolerance < 0.0:
+        raise ValueError("tol must be finite and non-negative")
+    finite = np.isfinite(a).all(axis=-1)
+    sx, sy = a[..., 0], a[..., 1]
+    return (finite & _axis_full_support(sx, W, kernel, tolerance)
+            & _axis_full_support(sy, H, kernel, tolerance))
+
+
 def _frac(mask):
     mask = np.asarray(mask, bool)
     return float(mask.mean()) if mask.size else None

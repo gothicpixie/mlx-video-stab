@@ -10,18 +10,17 @@ from collections import deque
 
 import numpy as np
 from scipy.ndimage import distance_transform_edt
+from mlxstab.warpmetrics import full_support_mask
 
 
-def _source_valid(src, width, height):
+def _source_valid(src, width, height, kernel):
     src = np.asarray(src)
     if src.ndim != 3 or src.shape[-1] != 2:
         raise ValueError("source map must have shape [H,W,2]")
-    x, y = src[..., 0], src[..., 1]
-    return (np.isfinite(x) & np.isfinite(y) & (x >= 0.0) & (x <= width - 1)
-            & (y >= 0.0) & (y <= height - 1))
+    return full_support_mask(src, height, width, kernel=kernel)
 
 
-def local_support_failure(full_src, global_src, width, height):
+def local_support_failure(full_src, global_src, width, height, kernel="lanczos3"):
     """Return pixels locally recoverable by dropping residuals, and pixels global motion cannot recover."""
     full_src = np.asarray(full_src)
     global_src = np.asarray(global_src)
@@ -29,8 +28,8 @@ def local_support_failure(full_src, global_src, width, height):
         raise ValueError("full and global maps must share shape [H,W,2]")
     if full_src.shape[:2] != (height, width):
         raise ValueError("source-map dimensions disagree with width/height")
-    full_valid = _source_valid(full_src, width, height)
-    global_valid = _source_valid(global_src, width, height)
+    full_valid = _source_valid(full_src, width, height, kernel)
+    global_valid = _source_valid(global_src, width, height, kernel)
     return ~full_valid & global_valid, ~full_valid & ~global_valid
 
 
