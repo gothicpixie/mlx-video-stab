@@ -2888,8 +2888,17 @@ localization and local image resampling before considering any map regularizatio
 
 This window was selected before running the candidate. Baseline-only anchors at t109 and t114 both passed the
 reliability gate with zero fit fallbacks and 29/29 supported output pairs. Their input motion was 0.452 and
-0.823 px/frame, respectively. The full 10 s baseline capture is running at
-`out/bench/e02_baseline_s24_t109_10s/`; its paired `source_highpass` render has not been inspected or run yet.
+0.823 px/frame, respectively. The full 10 s baseline capture succeeded at
+`out/bench/e02_baseline_s24_t109_10s/`, at code revision `e55336452fdeb98c51d1184d2933010104bcaef1` and config
+digest `feef17a4cf8d3bf85c900c599465e8df800f022a6a7ac8cd4ab0fb9e7d78f9ab`. It contains 600 deinterlaced fields,
+300 aligned outputs at 30000/1001 fps, captured plan/motion, and zero fit fallbacks. The reliability gate passed:
+299/299 supported pairs, zero fallbacks, and 0.559 px/frame mean input RAFT motion. Masked baseline output jitter
+is 0.228 px RAFT and 1.521 px KLT; raw input jitter is 0.538 px RAFT and 1.993 px KLT. The candidate render
+is now running from this captured plan; no candidate metrics have been inspected.
+
+The baseline stabilization took 1059 s and evaluation 553 s on this M5. This cost is recorded because the
+paired render/evaluation has the same full-window scope; avoid additional full-window repeats unless the result
+is inconclusive or needed to verify a failure.
 
 DeepSeek Flash via Pi reviewed the protocol before candidate results existed. It endorsed the disjoint paired
 window as a reproducibility check, while warning that one new interval cannot establish generality, baseline
