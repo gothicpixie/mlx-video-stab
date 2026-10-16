@@ -2691,3 +2691,63 @@ bottom/right border residual placement (e.g. a border-aware or coverage-constrai
 further distinct source/window with the matched masked evaluator and a position-reversed review. Script and
 report are ignored under `out/bench/e02_source_highpass_00177_t090_10s_heldout/` (`mask_attribution.py`,
 `mask_attribution.json`); no production wiring, default change or mode selection follows.
+
+## E02 source_highpass held-out test on `STREAM_00013.MTS` t032–042 (2026-10-16)
+
+This is the third-source check after `STREAM_00016.MTS` t120–130 proved too static. The proxy screen shortlisted
+`STREAM_00013.MTS`; baseline-only RAFT/KLT anchors at t032 and t039 measured 1.854 and 2.218 px/frame,
+respectively, with zero fit fallbacks and both evaluators agreeing that the baseline reduces jitter. A t048
+anchor measured 29.574 px/frame and KLT was unreliable, so the adjacent t039–049 window was rejected. DeepSeek
+via Pi independently recommended t032–042: sustained, trackable motion, two reliable checkpoints, and no fast
+pan at t042 onward. This selection was made before evaluating the candidate.
+
+The 10 s baseline capture `out/bench/e02_baseline_s13_t032_10s/manifest.json` succeeded at revision
+`4a9f36af391ad2031cbdd2c7b08c14663856c680`, with config digest
+`feef17a4cf8d3bf85c900c599465e8df800f022a6a7ac8cd4ab0fb9e7d78f9ab`, 300 output frames, 600 interlaced
+analysis fields, zero output fit fallbacks, and reliable RAFT/KLT metrics. Input motion was 2.457 px/frame;
+masked baseline output jitter was 0.582 px RAFT and 0.724 px KLT. The candidate was rendered by the unchanged
+`source_highpass` composition path to
+`out/bench/e02_source_highpass_s13_t032_10s/composition_source_highpass_r0.mp4`.
+
+Geometry and pairing gates passed. The dense-grid approximation differed from direct exact composition by at
+most 0.00314 px over 315 points on five frames (mean 0.000295 px, p95 0.001061 px). The candidate validity
+mask was reconstructed from the candidate field and matched the render report on all 300 frames. Baseline,
+candidate, and masks have identical 300-frame PTS at 30000/1001 fps. Candidate pooled invalid support was
+1.833% (max frame 6.13%), slightly below baseline's 1.919% mean (6.68% max); the coverage change is small.
+
+Matched numerical comparison used 12-iteration, half-resolution RAFT plus independent KLT. Baseline masked
+metrics below come from the successful capture manifest; baseline no-mask and both candidate measurements use
+`bench.evaluate` at the same cadence and settings. Every run had zero fit fallbacks and 299 supported frames.
+
+| pair | RAFT jitter px | RAFT wobble px | Liu stability | KLT jitter px | KLT stability |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| baseline, own mask | 0.581889 | 0.205542 | 0.904685 | 0.724355 | 0.906185 |
+| source_highpass, own mask | 0.597238 | 0.220403 | 0.896251 | 0.944486 | 0.808050 |
+| baseline, no mask | 0.597527 | 0.209258 | 0.906597 | 0.722939 | 0.905916 |
+| source_highpass, no mask | 0.591276 | 0.222406 | 0.896191 | 0.945822 | 0.818298 |
+
+With masks, the candidate raises RAFT jitter **2.6%**, KLT jitter **30.4%**, and wobble **7.2%**, while lowering
+Liu stability by 0.00843. Without masks, RAFT jitter improves only 1.0%, but KLT jitter worsens **30.8%** and
+wobble worsens 6.3%. Both evaluators still classify the candidate as improving over raw input; that does not
+mean it improves over the baseline. The similar KLT regression with and without masks makes invalid-pixel
+masking an unlikely explanation. This points to an appearance-domain or sparse-feature-stage interaction,
+but does not identify the cause.
+
+Gemini 3.8 Flash via the Vertex API reviewed the position-reversed, blinded baseline/candidate pair. Both
+orientations were medium-confidence ties, citing nearly identical motion and low-light/projection limitations.
+The deterministic position-bias audit found one complete pair, no non-tie, and no method agreement; this is
+consistent with no visible difference at 640x360, not evidence of equivalence.
+
+Reading. This is a reliable, motionful third-source comparison, and it does **not** justify selecting or
+integrating `source_highpass`: RAFT is effectively flat while KLT regresses materially, and Gemini sees no
+clear advantage. Keep the candidate experimental. Do not tune on `STREAM_00013.MTS` t032–042.
+
+Next decision. The first diagnostic should separate KLT feature detection from KLT template tracking on a
+pre-declared, disjoint calibration window that passes the same baseline reliability and motion gates. Use a
+2x2 detection-image/tracking-image experiment (baseline luminance or high-pass for each stage), with the
+baseline/baseline and high-pass/high-pass cells reproducing the observed endpoints. Track KLT jitter, feature
+locations and responses, per-feature trajectory noise, plus RAFT as a negative control. Choose the next
+candidate only from the predeclared window; use t032–042 once as confirmation, never to tune. The test can tell
+whether the effect follows the detected feature set, the tracking appearance, or their interaction before any
+production change is considered. Reports, comparison clips, and evaluator files remain ignored under
+`out/bench/e02_{anchor_screen,baseline_s13_t032_10s,source_highpass_s13_t032_10s}/`.
