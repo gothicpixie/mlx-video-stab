@@ -30,7 +30,7 @@ Prefer Python for research and evaluation, MLX for tensor computation, and Metal
 - Feature reuse, bidirectional batching, a compiled update, a custom correlation lookup, one final upsampling-mask calculation, decoder and encoder threads, CPU fitting overlap, and faster RANSAC already exist. New work must build on them.
 - Existing checks establish useful numerical parity. They do not establish perceptual quality, full media preservation, or production reliability.
 
-The current implementation has three concrete evaluation gaps: the reported distortion examines only the global transform; the evaluator clears the legacy flow state but leaves bidirectional state and cached features; and mask exclusion samples both masks at source coordinates, although the second mask belongs at the correspondence destination. Fix these before trusting comparisons.
+This plan was written before several evaluation fixes landed. The evaluator now resets all flow and feature state at clip boundaries, mask exclusion checks the correspondence destination, and opt-in diagnostics measure the complete rendered warp; combined fp16 network/correlation coverage is also tested. See the dated evidence in [STATUS.md](STATUS.md). Stage 0 remains open because long-window configuration comparisons, the reported tree-deformation/floaty-motion reproduction, and the real-window motion-field audit are unfinished.
 
 ## Architecture
 
@@ -116,13 +116,15 @@ Report tradeoffs as quality-versus-time and quality-versus-memory curves. Keep s
 
 ### Stage 0 Establish trustworthy measurements
 
-Fix the evaluator reset through one flow-state lifecycle method used for new clips, cuts and incompatible shape or preprocessing changes. Correct target-mask sampling to use source position plus flow, with explicit bounds and interpolation. Add counterexamples where source and target invalid regions differ.
+The evaluator reset, target-mask sampling, and source-versus-destination mask counterexamples are implemented. Preserve these lifecycle and coordinate contracts when adding new sequence boundaries or evaluators.
 
-Measure the full warp, including mesh and rolling-shutter rows. Add a regression case whose global transform is identity but whose local field bends a straight line. Cover combined fp16 network and fp16 correlation, which is distinct from testing fp16 weights with fp32 correlation.
+Complete-warp diagnostics, a local-field regression case, and combined fp16 network/fp16 correlation coverage are implemented. The diagnostics remain opt-in because their measured cost is substantial.
 
-Rerun the current defaults and the unfinished camcorder configurations. Reproduce the reported tree deformation and floaty motion using global-only, mesh-only, row-only and combined ablations. Audit motion-field accumulation under rotation and parallax: adding residuals at a fixed image grid may differ from transporting and composing them. Treat this as a hypothesis until a counterexample establishes the error.
+Remaining work: run matched 10-second/full-window configuration comparisons, reproduce the reported tree deformation and floaty motion with global-only, mesh-only, row-only and combined ablations, and audit motion-field accumulation under rotation and parallax on real windows. Treat fixed-grid residual accumulation as a hypothesis until a counterexample establishes an error. The matched one- and two-second ablations and real-footage baselines are recorded in [STATUS.md](STATUS.md); they do not close these remaining checks.
 
 **Exit:** a repeatable baseline report, independently checked metrics, meaningful failure counts and minimal regression fixtures. No new quality claim advances before this gate.
+
+Current next research candidate: test spatially localized support handling against the actual composed warp and sampler footprint. The existing clip-wide backoff can be too blunt for localized border wedges. Keep the candidate opt-in and judge rendered, matched outputs with RAFT/KLT jitter and full-support coverage before considering production use; details and evidence are in `STATUS.md`.
 
 ### Stage 1 Stabilize interfaces and the geometric baseline
 
