@@ -22,6 +22,31 @@ def _validate_sampled_border_frac(value):
     return v
 
 
+def _validate_crop_zoom(value):
+    """Validate ``Config.crop_zoom``: finite and ``>= 1`` (``1.0`` is the exact no-op identity)."""
+    v = float(value)
+    if not np.isfinite(v):
+        raise ValueError(f"crop_zoom must be finite, got {value!r}")
+    if v < 1.0:
+        raise ValueError(f"crop_zoom must be >= 1, got {value!r}")
+    return v
+
+
+def _crop_zoom_matrix(W, H, crop_zoom):
+    """Homogeneous output-space zoom ``Z`` mapping ``x -> c + (x - c)/crop_zoom`` with ``c = (W/2-.5, H/2-.5)``.
+
+    Composed on the right of the global map (``G @ Z``) so the isotropic center zoom acts on output coordinates
+    before the output-to-source homography. ``crop_zoom == 1.0`` yields the exact identity matrix."""
+    s = float(crop_zoom)
+    if s == 1.0:
+        return np.eye(3)
+    cx, cy = W / 2 - .5, H / 2 - .5
+    k = 1.0 - 1.0 / s
+    return np.array([[1.0 / s, 0.0, cx * k],
+                     [0.0, 1.0 / s, cy * k],
+                     [0.0, 0.0, 1.0]], np.float64)
+
+
 @dataclass
 class Config:
     smooth: str = "l1"             # "l1" (Grundmann) or "gauss"
@@ -46,9 +71,11 @@ class Config:
     fidelity: float = 0.1          # L1 pull of the path towards the raw path (keeps the border small; 1.0 leaked jitter, 0 -> big border)
     warp_diag: bool = False        # opt-in: complete-warp shape/coverage diagnostics in the report (extra host math per frame)
     max_sampled_border_frac: float | None = None   # opt-in: cap the sampled out-of-bounds fraction (finite, [0,1)); None disables
+    crop_zoom: float = 1.0         # opt-in: isotropic center zoom on output coords, composed before the output->source map (finite, >=1)
 
     def __post_init__(self):
         self.max_sampled_border_frac = _validate_sampled_border_frac(self.max_sampled_border_frac)
+        self.crop_zoom = _validate_crop_zoom(self.crop_zoom)
 
 
 def load_roll(path):
@@ -620,6 +647,12 @@ def plan(mot, cfg, roll=None, n_frames=None):
         path[i] = G.similarity_apply(base, np.exp(ang[i, 1] + 1j * ang[i, 0]), P[i, 0] + 1j * P[i, 1]) + rs[i]
         if cfg.zoom != 1.0: c = path[i].mean(0); path[i] = c + (path[i] - c) / cfg.zoom
     Gs = [np.linalg.inv(Cs[i]) @ G.dlt(cs, path[i]) for i in range(T)]
+    if cfg.crop_zoom != 1.0:
+        # Opt-in isotropic center zoom on output coordinates, composed before the output->source map:
+        # G_new = G @ Z. The mesh/row residual arrays below are left untouched, so production re-evaluates
+        # them at the new G-mapped source points rather than pre-composing the zoom into the residuals.
+        Z = _crop_zoom_matrix(W, H, cfg.crop_zoom)
+        Gs = [np.asarray(g, np.float64) @ Z for g in Gs]
     # mesh / rolling-shutter residual paths (content motion beyond the global homography), accumulated and smoothed
     gc, gr = cfg.mesh
     mesh_corr = np.zeros((T, gr + 1, gc + 1, 2)); row_corr = np.zeros((T, max(cfg.rs_rows, 1), 2))
@@ -852,6 +885,7 @@ def stabilize(src, out, mask=None, weights=None, cfg=None, roll=None, start=None
            "distortion_min": float(np.min(dv)) if dv else None, "distortion_mean": float(np.mean(dv)) if dv else None,
            "warp_diag": warpmetrics.aggregate(diags) if cfg.warp_diag else None,
            "max_sampled_border_frac": getattr(cfg, "max_sampled_border_frac", None),
+           "crop_zoom": cfg.crop_zoom,
            "sampled_border_scale": pl.sampled_border_scale if pl.sampled_border_measured else None,
            "sampled_border_worst_frac": pl.sampled_border_worst_frac if pl.sampled_border_measured else None,
            "sampled_border_measured": bool(pl.sampled_border_measured),
