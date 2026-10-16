@@ -2329,3 +2329,27 @@ plus the tree-deformation visual reproduction and motion-field audit, before any
 `--lock on --lock-chunk 30 --lock-pause 12` for long jobs.
 Setup, weights and conversion are in the README; private-footage outputs stay under this repo's
 ignored `out/`, earlier film-repo outputs are under renders/v5_proto/mlxstab_*.
+
+## Completed t800–810 s baseline and blinded raw/stabilized review (2026-10-15)
+
+Run. The ten-second baseline at the inferred 800–810 s window of local `00176.MTS` (SHA-256
+`e4b1f80d54dfa9089741486be297c6fe74d754fe127ec04dfe5a7edcf8d9fbb3`) completed with run_case `status=success`
+on the repository stabilization code, with no relevant dirty files. It used **600 interlaced analysis frames**
+and encoded **300 output frames at 29.97p**; the evaluation succeeded. Timing: analysis 747.4 s, plan 25.1 s,
+render 253.6 s, evaluation 548.0 s, end-to-end stabilization 1026.2 s. Border: mean fraction **1.56%**, max
+**4.11%**; crop ratio **98.44%**. The run report contains **no quality metric**.
+
+Blinded visual comparison. A synchronized, blinded raw-versus-stabilized A/B and a swapped-position control
+were built (one short **480x270** pair). **Gemini 3.8 Flash judged raw preferable in both orders at medium
+confidence.** The position-reversal audit found **one complete original/reversal pair with method agreement,
+the compared methods on opposite physical sides, and zero side-following**. Gemini cited **black boundary
+padding on the stabilized panel in both orders**, while its wording was **inconsistent about which panel looked
+smoother in the reversed clip**; the mapped raw preference is recorded together with that visible-evidence
+inconsistency.
+
+Reading. The mapped preference **weakly favours raw for this one clip**: Gemini cited **black boundary padding**,
+but its steadiness evidence was **inconsistent**, so this **does not isolate whether stabilization reduced
+shake**; it is **not proof that raw is generally better**. It is a single short, low-resolution,
+model-derived pair, so it is **not a general quality conclusion and no production/default change follows**. A
+real border-component audit was begun but **interrupted before completion because of excessive cost**; it is
+**not complete and no result is claimed from it**.
