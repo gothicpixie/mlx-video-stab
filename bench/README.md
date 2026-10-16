@@ -219,6 +219,27 @@ artifact(s) (`outputs.plan`/`outputs.motion` basenames and the `experiment_ident
 warp-geometry proxies only: no media, no rendering, no production wiring, and no perceived-quality claim. See
 [`docs/shape_audit.md`](../docs/shape_audit.md) for the metric, contracts and limitations.
 
+### Sampled border-backoff screen (research diagnostic)
+
+`bench/border_backoff_screen.py` reconstructs the captured baseline plan from `motion_r0.npz` and the resolved
+manifest config, then checks the NumPy validity mask against every decoded frame of the run's `mask_r0.mp4`.
+Only after exact pixel agreement does it measure full-resolution and bottom-row support for the baseline and
+screen the opt-in `sampled_border_backoff` limits over the full plan. It is read-only and CPU/NumPy-only: it
+does not load source footage, run flow, render images, acquire the heavy lock or alter defaults. It requires a
+successful `run_case` manifest with sibling `motion_r0.npz` and `mask_r0.mp4` artifacts whose cadence agrees
+with the manifest. The JSON report is path-free; use an output path under ignored `out/`:
+
+```bash
+.venv/bin/python -m bench.border_backoff_screen out/bench/RUN/manifest.json \
+    --out out/bench/RUN/border_backoff_screen.json
+```
+
+The fixed probe grid is a coarse boundary-weighted sample, not a per-pixel guarantee. A single returned scale
+shrinks the global, mesh and row corrections jointly toward identity. The full-resolution support values are
+reported separately from the sampled feasibility score, and this is a geometry/coverage diagnostic only: it
+does not prevent foldover or measure perceptual quality. The screen must not be used by itself to choose a
+production stabilization policy.
+
 ## Rendered composition candidate (E02 perceptual gate)
 
 The geometry-only composition audit above renders no pixels, so the next E02 gate is a perceptual check on
