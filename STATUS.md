@@ -2549,3 +2549,86 @@ Verification. The focused audit/candidate/shape tests passed **62 tests**; the c
 passed **281 tests**; `.claude/verify.sh` passed **1,536 tests**. CodeGraph was synced and current; its affected
 test heuristic found no tests, so importing tests were run directly. The composition candidate can express the
 full composed map, but real-footage quality and runtime impact remain unmeasured.
+
+## Held-out rendered source_highpass composition candidate on `00177.MTS` t090 10 s (2026-10-16)
+
+This is the next E02 composition-candidate gate after the `00176.MTS` t060 10 s source-chart high-pass
+medium-confidence tie: a **distinct source** at the longer available held-out window. Distinct local
+`00177.MTS` (SHA-256 `8c5d98d15448ad0557537ba9d02a28fc426185b4e32bdf1be3eb4964fdbea714`, different from
+`00176.MTS`) at the 90–100 s window, whose 10 s baseline capture
+`out/bench/current_source_00177_t090_10s_baseline/manifest.json` (SHA-256
+`b72992740c74067421ca6592df1c0abd471710ba46bfe2d0c3ba40b2b1e926a5`) is `status=success` with captured
+`plan_r0.npz`/`motion_r0.npz`, 600 deinterlaced fields -> 300 outputs at 1920x1080 / `30000/1001`, weights
+`84c1f730d4620ef4dd0a2eeeef97db7a729fc4190ee05cdd0169030fc92fccc1`, `config_digest`
+`8e0378b967beaed72f14d572ad1dd6d0b480034c1b5a094c2d90c7562258a2fe`, captured at code revision
+`afc16d40c744a8d4b54207c5ee6ab3bf9d68216f` (clean). The capture manifest's `metrics.reliability.reliable` is
+**false** ("output motion fit fell back to identity on 5 frame(s)"), so the baseline's own evaluator numbers are
+not reliable evidence; the captured motion has 1 fit fallback. Render, mask build, review and evaluation ran at
+HEAD `c6afd7f71ea896101e7ce474de5cb8cb62de3fc0`; **no source code, default or production path changed.**
+
+Only the `source_highpass` candidate was rendered (new, never-overwritten dir
+`out/bench/e02_source_highpass_00177_t090_10s_heldout/`):
+
+```bash
+.venv/bin/python -m bench.real_composition_render out/bench/current_source_00177_t090_10s_baseline/manifest.json \
+    --mode source_highpass --out-video out/bench/e02_source_highpass_00177_t090_10s_heldout/composition_source_highpass_r0.mp4 \
+    --lock on --lock-chunk 30 --lock-pause 12
+```
+
+Candidate MP4 SHA-256 `81951a40e9595b59e781b54a7ba1110587145688e49166e38c93cccf87dabe96`, 300 frames,
+1920x1080, CFR-verified; 11 shared-lock releases, 120.08 s aggregate pause. The dense-grid approximation to the
+exact composition was checked on 315 sub-pixel points over 5 representative frames: **max 0.11828 px, mean
+0.000913 px, p95 0.000805 px** (the max is at source frame 300; frame 0 is exact to ~5e-13 px). The candidate's
+own center-out-of-bounds coverage (`invalid_support`, same `render_from_src` convention as production) is
+pooled **1.375 %** of output pixels (max frame 6.07 %); the baseline `mask_r0.mp4` is 1.155 % mean / 6.28 %
+max. The border regression is concentrated at the edges: **bottom-4-row mean 53.4 % candidate vs 37.7 %
+baseline; right-4-column 45.9 % vs 34.9 %**; over output frames 120–270 (≈4–9 s) full-frame invalid is 0.94 %
+candidate vs 0.38 % baseline, and the candidate exceeds the baseline on **174/300** frames (per-frame
+correlation 0.93).
+
+Matched numerical metrics used the existing evaluator at the manifest's evaluation settings (`--iters 12
+--downscale 2 --vf fps=30000/1001 --tracks`). To keep the comparison truly matched, the candidate's validity
+mask was rebuilt from the same candidate field with `warp.valid_mask` (no image render) and **verified 0/300
+mismatches** against the render report's per-frame invalid counts (`candidate_mask_r0.mp4`). The baseline
+masked run reproduces the manifest exactly (jitter 2.502795 px, wobble 0.478335 px, stability 0.896392, 5
+fallback fits). Input metrics are identical in all runs (jitter 4.725118 px, wobble 0.749449 px).
+
+| pair | output jitter px | output wobble px | Liu stability (min) | fit fallbacks |
+| --- | ---: | ---: | ---: | ---: |
+| baseline, own mask | 2.502795 | 0.478335 | 0.896392 | 5 |
+| **source_highpass, own mask** | **2.841923** | **0.199645** | **0.805056** | 4 |
+| baseline, no mask (matched control) | 2.489112 | 0.584231 | 0.902086 | 5 |
+| source_highpass, no mask (matched control) | 2.849094 | 0.227934 | 0.772198 | 4 |
+
+Relative to the baseline, the candidate **raises output jitter by +13.55 %** (+0.339128 px; +14.46 % without
+masks), **lowers wobble by 58.26 %** (−0.278690 px; −60.99 % without masks) and **lowers the Liu stability
+minimum by 0.091336** (the min axis is rotation). The independent KLT evaluator is **not applicable** on this
+window: path metrics are unavailable because input tracking failed on 37 pairs, the baseline output on 40 pairs
+and the candidate masked output on 80 pairs (failed pairs are never bridged or treated as identity).
+
+Blinded position-reversed review (640x360 panels; `bench.real_pair_review --candidate-video`, then
+`bench.gemini_blind_review` via the Vertex API, `gemini-3.8-flash`, gcloud user login). Original clip
+(baseline = left/A, candidate = right/B) was judged **A = baseline, medium confidence**, citing "jagged black
+boundary deformation along the lower and right margins" on the candidate panel during 00:04–00:09 (consistent
+with the measured coverage regression). The position-reversed clip (candidate left/A, baseline right/B) was a
+**medium-confidence tie**. The position-bias audit records one complete pair, one non-tie and no method
+agreement (`side_following_pairs = 0`, `method_agreement_pairs = 0`). So the visual pair is **inconsistent and
+uninformative**: it does not confirm a consistent candidate regression, but it also gives no candidate benefit.
+Reports/clips are `out/bench/e02_source_highpass_00177_t090_10s_heldout/{composition_source_highpass_r0.json,
+baseline_vs_source_highpass{,_posrev}.mp4,gemini_source_highpass_review.json,
+gemini_source_highpass_position_bias.json,e02_report.json}`; all ignored.
+
+Reading. On this distinct held-out window the source-chart high-pass candidate does **not** reproduce the
+`00176` tie: it shows a real **jitter regression (~+14 %)**, a measured **border-coverage regression** and a
+lower Liu stability minimum, alongside a large wobble reduction. The single non-tie visual judgment preferred
+the baseline and named the candidate's border artifacts, but the reversal was a tie, so the visual evidence is
+not decisive. This is **one source, one 10 s window, one review model**; the baseline manifest's reliability is
+false (5 output fallback frames) and the independent KLT estimator could not score either run. It is not a
+quality improvement and does not justify any production integration or default change.
+
+Next decision. Do **not** integrate or select `source_highpass`. Treat `00176` t060 and `00177` t090 as
+reserved evidence and do not tune thresholds on them. Next, attribute the candidate's extra border invalids by
+composition component on this window (the existing border-component audit) to test whether the high-pass chart
+inherently enlarges the invalid support, and only then consider a border-aware or coverage-constrained variant;
+re-test any variant on a further distinct source/window with the matched masked evaluator and a position-
+reversed review. No production wiring, default change or mode selection follows from this entry.
