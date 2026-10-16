@@ -533,3 +533,93 @@ def test_cli_candidate_mode_builds_and_reports(tmp_path, monkeypatch, capsys):
                        "reversed": str(tmp_path / "cli_cand_posrev.mp4"),
                        "report": str(report_path), "frames": 2}
     assert len(FakeEncoder.instances) == 2
+
+
+class _TrackedEncoder(FakeEncoder):
+    """FakeEncoder that records whether close() was invoked (so sibling cleanup is provable)."""
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        self.closed = False
+
+    def close(self):
+        self.closed = True
+        super().close()
+
+
+def test_build_closes_both_paired_clips_and_propagates_first_close_failure(tmp_path, monkeypatch):
+    manifest_path, _, _ = _setup(monkeypatch, tmp_path)
+
+    class CloseBoomEncoder(_TrackedEncoder):
+        def close(self):
+            self.closed = True
+            raise RuntimeError(f"close {self.path}")
+
+    monkeypatch.setattr(media, "Encoder", CloseBoomEncoder)
+    with pytest.raises(RuntimeError) as ei:
+        R.build(manifest_path, out_video=tmp_path / "paired.mp4", out_report=tmp_path / "paired.json",
+                panel_width=40, panel_height=32)
+    assert len(FakeEncoder.instances) == 2
+    assert all(encoder.closed for encoder in FakeEncoder.instances)          # both paired clips closed
+    assert str(ei.value) == f"close {FakeEncoder.instances[0].path}"         # first close failure, not the later one
+
+
+def test_build_preserves_build_failure_while_closing_both_paired_clips(tmp_path, monkeypatch):
+    manifest_path, _, _ = _setup(monkeypatch, tmp_path)
+
+    class BuildBoom(Exception):
+        pass
+
+    class WriteAndCloseBoomEncoder(_TrackedEncoder):
+        def write(self, frame):
+            raise BuildBoom("write failed")
+        def close(self):
+            self.closed = True
+            raise RuntimeError(f"close {self.path}")
+
+    monkeypatch.setattr(media, "Encoder", WriteAndCloseBoomEncoder)
+    with pytest.raises(BuildBoom, match="write failed"):
+        R.build(manifest_path, out_video=tmp_path / "paired.mp4", out_report=tmp_path / "paired.json",
+                panel_width=40, panel_height=32)
+    assert len(FakeEncoder.instances) == 2
+    assert all(encoder.closed for encoder in FakeEncoder.instances)          # closes attempted despite failure
+
+
+def test_build_candidate_closes_both_clips_and_propagates_first_close_failure(tmp_path, monkeypatch):
+    manifest_path, _ = _candidate_setup(monkeypatch, tmp_path, {"candidate.mp4": 50})
+
+    class CloseBoomEncoder(_TrackedEncoder):
+        def close(self):
+            self.closed = True
+            raise RuntimeError(f"close {self.path}")
+
+    monkeypatch.setattr(media, "Encoder", CloseBoomEncoder)
+    with pytest.raises(RuntimeError) as ei:
+        R.build(manifest_path, candidate_video=tmp_path / "candidate.mp4",
+                out_video=tmp_path / "cand.mp4", out_report=tmp_path / "cand.json",
+                panel_width=40, panel_height=32)
+    assert len(FakeEncoder.instances) == 2
+    assert all(encoder.closed for encoder in FakeEncoder.instances)
+    assert str(ei.value) == f"close {FakeEncoder.instances[0].path}"
+
+
+def test_build_candidate_preserves_build_failure_while_closing_both_clips(tmp_path, monkeypatch):
+    manifest_path, _ = _candidate_setup(monkeypatch, tmp_path, {"candidate.mp4": 50})
+
+    class BuildBoom(Exception):
+        pass
+
+    class WriteAndCloseBoomEncoder(_TrackedEncoder):
+        def write(self, frame):
+            raise BuildBoom("write failed")
+        def close(self):
+            self.closed = True
+            raise RuntimeError(f"close {self.path}")
+
+    monkeypatch.setattr(media, "Encoder", WriteAndCloseBoomEncoder)
+    with pytest.raises(BuildBoom, match="write failed"):
+        R.build(manifest_path, candidate_video=tmp_path / "candidate.mp4",
+                out_video=tmp_path / "cand.mp4", out_report=tmp_path / "cand.json",
+                panel_width=40, panel_height=32)
+    assert len(FakeEncoder.instances) == 2
+    assert all(encoder.closed for encoder in FakeEncoder.instances)

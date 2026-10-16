@@ -693,9 +693,14 @@ def run_review(run_dir, *, out_dir=None, motion_name=DEFAULT_MOTION_NAME,
                 right = l1_panel if record["left_panel"] == "multiscale" else ms_panel
                 if write:
                     encoders[idx].write(assemble_ab_panel(left, right))
-    finally:
-        for encoder in encoders.values():
-            encoder.close()
+    except BaseException:
+        # Close every owned clip even when building fails; never let a close error mask the build error.
+        try:
+            media.close_all(encoders.values())
+        except BaseException:
+            pass
+        raise
+    media.close_all(encoders.values())   # success path: all closes attempted, first failure propagates
 
     pairs_report = []
     for record, left_is_multiscale in zip(records, assignment):

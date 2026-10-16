@@ -77,7 +77,15 @@ class Encoder:
     (``-vf fps=... -r ... -fps_mode cfr``). Relying on output ``-r`` alone duplicated/dropped frames
     unpredictably (60 fps -> 30 fps produced 32 frames for 1 s); the filter path is exact. Frame counts are
     validated by the caller (see ``tests/test_media_cadence.py``).
+
+    Failure handling: a stdin write failure (e.g. ffmpeg exited early -> ``BrokenPipeError``) is stored on the
+    writer thread, which then keeps consuming and discarding queued frames until the close sentinel. That keeps
+    the bounded queue from wedging a producer that is still writing, and lets ``write``/``drain``/``close``
+    surface the first failure instead of hanging or dropping it. ``close`` always sends the sentinel, joins the
+    writer, closes stdin and waits for the child, then raises the first writer/close/nonzero-exit failure.
     """
+    QUEUE_SIZE = 6
+
     def __init__(self, path, W, H, fps, gray=False, crf=14, preset="slow", out_fps=None):
         pf = "gray" if gray else "rgb24"
         cmd = ["ffmpeg", "-v", "error", "-y", "-f", "rawvideo", "-pix_fmt", pf, "-s", f"{W}x{H}", "-r", f"{fps}", "-i", "-"]
@@ -87,38 +95,102 @@ class Encoder:
         else: cmd += ["-c:v", "libx264", "-crf", str(crf), "-preset", preset, "-pix_fmt", "yuv420p"]
         import queue, threading
         self.p = subprocess.Popen(cmd + [str(path)], stdin=subprocess.PIPE)
-        self.q = queue.Queue(6)                                   # writer thread: encoding overlaps with the next frame's GPU work
-        self._writer_error = None
+        self.q = queue.Queue(self.QUEUE_SIZE)                     # writer thread: encoding overlaps with the next frame's GPU work
+        self._writer_error = None                                # first stdin failure, kept for write/drain/close
+        self._closed = False
+        self._failure = None                                     # first failure seen by close(), for idempotent re-raise
         def run():
-            try:
-                while True:
-                    b = self.q.get()
-                    try:
-                        if b is None: return
-                        self.p.stdin.write(b)
-                    finally:
-                        self.q.task_done()                        # unblock drain() as each frame reaches ffmpeg
-            except BaseException as exc:                          # write failed (e.g. ffmpeg died): unblock drain()
-                self._writer_error = exc
-                while True:
-                    try: self.q.get_nowait()
-                    except queue.Empty: break
-                    else: self.q.task_done()
-                raise
+            while True:
+                b = self.q.get()
+                try:
+                    if b is None: return                         # close sentinel: the only way the writer stops
+                    if self._writer_error is None:
+                        try:
+                            self.p.stdin.write(b)
+                        except BaseException as exc:
+                            self._writer_error = exc             # keep consuming/discarding so writes cannot deadlock
+                finally:
+                    self.q.task_done()                           # unblock drain() as each frame is handled
         self.t = threading.Thread(target=run, daemon=True); self.t.start()
-    def write(self, frame): self.q.put(np.ascontiguousarray(frame, np.uint8).tobytes())
+    def write(self, frame):
+        if self._closed: raise RuntimeError("Encoder is closed")
+        if self._writer_error is not None: raise self._writer_error
+        self.q.put(np.ascontiguousarray(frame, np.uint8).tobytes())
     def drain(self):
         """Barrier: block until every queued frame has been handed to ffmpeg's stdin (queue empty, writer idle).
 
         Lets a chunked shared-lock yield release the lock only after the writer thread has consumed the
-        completed chunk, instead of leaving up to ``Queue(6)`` frames queued. Raises the writer's exception
-        (e.g. a broken pipe) rather than hanging when the writer has already failed. Note this drains only
-        this queue and the stdin buffer: ffmpeg/x264 internal frame buffering still spans the yield.
+        completed chunk, instead of leaving up to ``Queue(QUEUE_SIZE)`` frames queued. Raises the writer's
+        exception (e.g. a broken pipe) rather than hanging when the writer has already failed. Note this drains
+        only this queue and the stdin buffer: ffmpeg/x264 internal frame buffering still spans the yield.
         """
+        if self._closed: raise RuntimeError("Encoder is closed")
         self.q.join()
         if self._writer_error is not None: raise self._writer_error
-        self.p.stdin.flush()
-    def close(self): self.q.put(None); self.t.join(); self.p.stdin.close(); self.p.wait()
+        try:
+            self.p.stdin.flush()
+        except BaseException as exc:
+            if self._writer_error is None: self._writer_error = exc
+            raise
+    def close(self):
+        """Finish the stream: send the sentinel, join the writer, close stdin and wait for ffmpeg.
+
+        Returns ``None`` on success. Raises the first stored writer failure, close failure or nonzero ffmpeg
+        exit status (``subprocess.CalledProcessError``). The writer survives a stdin failure, so the sentinel
+        always reaches it. Idempotent: a second call returns, or re-raises the same failure, without touching
+        the stream again.
+        """
+        if self._closed:
+            if self._failure is not None: raise self._failure
+            return
+        self._closed = True
+        close_error = None
+        try:
+            self.q.put(None)                                     # the writer stays alive after a stdin failure
+        except BaseException as exc:
+            if close_error is None: close_error = exc
+        try:
+            self.t.join()
+        except BaseException as exc:
+            if close_error is None: close_error = exc
+        try:
+            self.p.stdin.close()
+        except BaseException as exc:
+            if close_error is None: close_error = exc
+        returncode = None
+        try:
+            returncode = self.p.wait()
+        except BaseException as exc:
+            if close_error is None: close_error = exc
+        failure = self._writer_error
+        if failure is None: failure = close_error
+        if failure is None and isinstance(returncode, int) and returncode != 0:
+            failure = subprocess.CalledProcessError(returncode, getattr(self.p, "args", None))
+        self._failure = failure
+        if failure is not None: raise failure
+
+
+def close_all(encoders):
+    """Close every encoder, attempting all of them even if one fails, then raise the first failure.
+
+    Multi-encoder callers own several ``Encoder`` objects whose ``close`` can now fail (a writer error or a
+    nonzero ffmpeg exit). Closing them one-by-one with a bare loop would skip every sibling after the first
+    failure; this helper closes all of them and then re-raises the first failure, so a caller on the success
+    path reports a single stable error without leaking a process or writer thread. ``None`` entries are
+    skipped so a call site can pass an optional encoder (e.g. ``(video, mask)``) directly. Cleanup paths that
+    must preserve a primary exception should call this inside ``try``/``except`` and suppress its failure.
+    """
+    first = None
+    for encoder in encoders:
+        if encoder is None:
+            continue
+        try:
+            encoder.close()
+        except BaseException as exc:  # noqa: BLE001 - finish closing siblings, surface the first failure
+            if first is None:
+                first = exc
+    if first is not None:
+        raise first
 
 
 def prefetch(gen, n=4):

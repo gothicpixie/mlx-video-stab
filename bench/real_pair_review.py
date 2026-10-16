@@ -281,8 +281,7 @@ def _build_candidate(manifest_path, manifest, candidate_video, *, out_video, out
             raise ReviewBuildError("baseline decoded frame count exceeds manifest")
         if candidate_extra:
             raise ReviewBuildError("candidate decoded frame count exceeds manifest")
-        for encoder in encoders.values():
-            encoder.close()
+        media.close_all(encoders.values())   # success path: all closes attempted, first failure propagates
         encoders = {}
         encoded_pts = {}
         for role, _path, _swap in jobs:
@@ -385,11 +384,11 @@ def _build_candidate(manifest_path, manifest, candidate_video, *, out_video, out
         MF.write_manifest(report_path, report)
         return report
     except BaseException:
-        for encoder in encoders.values():
-            try:
-                encoder.close()
-            except Exception:
-                pass
+        # Preserve the primary build failure while still attempting every owned close.
+        try:
+            media.close_all(encoders.values())
+        except BaseException:
+            pass
         for tmp_name in tmp_paths.values():
             Path(tmp_name).unlink(missing_ok=True)
         output_path.unlink(missing_ok=True)
@@ -533,8 +532,7 @@ def build(manifest_path, *, out_video=None, out_report=None, out_reversed=None,
             raise ReviewBuildError("source decoded frame count disagrees with manifest")
         if count + extra_output != run_output["frames"]:
             raise ReviewBuildError("stabilized decoded frame count disagrees with manifest")
-        for encoder in encoders.values():
-            encoder.close()
+        media.close_all(encoders.values())   # success path: all closes attempted, first failure propagates
         encoders = {}
         encoded_pts = {}
         for role, _path, _swap in jobs:
@@ -628,11 +626,11 @@ def build(manifest_path, *, out_video=None, out_report=None, out_reversed=None,
         MF.write_manifest(report_path, report)
         return report
     except BaseException:
-        for encoder in encoders.values():
-            try:
-                encoder.close()
-            except Exception:
-                pass
+        # Preserve the primary build failure while still attempting every owned close.
+        try:
+            media.close_all(encoders.values())
+        except BaseException:
+            pass
         for tmp_name in tmp_paths.values():
             Path(tmp_name).unlink(missing_ok=True)
         output_path.unlink(missing_ok=True)

@@ -811,28 +811,36 @@ def stabilize(src, out, mask=None, weights=None, cfg=None, roll=None, start=None
     t2 = time.perf_counter()
     frames, fps, _ = media.decode(src, info, start, duration); frames = media.prefetch(frames)
     enc = media.Encoder(out, W, H, fps, out_fps=fps_out)
-    menc = media.Encoder(mask, W, H, fps, gray=True, out_fps=fps_out) if mask else None
-    grid = None; borders = []; dist = []; diags = []; rendered = 0; diag_total = 0.0
-    ys, xs = mx.meshgrid(mx.arange(H), mx.arange(W), indexing="ij"); grid = (xs.astype(mx.float32), ys.astype(mx.float32))
-    for t, fr in enumerate(frames):
-        if t >= len(pl.G): break
-        if on_step: on_step(t)
-        if diag_callback is not None and diag_every and t % diag_every == 0:
-            src = source_coords(pl, t, W, H, grid)
-            ts = time.perf_counter(); img, bad = render_from_src(fr, src, cfg); t_render = time.perf_counter() - ts
-            ts = time.perf_counter(); dg = warpmetrics.diagnose(np.array(src[0]), H, W, kernel=cfg.kernel); t_diag = time.perf_counter() - ts
-            diag_total += t_diag
-            diag_callback(t, t_render, t_diag, dg)
-            d = _distortion(pl.G[t], W, H)
-        elif cfg.warp_diag:
-            img, bad, d, dg = render_frame(fr, pl, t, cfg, grid, diagnose=True); diags.append(dg)
-        else:
-            img, bad, d = render_frame(fr, pl, t, cfg, grid)
-        enc.write(img); borders.append(float(bad.mean())); dist.append(d); rendered += 1
-        if menc: menc.write(bad.astype(np.uint8) * 255)
-        if t % 20 == 0: log(f"render {t}/{len(pl.G)}")
-    enc.close()
-    if menc: menc.close()
+    menc = None
+    try:
+        menc = media.Encoder(mask, W, H, fps, gray=True, out_fps=fps_out) if mask else None
+        grid = None; borders = []; dist = []; diags = []; rendered = 0; diag_total = 0.0
+        ys, xs = mx.meshgrid(mx.arange(H), mx.arange(W), indexing="ij"); grid = (xs.astype(mx.float32), ys.astype(mx.float32))
+        for t, fr in enumerate(frames):
+            if t >= len(pl.G): break
+            if on_step: on_step(t)
+            if diag_callback is not None and diag_every and t % diag_every == 0:
+                src = source_coords(pl, t, W, H, grid)
+                ts = time.perf_counter(); img, bad = render_from_src(fr, src, cfg); t_render = time.perf_counter() - ts
+                ts = time.perf_counter(); dg = warpmetrics.diagnose(np.array(src[0]), H, W, kernel=cfg.kernel); t_diag = time.perf_counter() - ts
+                diag_total += t_diag
+                diag_callback(t, t_render, t_diag, dg)
+                d = _distortion(pl.G[t], W, H)
+            elif cfg.warp_diag:
+                img, bad, d, dg = render_frame(fr, pl, t, cfg, grid, diagnose=True); diags.append(dg)
+            else:
+                img, bad, d = render_frame(fr, pl, t, cfg, grid)
+            enc.write(img); borders.append(float(bad.mean())); dist.append(d); rendered += 1
+            if menc: menc.write(bad.astype(np.uint8) * 255)
+            if t % 20 == 0: log(f"render {t}/{len(pl.G)}")
+    except BaseException:
+        # A render failure must not skip closing the owned video/mask encoders, and neither close may mask it.
+        try:
+            media.close_all((enc, menc))
+        except BaseException:
+            pass
+        raise
+    media.close_all((enc, menc))
     t3 = time.perf_counter(); n = len(pl.G); dv = [d for d in dist if d is not None]
     rep = {"frames": n, "decoded_frames": int(mot.n_frames), "rendered_frames": int(rendered),
            "output_fps": fps_out or fps, "analysis_fps": fps / max(int(cfg.analysis_stride), 1),

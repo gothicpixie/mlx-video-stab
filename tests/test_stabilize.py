@@ -576,3 +576,77 @@ def test_main_wires_max_sampled_border_frac(monkeypatch):
     monkeypatch.setattr(M, "stabilize", fake_stabilize)
     M.main(["in.mp4", "out.mp4", "--max-sampled-border-frac", "0.03"])
     assert captured["cfg"].max_sampled_border_frac == 0.03
+
+
+class _OwnedEncoder:
+    """Minimal owned Encoder double that records writes/closes and can fail by role (video vs mask)."""
+
+    instances = []
+
+    def __init__(self, path, W, H, fps, **kwargs):
+        self.path = str(path)
+        self.gray = bool(kwargs.get("gray"))
+        self.writes = 0
+        self.closes = 0
+        self.close_error = None
+        _OwnedEncoder.instances.append(self)
+
+    def write(self, frame):
+        self.writes += 1
+
+    def close(self):
+        self.closes += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+
+def _stabilize_with_owned_encoders(monkeypatch, encoder_cls):
+    from mlxstab import media
+    vid, _ = synth.render(T=8, W=96, H=64, jitter=3.0)
+    H, W = 64, 96
+    monkeypatch.setattr(media, "probe", lambda p: {"width": W, "height": H, "fps": 30.0,
+                                                    "field_order": "unknown", "interlaced": False, "duration": 0.0})
+    monkeypatch.setattr(media, "decode", lambda *a, **k: (iter(vid), 30.0, (W, H)))
+    monkeypatch.setattr(media, "prefetch", lambda gen, n=4: gen)
+    _OwnedEncoder.instances = []
+    monkeypatch.setattr(media, "Encoder", encoder_cls)
+    return S.Config(mesh=(4, 3), rs_rows=4, budget=0.06)
+
+
+def test_stabilize_closes_both_video_and_mask_and_propagates_first_close_failure(monkeypatch):
+    """On success, a mask-close failure must still close the video encoder and surface that failure."""
+    class _MaskCloseBoomEncoder(_OwnedEncoder):
+        def close(self):
+            self.closes += 1
+            if self.gray:
+                raise RuntimeError("mask close failed")
+
+    cfg = _stabilize_with_owned_encoders(monkeypatch, _MaskCloseBoomEncoder)
+    with pytest.raises(RuntimeError, match="mask close failed"):
+        S.stabilize("in.mp4", "out.mp4", "mask.mp4", None, cfg, flow_fn=farneback, log=lambda m: None)
+    assert len(_OwnedEncoder.instances) == 2
+    video, mask = _OwnedEncoder.instances
+    assert video.gray is False and mask.gray is True
+    assert video.closes == 1 and mask.closes == 1                   # both owned encoders were closed
+
+
+def test_stabilize_preserves_render_failure_while_closing_both_encoders(monkeypatch):
+    """A render write failure must not be masked by a later (also failing) close of the other encoder."""
+    class RenderBoom(Exception):
+        pass
+
+    class _RenderAndMaskCloseBoomEncoder(_OwnedEncoder):
+        def write(self, frame):
+            self.writes += 1
+            if not self.gray:
+                raise RenderBoom("render failed")
+        def close(self):
+            self.closes += 1
+            if self.gray:
+                raise RuntimeError("mask close failed after render error")
+
+    cfg = _stabilize_with_owned_encoders(monkeypatch, _RenderAndMaskCloseBoomEncoder)
+    with pytest.raises(RenderBoom, match="render failed"):
+        S.stabilize("in.mp4", "out.mp4", "mask.mp4", None, cfg, flow_fn=farneback, log=lambda m: None)
+    video, mask = _OwnedEncoder.instances
+    assert video.closes == 1 and mask.closes == 1                   # both closed despite the render failure

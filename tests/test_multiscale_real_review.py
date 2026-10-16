@@ -462,3 +462,45 @@ def test_run_review_derives_independent_seed_per_window(tmp_path, monkeypatch):
     replay = R.run_review(run_a, out_dir=tmp_path / "ra2", out_width=48, out_height=36, write=False)
     assert replay["blinding"]["seed"] == first["blinding"]["seed"]
     assert replay["blinding"]["assignment"] == first["blinding"]["assignment"]
+
+
+def test_run_review_closes_every_clip_and_propagates_first_close_failure(tmp_path, monkeypatch):
+    """A failing clip close must still close the other three, and the first failure is the one raised."""
+    W, H, T, fps = 64, 48, 8, 30.0
+    run, _, _, _ = _build_run(tmp_path, W=W, H=H, T=T, fps=fps)
+    _mock_media(monkeypatch, W, H, T, fps)
+
+    class CloseBoomEncoder(_FakeEncoder):
+        def close(self):
+            self.closed = True
+            raise RuntimeError(f"close {self.path}")
+
+    monkeypatch.setattr(media, "Encoder", CloseBoomEncoder)
+    with pytest.raises(RuntimeError) as ei:
+        R.run_review(run, out_dir=tmp_path / "review", out_width=48, out_height=36, write=True)
+    assert len(_FakeEncoder.instances) == 4
+    assert all(encoder.closed for encoder in _FakeEncoder.instances)   # every sibling was closed
+    assert str(ei.value) == f"close {_FakeEncoder.instances[0].path}"  # the first failure, not a later one
+
+
+def test_run_review_preserves_build_failure_while_closing_every_clip(tmp_path, monkeypatch):
+    """A frame-write failure must not be masked by a later close failure; all clips still close."""
+    W, H, T, fps = 64, 48, 8, 30.0
+    run, _, _, _ = _build_run(tmp_path, W=W, H=H, T=T, fps=fps)
+    _mock_media(monkeypatch, W, H, T, fps)
+
+    class BuildBoom(Exception):
+        pass
+
+    class WriteAndCloseBoomEncoder(_FakeEncoder):
+        def write(self, frame):
+            raise BuildBoom("write failed")
+        def close(self):
+            self.closed = True
+            raise RuntimeError(f"close {self.path}")
+
+    monkeypatch.setattr(media, "Encoder", WriteAndCloseBoomEncoder)
+    with pytest.raises(BuildBoom, match="write failed"):
+        R.run_review(run, out_dir=tmp_path / "review", out_width=48, out_height=36, write=True)
+    assert len(_FakeEncoder.instances) == 4
+    assert all(encoder.closed for encoder in _FakeEncoder.instances)   # closes attempted despite the failure
