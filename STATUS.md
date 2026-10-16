@@ -2353,3 +2353,14 @@ shake**; it is **not proof that raw is generally better**. It is a single short,
 model-derived pair, so it is **not a general quality conclusion and no production/default change follows**. A
 real border-component audit was begun but **interrupted before completion because of excessive cost**; it is
 **not complete and no result is claimed from it**.
+
+Follow-up temporal-fill candidate (diagnostic only). The existing `temporal_border_fill_pilot` at radius 3 was
+also run on this same t800 baseline; it changes no camera path or default. Its report totals are invalid
+9,675,939 pixels, filled 2,545,944 (**26.31%** of invalid pixels, **0.409%** of all output pixels) and
+unresolved 7,129,995. The candidate was encoded at **CRF22** (the default encoding exceeded the 15 MiB Gemini
+inline cap) as 300 frames of 1920x1080 at 29.97p (7,827,897 bytes). Position-reversed baseline-versus-fill
+clips submitted to Gemini 3.8 Flash returned a **tie at medium confidence in both orders**, and the
+position-reversal audit records **one complete paired tie**. Gemini reported no perceptible difference in
+stability or framing and noted equal compression artifacts. This is **inconclusive for fine shake and gives no
+evidence of a visible benefit**, so the fill is **not adopted from this clip**; because the candidate used
+CRF22 and the A/B is low-resolution, **compression and review limits apply**.
