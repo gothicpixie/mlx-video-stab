@@ -2190,6 +2190,26 @@ reversal, Gemini-review and bias-audit suites passed (**101 tests**), and the au
 from the saved Vertex reports. Generated comparison clips and Gemini responses remain local and ignored. No
 production change.
 
+## Stage 7 progress: encoder failure propagation
+
+`mlxstab.media.Encoder` now keeps its bounded writer queue draining after an ffmpeg stdin failure, surfaces
+writer/flush/close/nonzero-child-exit errors from `write`, `drain` or `close`, and makes `close` idempotent.
+The `close_all` helper attempts every owned encoder before reporting the first close failure. Stabilization and
+the paired/multiscale review builders use it on success; their failure cleanup closes every sibling while
+preserving the original render/build exception. The local A/B position-reversal writer follows the same
+primary-exception rule for its single encoder. Successful frame bytes, cadence and rendered pixels are
+unchanged.
+
+Commits `455eb1c` and `dd41808` add the lifecycle, owner-cleanup and exception-precedence coverage. Direct
+verification passed: 108 media/stabilizer/review tests, 84 border-fill/reversal/composition tests, and 26
+reversal/media-failure tests (overlapping suites were rerun separately). CodeGraph is synced; `affected`
+reported no pytest links, so callers were exercised directly. This is a reliability change only and makes no
+stabilization-quality claim.
+
+The current-source 800–810 s, 10 s baseline capture remains queued at `stage=source`, `status=running` while
+the anniversary-video render owns the shared heavy lock. The runner is alive and will proceed when that lock is
+released; its output must be completed before a new independent-window comparison can be reviewed.
+
 ## What works
 
 - `mlxstab/warp.py`: Metal sampler (bilinear / Catmull-Rom / Lanczos-3, zeros/border, align_corners). `grid_sample` max abs error vs torch 1.2e-7 .. 2.4e-7. Forward only.
