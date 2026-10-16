@@ -2929,3 +2929,42 @@ This single disjoint window tests replication only, not generality or causality.
 Gemini preference, or local feature/map analysis will be labeled secondary or exploratory. The original
 t032–042 effect remains the positive reference; its event window was data-selected, so it is not used to tune
 the thresholds.
+
+## Event-severity gate and exploratory outlier audit (2026-10-16)
+
+The disjoint t109–119 full-window no-replication result does not by itself test whether that window contained an
+event comparable to the original t039–041 excursion. To check that gate without RAFT, stabilization, or a new
+render, a single LL K=250 KLT pass was run on the existing S24 baseline/candidate videos and their own aligned
+masks. It used the original factorial's frozen detector/tracker settings, seed, masks, and jitter sigma. Both
+clips had 299 supported pairs and zero fallbacks. LL jitter was 1.5047 px baseline and 1.4908 px candidate.
+Across all 240 possible 60-pair blocks, the largest candidate-minus-baseline mean per-pair jitter contribution
+was +0.0899 px (pairs 221–280), with only 34/60 pairs positive. No block reached the fixed comparable-event
+gate of +0.519 px and at least 46/60 positive pairs (the minimum event mean and positive-pair count across the
+four original K=250 cells). Thus S24 is a valid full-window no-replication, but it did not contain an event of
+the original excursion's severity; it does not refute an event-specific effect.
+
+The existing full-window t032–042 factorial confirms that the original effect is highly concentrated: mean
+candidate-minus-baseline KLT jitter contribution in pairs 210–269 was +0.519 to +0.771 px across the four cells,
+versus +0.053 to +0.089 px in pairs 0–209 and 270–298; 46–54 of the 60 event pairs worsened in each cell. In
+the separate 59-pair event map decomposition, the per-pair LL contribution delta had Spearman rho +0.499 with
+the local map non-similarity RMS delta (+0.200 px mean), and rho -0.595 with inlier-fraction change (-0.033
+mean). Associations with track count (-0.091), FB error p90 (-0.154), patch ZNCC (-0.235), tensor lambda2
+(+0.073), and tensor condition (+0.070) were weak. Candidate invalid-mask coverage was 0.216 percentage points
+worse in the event, while it improved in the pre and post stretches. Downsampled event image proxies changed
+little (mean luminance -0.82/255, high-pass RMS -0.03, Laplacian variance -5). On S24, the same proxies were
+also near flat while KLT remained near flat. The two event correlations may be readouts of one degraded
+correspondence process; they are post-hoc associations, not independent evidence or causal proof.
+
+Gemini 3.8 Flash's position-blinded visual calls on S24 were mixed: it preferred the candidate once and called
+a tie in the reversed presentation, both at medium confidence. This is not a consistent perceptual winner.
+
+Decision: preserve the pre-registered S24 no-replication label and keep `source_highpass` experimental. The
+S24 window is out-of-event, and the original event associations do not justify a code change. The only useful
+next mechanism test is a bounded offline replay on the existing t039–041 rendered clips, with a fixed split of
+the 60 pairs and negative-control pairs before/after. The saved decomposition JSON contains per-pair summaries
+but not feature correspondences, so any support/map-residual reweighting needs one deterministic KLT extraction
+from those existing renders first. No new RAFT pass, stabilization, or render is needed. Continue only if that
+held-out manipulation reduces at least half of the event excess while leaving the negative controls unchanged;
+otherwise close this mechanism as unproven without tuning a production path.
+
+Ignored S24 mask/frame/LL audit artifacts are under `out/bench/e02_source_highpass_s24_t109_10s/`.
