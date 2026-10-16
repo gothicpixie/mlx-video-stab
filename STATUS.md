@@ -2204,8 +2204,8 @@ pixels are unchanged. `media.prefetch` now forwards producer failures after queu
 bounded puts, closes its upstream iterator on the producer thread and joins that worker when the consumer exits.
 Non-positive queue capacities are refused because Python treats `Queue(0)` as unbounded.
 
-Commits `455eb1c`, `dd41808` and `ebfef70` add encoder lifecycle, owner-cleanup, exception-precedence, and
-decode-process coverage. The full suite passed **1317 tests** after the main decode/prefetch changes. After
+Commits `455eb1c`, `dd41808`, `ebfef70` and `08c317b` add encoder lifecycle, owner-cleanup,
+exception-precedence, decode-process and prefetch-worker coverage. The full suite passed **1317 tests** after the main decode/prefetch changes. After
 adding eager queue-capacity validation and further exception-precedence cases, **77 directly affected tests**
 passed locally. A real-ffmpeg smoke verified natural EOF, early-close reap and truncated-input failure.
 CodeGraph is synced; `affected` found pytest links with the focused `*prefetch*` filter, and callers were run
@@ -2214,6 +2214,16 @@ directly. This is a reliability change only and makes no stabilization-quality c
 The current-source 800–810 s, 10 s baseline capture remains queued at `stage=source`, `status=running` while
 the anniversary-video render owns the shared heavy lock. The runner is alive and will proceed when that lock is
 released; its output must be completed before a new independent-window comparison can be reviewed.
+
+Atomic-output hardening now stages each `Encoder` render in a unique hidden same-directory `.mp4` and publishes
+with `os.replace` only after a clean writer/ffmpeg exit. Failed construction, encoding, child exit or publication
+removes the partial while preserving an existing destination. New-file permissions follow the OS umask without
+reading or mutating process-global `umask`; replacements preserve the old destination mode. Symlinks remain
+unchanged on failure and are replaced by a regular output on success (the referent is left untouched). Tests
+cover publish/failure cleanup, permissions and symlink behavior. The full suite passed **1335 tests**; a real
+ffmpeg/ffprobe smoke verified a three-frame output, umask-derived new-file mode, existing-mode preservation and
+the documented symlink behavior. CodeGraph was re-synced after the change; with the explicit `tests/**` filter it
+found 27 affected test files. The full suite and the focused encoder/cadence suites were run directly.
 
 ## What works
 

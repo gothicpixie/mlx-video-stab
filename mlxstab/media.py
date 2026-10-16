@@ -1,5 +1,5 @@
 """ffmpeg / ffprobe I/O. Interlaced sources are deinterlaced first with bwdif (send_field: 59.94i -> 59.94p)."""
-import json, subprocess
+import json, os, secrets, subprocess
 import numpy as np
 
 
@@ -117,6 +117,61 @@ def decode(path, info=None, start=None, duration=None, deinterlace=True, vf=None
     return gen(), fps, (W, H)
 
 
+def _unlink_quiet(path):
+    """Best-effort unlink used on every Encoder failure path; a missing file is already clean."""
+    if path is None:
+        return
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
+    except OSError:
+        pass
+
+
+def _existing_output_mode(target):
+    """Permission bits of an existing destination (following symlinks), or ``None`` if it does not exist.
+
+    ``None`` also covers a target that cannot be stat'd (e.g. a permission error); the published file then keeps
+    the mode the kernel derived from the process umask when the temp was created.
+    """
+    try:
+        return os.stat(target).st_mode & 0o777
+    except OSError:
+        return None
+
+
+def _create_output_tmp(target):
+    """Create a unique hidden same-directory ``.mp4`` sibling; return an open ``(fd, path)``.
+
+    The file is created with mode ``0o666`` so the kernel applies the process umask directly. That honors
+    ``umask`` for a brand-new output without reading it: ``os.umask`` is process-global, so the usual
+    read/restore pair mutates shared state and can race a concurrent thread creating a file. ``O_CREAT|O_EXCL``
+    claims the random name atomically, so a collision is retried rather than reusing or following a path, and the
+    ``.mp4`` suffix keeps ffmpeg's muxer inference intact. When the destination already exists its mode is copied
+    onto the temp (``fchmod``), because publishing uses ``os.replace``, which swaps inodes and would otherwise
+    make the temp's umask-derived mode win.
+    """
+    directory = os.path.dirname(os.path.abspath(target)) or os.curdir
+    mode = _existing_output_mode(target)
+    for _ in range(100):
+        candidate = os.path.join(directory, f".mlxstab-{secrets.token_hex(8)}.mp4")
+        try:
+            fd = os.open(candidate, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+        except FileExistsError:
+            continue
+        try:
+            if mode is not None:
+                os.fchmod(fd, mode)                              # preserve an existing destination's permissions
+            return fd, candidate
+        except BaseException:
+            try: os.close(fd)
+            except BaseException: pass
+            _unlink_quiet(candidate)
+            raise
+    raise FileExistsError(f"could not create a unique Encoder temp beside {target!r}")
+
+
 class Encoder:
     """Pipe raw frames into ffmpeg. gray=True writes a single-channel (mask) stream, lossless.
 
@@ -124,6 +179,18 @@ class Encoder:
     (``-vf fps=... -r ... -fps_mode cfr``). Relying on output ``-r`` alone duplicated/dropped frames
     unpredictably (60 fps -> 30 fps produced 32 frames for 1 s); the filter path is exact. Frame counts are
     validated by the caller (see ``tests/test_media_cadence.py``).
+
+    Atomic output: ffmpeg writes a unique hidden sibling temporary (same directory, ``.mp4`` suffix so the
+    muxer is still inferred). Only after the writer, stdin flush/close and the child all succeed with a zero exit
+    status is the temp ``os.replace``d onto the requested path; the replacement is therefore atomic and
+    same-filesystem. A new output gets the mode the process umask yields for a fresh ``0o666`` file; an existing
+    destination's mode is copied onto the temp first so publishing preserves it. Any construction,
+    encode/close/nonzero-exit or replace failure removes the partial and leaves the requested path unchanged.
+
+    Symlinks: an existing symlink is untouched on every failure. On success ``os.replace`` swaps in the temp
+    *inode*, so the symlink entry itself -- not its referent -- is replaced by a regular file. Because the
+    destination mode is read with ``os.stat`` (following the link), that new file carries the referent's mode
+    while the referent keeps its original bytes.
 
     Failure handling: a stdin write failure (e.g. ffmpeg exited early -> ``BrokenPipeError``) is stored on the
     writer thread, which then keeps consuming and discarding queued frames until the close sentinel. That keeps
@@ -141,8 +208,9 @@ class Encoder:
         if gray: cmd += ["-c:v", "libx264", "-qp", "0", "-pix_fmt", "gray"]
         else: cmd += ["-c:v", "libx264", "-crf", str(crf), "-preset", preset, "-pix_fmt", "yuv420p"]
         import queue, threading
-        self.p = subprocess.Popen(cmd + [str(path)], stdin=subprocess.PIPE)
-        self.q = queue.Queue(self.QUEUE_SIZE)                     # writer thread: encoding overlaps with the next frame's GPU work
+        self._target = str(path)                                 # requested output; published only on success
+        self._tmp_path = None                                    # unique hidden sibling, .mp4 so ffmpeg picks the muxer
+        self.p = None
         self._writer_error = None                                # first stdin failure, kept for write/drain/close
         self._closed = False
         self._failure = None                                     # first failure seen by close(), for idempotent re-raise
@@ -158,7 +226,36 @@ class Encoder:
                             self._writer_error = exc             # keep consuming/discarding so writes cannot deadlock
                 finally:
                     self.q.task_done()                           # unblock drain() as each frame is handled
-        self.t = threading.Thread(target=run, daemon=True); self.t.start()
+        fd = None
+        try:
+            fd, tmp_name = _create_output_tmp(self._target)      # unique hidden sibling; umask-honoring mode
+            os.close(fd); fd = None
+            self._tmp_path = tmp_name
+            self.p = subprocess.Popen(cmd + [tmp_name], stdin=subprocess.PIPE)
+            self.q = queue.Queue(self.QUEUE_SIZE)                # writer thread: encoding overlaps with the next frame's GPU work
+            self.t = threading.Thread(target=run, daemon=True); self.t.start()
+        except BaseException:                                    # construction failure: reap the child, drop the partial
+            if fd is not None:
+                try: os.close(fd)
+                except BaseException: pass
+            if self.p is not None:
+                try:
+                    if self.p.stdin is not None:
+                        try: self.p.stdin.close()
+                        except BaseException: pass
+                    self.p.kill()
+                except BaseException: pass
+                try: self.p.wait()
+                except BaseException: pass
+            self._discard_tmp()
+            raise
+
+    def _discard_tmp(self):
+        """Remove the unpublished temporary; safe to call repeatedly."""
+        path = getattr(self, "_tmp_path", None)
+        self._tmp_path = None
+        _unlink_quiet(path)
+
     def write(self, frame):
         if self._closed: raise RuntimeError("Encoder is closed")
         if self._writer_error is not None: raise self._writer_error
@@ -184,8 +281,8 @@ class Encoder:
 
         Returns ``None`` on success. Raises the first stored writer failure, close failure or nonzero ffmpeg
         exit status (``subprocess.CalledProcessError``). The writer survives a stdin failure, so the sentinel
-        always reaches it. Idempotent: a second call returns, or re-raises the same failure, without touching
-        the stream again.
+        always reaches it. Only a clean close publishes the temporary onto the requested path via ``os.replace``.
+        Idempotent: a second call returns, or re-raises the same failure, without touching the stream again.
         """
         if self._closed:
             if self._failure is not None: raise self._failure
@@ -211,8 +308,18 @@ class Encoder:
             if close_error is None: close_error = exc
         failure = self._writer_error
         if failure is None: failure = close_error
-        if failure is None and isinstance(returncode, int) and returncode != 0:
-            failure = subprocess.CalledProcessError(returncode, getattr(self.p, "args", None))
+        if failure is None and returncode != 0:                  # success requires a real zero exit status
+            failure = (subprocess.CalledProcessError(returncode, getattr(self.p, "args", None))
+                       if isinstance(returncode, int)
+                       else RuntimeError(f"ffmpeg exited without a status: {returncode!r}"))
+        if failure is None:                                      # writer/flush/close/wait all clean: publish atomically
+            try:
+                os.replace(self._tmp_path, self._target)
+                self._tmp_path = None
+            except BaseException as exc:
+                failure = exc
+        if failure is not None:
+            self._discard_tmp()                                  # never leave a partial hidden temp behind
         self._failure = failure
         if failure is not None: raise failure
 
