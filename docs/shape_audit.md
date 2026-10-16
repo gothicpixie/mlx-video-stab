@@ -371,3 +371,18 @@ the dense map directly against the exact `composition_candidate.candidate_source
 of sub-pixel output points at five representative frames, recording per-frame and aggregate max/mean/p95 pixel
 error. The geometry-only audit above is unchanged and still evaluates the exact composition pointwise on its
 sparse probes; only the *rendered* companion uses the dense-map propagation.
+
+### Invalid-support provenance (border diagnostic)
+
+The rendered companion keeps the boolean border mask that `stabilize.render_from_src` returns with each frame
+(instead of discarding it) and records an `invalid_support` block. **Invalid support is defined as the output
+pixels whose sampled source-coordinate center is out-of-bounds of the source frame** — the production
+`warp.valid_mask` interval `[-0.5, W-0.5] x [-0.5, H-0.5]` — which `render_from_src` fills with zero. It is a
+center-out-of-bounds support/geometry diagnostic, **not** a perceptual or visual-quality metric, and it is the
+measurable basis for the documented border-support follow-up. Per output frame the report stores the invalid
+pixel count and fraction and the invalid fraction in fixed **4-pixel** (`invalid_support.strip_width_px`)
+top/bottom/left/right edge strips (strip width clamped to the frame); the aggregate stores the frame count,
+total invalid pixels, mean/max invalid fraction, and per-strip pooled/mean/max fractions with their pixel
+areas. Memory stays O(number of output frames) since only these small per-frame scalars are kept, **no mask
+video or mask artifact is written**, and a wrong-shape or unsupported-dtype mask is refused with a stable
+`bad_mask_shape`/`bad_mask_dtype` code (partial outputs are cleaned up as usual).

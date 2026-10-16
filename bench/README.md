@@ -263,6 +263,20 @@ complexity), the exact-vs-dense comparison (comparison grid/inset, per-frame and
 error), the map sampler and kernel, dimensions/fps/frame count, the full frame-index
 mapping, and the output SHA/size/CFR.
 
+Because `stabilize.render_from_src` returns the boolean border mask (`bad`) alongside each rendered frame, the
+renderer keeps it rather than discarding it: the JSON also carries an `invalid_support` provenance block.
+Invalid support is the set of output pixels whose sampled source-coordinate center lies out-of-bounds of the
+source frame (`warp.valid_mask`, outside `[-0.5, W-0.5] x [-0.5, H-0.5]`), which `render_from_src` fills with
+zero. This is a **center-out-of-bounds support/geometry diagnostic from `S.render_from_src`, not a perceptual
+or visual-quality metric**; it is recorded so the documented border-support follow-up can be measured. For
+every output frame the block records the invalid pixel count and fraction plus the invalid fraction in fixed
+4-pixel (`invalid_support.strip_width_px`) top/bottom/left/right edge strips (the strip width is clamped to the
+frame). The aggregate reports the frame count, total invalid pixels, mean/max invalid fraction, the pooled and
+mean/max per-strip fractions and per-strip pixel areas. Memory stays O(number of output frames) — only these
+small per-frame scalars are retained, and **no mask video or mask artifact is written**. A border mask with the
+wrong shape or an unsupported dtype is refused with a stable `bad_mask_shape`/`bad_mask_dtype` code and the
+usual partial-output cleanup.
+
 ```bash
 .venv/bin/python -m bench.real_composition_render out/bench/RUN/manifest.json \
     --mode exact_composition --out-video out/bench/RUN/composition_exact.mp4
@@ -292,7 +306,9 @@ evidence. Focused tests: `tests/test_real_composition_render.py` (source-index s
 precomputed smoothing chart, dense-map recurrence and exact-vs-dense sampling within the interpolation bound on
 small smooth synthetic motion, off-frame `V_t` queries proving the padded lattice removes the border clamp,
 projective-horizon/non-finite/singular refusal, recorded error/`grid_origin`/`padding` fields, frame render
-pairing, manifest/provenance/output hashes, early/extra decode, malformed timeline and unsupported cadence,
+pairing, the invalid-support block (kept border mask; exact per-frame invalid counts/fractions and fixed 4-px
+edge-strip fractions, aggregate mean/max/pooled values and totals, and `bad_mask_shape`/`bad_mask_dtype`
+refusal), manifest/provenance/output hashes, early/extra decode, malformed timeline and unsupported cadence,
 non-finite/failure cleanup, output collision/overwrite refusal, output CFR and the CLI), all with fake
 media/render dependencies.
 

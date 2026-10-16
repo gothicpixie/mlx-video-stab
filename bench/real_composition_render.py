@@ -141,6 +141,20 @@ ERROR_FRAME_COUNT = 5
 COMPARISON_GRID = (9, 7)
 COMPARISON_INSET_PX = 1.0
 
+#: Fixed edge-strip width (pixels) for the invalid-support provenance report.
+SUPPORT_STRIP_PX = 4
+
+#: Definition of the invalid-support metric, recorded verbatim in the provenance report.
+SUPPORT_DEFINITION = (
+    "Invalid support is the boolean border mask returned by the production stabilize.render_from_src sampler: "
+    "a rendered output pixel is invalid when its sampled source coordinate lies outside the pixel-edge interval "
+    "[-0.5, W-0.5] x [-0.5, H-0.5] (the production warp.valid_mask convention), i.e. its center maps "
+    "out-of-bounds of the source frame, and render_from_src fills it with zero. These are center-out-of-bounds "
+    "pixels from S.render_from_src, a geometry/support diagnostic, and NOT a perceptual or visual-quality "
+    "metric. No mask video or mask artifact is written; only per-frame counts/fractions and aggregates are "
+    "recorded."
+)
+
 LIMITATIONS = (
     "research-only rendered geometry candidate; not a production integration and not a production default",
     "the output->source map is a dense-grid interpolation approximation to the continuous exact composition "
@@ -157,6 +171,8 @@ LIMITATIONS = (
     "uses the same source frames with its own map, so a baseline/candidate review isolates the map choice",
     "no network call and no upload; a later review (bench.real_pair_review --candidate-video, then "
     "bench.gemini_blind_review) happens separately",
+    "the invalid-support diagnostics count center-out-of-bounds samples from stabilize.render_from_src "
+    "(zero-filled pixels) and are not a perceptual metric; no mask video or mask artifact is written",
 )
 
 
@@ -371,6 +387,102 @@ def render_candidate_frame(frame, field, cfg):
     src = mx.array(np.asarray(field, np.float32))[None]
     img, bad = S.render_from_src(frame, src, cfg)
     return np.asarray(img), np.asarray(bad)
+
+
+def _edge_strip_slices(shape, strip_px):
+    """``(top, bottom, left, right)`` slice pairs for fixed-width edge strips of a ``(H, W)`` frame.
+
+    The strip width is clamped to the frame dimensions so a frame narrower/shorter than ``strip_px`` still
+    yields a well-defined (possibly full-frame) strip. The top/bottom strips span every column and the
+    left/right strips span every row.
+    """
+    H, W = int(shape[0]), int(shape[1])
+    if H < 1 or W < 1:
+        raise ValueError("frame shape must be positive")
+    s = min(int(strip_px), H, W)
+    if s < 1:
+        raise ValueError("strip_px must be >= 1")
+    return {
+        "top": (slice(0, s), slice(0, W)),
+        "bottom": (slice(H - s, H), slice(0, W)),
+        "left": (slice(0, H), slice(0, s)),
+        "right": (slice(0, H), slice(W - s, W)),
+    }
+
+
+def support_frame_stats(mask, shape, *, strip_px=SUPPORT_STRIP_PX):
+    """Per-frame invalid-support counts/fractions from one renderer border mask.
+
+    ``mask`` is the ``bad`` mask returned by :func:`render_candidate_frame` (``stabilize.render_from_src``):
+    ``True`` where the sampled source-coordinate center lies out-of-bounds. It must be a 2-D boolean-like
+    array matching ``shape = (H, W)``; a wrong shape or an unsupported dtype is refused with a stable code
+    (``bad_mask_shape``/``bad_mask_dtype``). Returns ``invalid_pixels``/``invalid_fraction`` plus per-strip
+    ``edge_invalid_pixels``/``edge_fraction`` for the fixed top/bottom/left/right strips; it stores no mask.
+    """
+    H, W = int(shape[0]), int(shape[1])
+    arr = np.asarray(mask)
+    if arr.ndim != 2 or arr.shape != (H, W):
+        raise RealCompositionRenderError(
+            "bad_mask_shape", f"renderer border mask has shape {arr.shape}, expected {(H, W)}")
+    if arr.dtype.kind not in "biuf":
+        raise RealCompositionRenderError(
+            "bad_mask_dtype",
+            f"renderer border mask has unsupported dtype {arr.dtype!r}; expected boolean/integer/float")
+    bad = arr.astype(bool)
+    invalid = int(np.count_nonzero(bad))
+    total = H * W
+    edge_invalid, edge_fraction = {}, {}
+    for name, (ys, xs) in _edge_strip_slices((H, W), strip_px).items():
+        sub = bad[ys, xs]
+        n = int(sub.size)
+        count = int(np.count_nonzero(sub))
+        edge_invalid[name] = count
+        edge_fraction[name] = (float(count) / n) if n else 0.0
+    return {
+        "invalid_pixels": invalid,
+        "frame_pixels": total,
+        "invalid_fraction": (float(invalid) / total) if total else 0.0,
+        "edge_invalid_pixels": edge_invalid,
+        "edge_fraction": edge_fraction,
+    }
+
+
+def aggregate_support(stats, shape, *, strip_px=SUPPORT_STRIP_PX):
+    """Aggregate per-frame :func:`support_frame_stats` into a compact report section.
+
+    Memory stays O(number of output frames): each entry is a small scalar/4-element dict and no mask or mask
+    video is retained. Empty ``stats`` yields defined zero aggregates.
+    """
+    H, W = int(shape[0]), int(shape[1])
+    frames = len(stats)
+    total_pixels = frames * H * W
+    total_invalid = int(sum(int(s["invalid_pixels"]) for s in stats))
+    fractions = [float(s["invalid_fraction"]) for s in stats]
+    edges = {}
+    for name, (ys, xs) in _edge_strip_slices((H, W), strip_px).items():
+        area = int((ys.stop - ys.start) * (xs.stop - xs.start))
+        strip_total_pixels = frames * area
+        strip_invalid = int(sum(int(s["edge_invalid_pixels"][name]) for s in stats))
+        per = [float(s["edge_fraction"][name]) for s in stats]
+        edges[name] = {
+            "strip_px": int(ys.stop - ys.start) if name in ("top", "bottom") else int(xs.stop - xs.start),
+            "per_frame_pixels": area,
+            "total_pixels": strip_total_pixels,
+            "total_invalid_pixels": strip_invalid,
+            "pooled_fraction": (float(strip_invalid) / strip_total_pixels) if strip_total_pixels else 0.0,
+            "mean_fraction": (sum(per) / frames) if frames else 0.0,
+            "max_fraction": (max(per) if per else 0.0),
+        }
+    return {
+        "frames": frames,
+        "frame_pixels": H * W,
+        "total_pixels": total_pixels,
+        "total_invalid_pixels": total_invalid,
+        "pooled_invalid_fraction": (float(total_invalid) / total_pixels) if total_pixels else 0.0,
+        "mean_invalid_fraction": (sum(fractions) / frames) if frames else 0.0,
+        "max_invalid_fraction": (max(fractions) if fractions else 0.0),
+        "edge": edges,
+    }
 
 
 def _pixel_axis(coord, n):
@@ -708,6 +820,7 @@ def render_candidate(manifest_path, *, mode, out_video, out_json=None, crf=DEFAU
         compare_positions = set(representative_frames(len(indices), ERROR_FRAME_COUNT))
         cmp_points = comparison_points(W, H)
         comparisons, raw_errors = [], []
+        support_frames = []
         decoded_index, current, rendered = -1, None, 0
         for i, want in enumerate(indices):
             while decoded_index < want:
@@ -735,13 +848,17 @@ def render_candidate(manifest_path, *, mode, out_video, out_json=None, crf=DEFAU
                 comparisons.append(stats)
                 raw_errors.append(err)
             try:
-                img, _bad = render_candidate_frame(frame, field, cfg)
+                img, bad = render_candidate_frame(frame, field, cfg)
             except RealCompositionRenderError:
                 raise
             except Exception as exc:  # the production sampler failed
                 raise RealCompositionRenderError("render_failure",
                                                  f"render failed at source frame {decoded_index}: "
                                                  f"{type(exc).__name__}: {exc}") from exc
+            support = support_frame_stats(bad, (H, W))
+            support["frame"] = int(i)
+            support["source_frame"] = int(decoded_index)
+            support_frames.append(support)
             img = np.asarray(img)
             _require(img.shape == (H, W, 3), "bad_render_shape",
                      f"rendered frame at source frame {decoded_index} has shape {img.shape}, expected "
@@ -786,6 +903,8 @@ def render_candidate(manifest_path, *, mode, out_video, out_json=None, crf=DEFAU
             error_aggregate = {"frames_compared": 0, "points": 0, "max_px": None, "mean_px": None,
                                "p95_px": None}
 
+        support_aggregate = aggregate_support(support_frames, (H, W))
+
         report = {
             "schema": SCHEMA,
             "ok": True,
@@ -803,6 +922,14 @@ def render_candidate(manifest_path, *, mode, out_video, out_json=None, crf=DEFAU
                 "kernel": cfg.kernel,
                 "border": "zeros",
                 "smoothed_precomputed_once": bool(smoothed is not None),
+            },
+            "invalid_support": {
+                "definition": SUPPORT_DEFINITION,
+                "metric": "center_out_of_bounds_invalid_fraction",
+                "units": "fraction of output pixels",
+                "strip_width_px": int(SUPPORT_STRIP_PX),
+                "per_frame": support_frames,
+                "aggregate": support_aggregate,
             },
             "approximation": {
                 "name": APPROX_NAME,

@@ -649,6 +649,111 @@ def test_bad_field_shape_refused(tmp_path, monkeypatch):
     assert ei.value.code == "bad_field_shape"
 
 
+# --------------------------------------------------------------------------------------
+# invalid-support provenance diagnostics (center-out-of-bounds mask from render_from_src)
+# --------------------------------------------------------------------------------------
+
+def _support_masks():
+    """Three known masks over the 12x16 test frame exercising the fixed 4-px edge strips.
+
+    Strip geometry: top/bottom = 4 rows x 16 cols (area 64), left/right = 12 rows x 4 cols (area 48).
+    Per frame invalid counts are 2 (top only), 4 (left only) and 1 (interior only), so the per-frame and
+    aggregate mean/max and pooled edge fractions all differ and can be pinned exactly.
+    """
+    m0 = np.zeros((H, W), bool)
+    m0[0, 6] = m0[0, 7] = True              # top strip only (cols 6,7 are inside the horizontal interior)
+    m1 = np.zeros((H, W), bool)
+    m1[5, 0] = m1[6, 0] = m1[5, 1] = m1[6, 1] = True   # left strip only (rows 5,6 are inside the vertical interior)
+    m2 = np.zeros((H, W), bool)
+    m2[6, 6] = True                         # interior only, no edge strip
+    return [m0, m1, m2]
+
+
+def test_invalid_support_per_frame_and_aggregate_values(tmp_path, monkeypatch):
+    """The border mask is kept (not discarded) and yields exact per-frame/aggregate invalid-support values."""
+    run, _ = _setup(monkeypatch, tmp_path, source_frames=6, output_frames=3)
+    masks = _support_masks()
+    calls = {"n": 0}
+
+    def fake_known_mask(frame, field, cfg):
+        mask = masks[calls["n"] % len(masks)]
+        calls["n"] += 1
+        return np.array(frame, copy=True), mask.copy()
+
+    monkeypatch.setattr(R, "render_candidate_frame", fake_known_mask)
+    video, report = _out(tmp_path)
+    rep = R.render_candidate(run / "manifest.json", mode="exact_composition", out_video=video, out_json=report)
+
+    sup = rep["invalid_support"]
+    assert sup["strip_width_px"] == R.SUPPORT_STRIP_PX == 4
+    assert sup["definition"] == R.SUPPORT_DEFINITION
+    assert "NOT a perceptual" in sup["definition"]
+    assert "center-out-of-bounds" in sup["definition"]
+
+    per = sup["per_frame"]
+    assert len(per) == 3
+    assert [p["frame"] for p in per] == [0, 1, 2]
+    assert [p["source_frame"] for p in per] == rep["pairing"]["frame_indices"]
+    assert [p["invalid_pixels"] for p in per] == [2, 4, 1]
+    frame_px = H * W
+    assert [p["invalid_fraction"] for p in per] == pytest.approx([2 / frame_px, 4 / frame_px, 1 / frame_px])
+    # frame 0: top strip only; frame 1: left strip only; frame 2: interior, so no edge strip.
+    assert per[0]["edge_fraction"]["top"] == pytest.approx(2 / 64)
+    assert per[0]["edge_fraction"]["left"] == 0.0
+    assert per[1]["edge_fraction"]["left"] == pytest.approx(4 / 48)
+    assert per[2]["edge_fraction"] == {"top": 0.0, "bottom": 0.0, "left": 0.0, "right": 0.0}
+    assert per[0]["edge_invalid_pixels"]["top"] == 2
+
+    agg = sup["aggregate"]
+    assert agg["frames"] == 3 and agg["frame_pixels"] == frame_px
+    assert agg["total_pixels"] == 3 * frame_px
+    assert agg["total_invalid_pixels"] == 7
+    assert agg["pooled_invalid_fraction"] == pytest.approx(7 / (3 * frame_px))
+    assert agg["mean_invalid_fraction"] == pytest.approx(7 / (3 * frame_px))
+    assert agg["max_invalid_fraction"] == pytest.approx(4 / frame_px)
+    # mean and max differ, so both are genuinely reported.
+    assert agg["max_invalid_fraction"] > agg["mean_invalid_fraction"]
+    left = agg["edge"]["left"]
+    assert left["strip_px"] == 4 and left["per_frame_pixels"] == 48
+    assert left["total_pixels"] == 3 * 48
+    assert left["total_invalid_pixels"] == 4
+    assert left["pooled_fraction"] == pytest.approx(4 / (3 * 48))
+    assert left["mean_fraction"] == pytest.approx(4 / (3 * 48))
+    assert left["max_fraction"] == pytest.approx(4 / 48)
+    assert agg["edge"]["bottom"]["total_invalid_pixels"] == 0
+    assert agg["edge"]["top"]["total_invalid_pixels"] == 2
+    assert agg["edge"]["right"]["total_invalid_pixels"] == 0
+
+    # The report is JSON on disk, and no mask video/artifact was produced.
+    on_disk = json.loads(report.read_text())
+    assert on_disk["invalid_support"]["aggregate"] == agg
+    assert on_disk["invalid_support"]["per_frame"] == per
+    assert not list(tmp_path.glob("*mask*"))
+
+
+def test_bad_mask_shape_refused_and_cleaned(tmp_path, monkeypatch):
+    run, _ = _setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(R, "render_candidate_frame",
+                        lambda frame, field, cfg: (np.array(frame, copy=True), np.zeros((H, W + 1), bool)))
+    video, report = _out(tmp_path)
+    with pytest.raises(R.RealCompositionRenderError) as ei:
+        R.render_candidate(run / "manifest.json", mode="exact_composition", out_video=video, out_json=report)
+    assert ei.value.code == "bad_mask_shape"
+    assert not video.exists() and not report.exists()
+    assert not list(tmp_path.glob(".candidate.*.mp4"))
+
+
+def test_bad_mask_dtype_refused_and_cleaned(tmp_path, monkeypatch):
+    run, _ = _setup(monkeypatch, tmp_path)
+    monkeypatch.setattr(R, "render_candidate_frame",
+                        lambda frame, field, cfg: (np.array(frame, copy=True), np.full((H, W), "x")))
+    video, report = _out(tmp_path)
+    with pytest.raises(R.RealCompositionRenderError) as ei:
+        R.render_candidate(run / "manifest.json", mode="exact_composition", out_video=video, out_json=report)
+    assert ei.value.code == "bad_mask_dtype"
+    assert not video.exists() and not report.exists()
+
+
 def test_nonfinite_render_refused_and_cleaned(tmp_path, monkeypatch):
     run, _ = _setup(monkeypatch, tmp_path)
     monkeypatch.setattr(R, "render_candidate_frame",
