@@ -7,6 +7,7 @@ few corners must be reported as a fallback, not scored as perfectly stable).
 """
 import numpy as np
 import pytest
+import warnings
 
 from mlxstab import geometry as G
 from mlxstab import tracks
@@ -82,6 +83,18 @@ def test_blank_frames_are_reported_as_a_fallback_not_static_success():
     blank = np.zeros((96, 96, 3), np.uint8)
     H, fb, inl, n = tracks.pair_similarity(_gray(blank), _gray(blank), rng=np.random.default_rng(0))
     assert fb and n == 0 and inl == 0.0
+    assert np.allclose(H, np.eye(3))
+
+
+def test_empty_ransac_support_returns_fallback_without_nan_fit_warning(monkeypatch):
+    b = _base(120, 120, seed=12)
+    f = _shifted(b, 120, 120)
+    monkeypatch.setattr(tracks, "_ransac_similarity",
+                        lambda src, dst, *a, **k: (np.eye(3), np.zeros(len(src), bool)))
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", RuntimeWarning)
+        H, fb, inl, n = tracks.pair_similarity(_gray(f), _gray(f), rng=np.random.default_rng(0))
+    assert fb and inl == 0.0 and n >= 8
     assert np.allclose(H, np.eye(3))
 
 

@@ -2499,3 +2499,35 @@ The estimator agreement flag is true, while the ratio relative gap is 0.322. Thi
 metric result on this single two-second window only; it says nothing about other scenes, intentional-motion
 preservation, local mesh/row distortion, visual preference, or superiority to PyTorch. Reports and pixel caches
 remain local under ignored `out/bench/`.
+
+### Cross-source KLT abstention checks and Gemini review (2026-10-16)
+
+On distinct local source `00177.MTS` (SHA-256
+`8c5d98d15448ad0557537ba9d02a28fc426185b4e32bdf1be3eb4964fdbea714`), window 60-62 s, the direct evaluator
+reported RAFT jitter **0.22596 -> 0.16241 px** and KLT jitter **2.23561 -> 2.16868 px** (KLT ratio **0.970**,
+classified unchanged at the 5% boundary). KLT covered all 59 pairs with no failed fits, but its absolute jitter
+was about ten times RAFT's, so this is an estimator disagreement, not evidence that either is correct. RAFT had
+one failed fit on both input and output, making the combined agreement flag **unreliable**. Gemini 3.8 Flash via
+the Vertex API reviewed the raw/stabilized side-by-side and its panel reversal; both medium-confidence judgments
+were **ties**, with no side-following. The reviewer described almost identical movement, but both clips are only
+480x270 panels from an extremely dark two-second scene. This visual review does not settle the metric conflict.
+
+On `STREAM_00029.MTS` (SHA-256
+`2a8e01a69f13178ce12b3537bd48c750815c48879b4d87a7411dcc048936369b`), the four-second one-second baseline
+window had KLT jitter **0.07303 -> 0.07149 px** (ratio **0.979**, unchanged), no KLT failed pairs and about 480
+tracks per pair. RAFT input jitter was **0.04948 px**, below the predeclared 0.05 px ratio floor, so its ratio
+and estimator agreement remain unavailable. This is a near-static clip where a small ratio is not interpretable.
+
+Warm-iteration follow-up. A same-code, same-source 90-100 s `00177.MTS` baseline / `warm_iters=8` pair had
+already measured RAFT jitter **2.50279 -> 2.15134 px** but wobble **0.47834 -> 0.69012 px**; end-to-end
+stabilization time fell **967.9 -> 746.1 s** (22.9%). The KLT cross-check could not score either run: input
+tracking failed on 37/299 pairs (12.4%); output failed on 43/299 (14.4%) for baseline and 51/299 (17.1%) for
+warm-8. Path metrics were therefore unavailable rather than silently bridging gaps. This does not pass the
+warm-8 quality gate; it remains a speed candidate with a wobble regression and no independent KLT quality
+measurement on this dark scene. Artifacts remain under ignored `out/bench/`.
+
+The longer-run KLT check also surfaced an empty-inlier edge case: RANSAC can lose all support during refinement,
+and the caller previously passed its empty mask into `geometry.fit_model`, producing NaN runtime warnings before
+falling back. `pair_similarity` now returns the explicit fallback before that empty fit; a regression test pins
+the behavior. The 00177 ten-second KLT pass was rerun with `RuntimeWarning` promoted to error and completed
+without warnings, while still reporting path metrics unavailable for the documented failed-pair reason.

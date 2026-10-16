@@ -181,6 +181,10 @@ def pair_similarity(prev_gray, next_gray, *, prev_invalid=None, next_invalid=Non
     H, inl = _ransac_similarity(a, b, ransac_thr, rng, iters=ransac_iters, min_inliers=min_tracks)
     if not np.all(np.isfinite(H)):
         return np.eye(3), True, 0.0, len(a)
+    if int(inl.sum()) < min_tracks:
+        # RANSAC deliberately returns an empty inlier mask when refinement loses support. Do not pass empty
+        # arrays to fit_model: its weighted-mean divisions would emit NaNs/warnings before the fallback.
+        return np.eye(3), True, 0.0, len(a)
     H = G.fit_model(a[inl], b[inl], "similarity")
     if not np.all(np.isfinite(H)) or H[2, 2] == 0:
         return np.eye(3), True, 0.0, len(a)
