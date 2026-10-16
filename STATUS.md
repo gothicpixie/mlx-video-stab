@@ -2220,10 +2220,11 @@ with `os.replace` only after a clean writer/ffmpeg exit. Failed construction, en
 removes the partial while preserving an existing destination. New-file permissions follow the OS umask without
 reading or mutating process-global `umask`; replacements preserve the old destination mode. Symlinks remain
 unchanged on failure and are replaced by a regular output on success (the referent is left untouched). Tests
-cover publish/failure cleanup, permissions and symlink behavior. The full suite passed **1335 tests**; a real
-ffmpeg/ffprobe smoke verified a three-frame output, umask-derived new-file mode, existing-mode preservation and
-the documented symlink behavior. CodeGraph was re-synced after the change; with the explicit `tests/**` filter it
-found 27 affected test files. The full suite and the focused encoder/cadence suites were run directly.
+cover publish/failure cleanup, permissions, symlink behavior and stdin-close failure. The full suite passed
+**1335 tests** before the final close-failure regression was added; **31 focused encoder/cadence tests** passed
+with it included. A real ffmpeg/ffprobe smoke verified a three-frame output, umask-derived new-file mode,
+existing-mode preservation and the documented symlink behavior. CodeGraph was re-synced after the change; with
+the explicit `tests/**` filter it found 27 affected test files.
 
 ## What works
 

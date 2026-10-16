@@ -122,6 +122,20 @@ class _BrokenWritingStdin(_WritingStdin):
         raise BrokenPipeError("ffmpeg exited")
 
 
+class _CloseErrorWritingStdin(_WritingStdin):
+    """Streams buffers through to the temp, then fails on close after releasing the real file handle.
+
+    The handle is closed before raising so cleanup can still remove the temp and callers can observe the
+    stream was really closed -- mirroring a stdin close failure that follows buffered output.
+    """
+
+    def close(self):
+        self.close_calls += 1
+        self.closed = True
+        self._fh.close()
+        raise OSError("stdin close failed")
+
+
 class _WritingPopen:
     """Popen double that opens the encoder's temporary output and returns itself as the child handle."""
 
@@ -276,6 +290,27 @@ def test_encoder_broken_pipe_preserves_target_and_removes_temp(monkeypatch, tmp_
     assert target.read_bytes() == b"ORIGINAL"
     assert _hidden_temps(tmp_path) == []
     assert proc.stdin.closed and proc.waited
+
+
+def test_encoder_stdin_close_failure_preserves_target_and_removes_temp(monkeypatch, tmp_path):
+    """A stdin close failure after buffered output must not publish: close raises it, waits, and drops the temp.
+
+    Covers the atomic-publication gap where every write succeeded and the child exits zero, but stdin's close
+    fails. The stream handle is released before the raise, so the hidden temp is removable and the pre-existing
+    target must survive byte-for-byte instead of being overwritten.
+    """
+    target = tmp_path / "out.mp4"
+    target.write_bytes(b"ORIGINAL")
+    proc = _WritingPopen(returncode=0, stdin_cls=_CloseErrorWritingStdin)
+    monkeypatch.setattr(media.subprocess, "Popen", proc)
+    enc = media.Encoder(str(target), 4, 4, 30)
+    enc.write(np.full((4, 4, 3), 6, np.uint8))
+    with pytest.raises(OSError, match="stdin close failed"):
+        enc.close()
+    assert target.read_bytes() == b"ORIGINAL"     # a zero exit must not publish when stdin's close failed
+    assert proc.stdin.closed                      # the real stream handle was released before the raise
+    assert proc.waited                            # the child wait was still attempted during teardown
+    assert _hidden_temps(tmp_path) == []          # the partial temp is removed, not leaked
 
 
 def test_encoder_nonzero_exit_preserves_target_and_removes_temp(monkeypatch, tmp_path):
