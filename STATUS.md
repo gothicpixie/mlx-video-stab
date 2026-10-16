@@ -2793,3 +2793,40 @@ can supply, with the 500-cap cell as a secondary density comparison). Aggregate 
 not by pretending adjacent pairs are independent. Keep the current t032 result as a diagnostic lead only; do
 not tune a production default from it. Test commands passed: `tests/test_tracks.py` and
 `tests/test_track_domain_audit.py` (run before commit).
+
+## Follow-up: localize the E02 KLT regression (2026-10-16)
+
+The equal-count KLT factorial was extended from the first two seconds to the full E02 t032–042 output, using
+K=250 detected corners in every cell and the same aligned per-output masks. All 299 pairs were supported, with
+zero tracking fallbacks. The candidate regressed in every detector/tracker cell: LL jitter rose 31.0%
+(0.7258 -> 0.9508 px), LH 28.9% (0.7282 -> 0.9384), HL 26.0% (0.7260 -> 0.9149), and HH 20.9%
+(0.7186 -> 0.8689). Equalizing feature count therefore removes the earlier cap/count confound but does not
+remove the full-window regression. The high-pass detector/tracker representation softens it somewhat; it does
+not reverse it.
+
+Per-pair loss localizes most of the increase to output seconds 7–9 (source t039–041). In the LL cell, pairs
+210–239 added an average 1.061 px of jitter contribution and every pair in that block was worse; pairs 240–269
+added 0.473 px on average. The first 210 pairs were near zero or mixed. Track counts remained similar and there
+were no fallbacks, though candidate inlier fraction was modestly lower in the event block (0.873 vs 0.903).
+The equal-count result is one clip/window and does not establish a general effect.
+
+A focused, unmasked `bench.evaluate` run on the same 60-frame t039–041 cuts found RAFT jitter 0.5437 ->
+0.6377 px (+17.3%) and KLT jitter 0.6411 -> 1.4097 px (+119.9%), with zero fallbacks. This supports a real
+local increase in measured frame-to-frame motion in the rendered candidate; KLT amplifies that increase much
+more than RAFT. It does not by itself tell us whether viewers would prefer either rendition or which component
+of the composition change causes the motion.
+
+Gemini 3.8 Flash reviewed the isolated seconds 7–9 in both left/right orientations and returned a tie at medium
+and low confidence, describing similar visible motion. That agrees with “no reliably visible winner at this
+review scale,” not with equivalence. Independent fresh source anchors produced mixed or near-zero one-second
+KLT deltas (STREAM_00024.MTS t571 and STREAM_00030.MTS t087, tested at K=250 and K=500), so the E02 event has
+not generalized to other windows.
+
+Decision: keep `source_highpass` experimental; make no default or integration change. The investigation has
+now narrowed the next question to the localized t039–041 rendered-motion increase and its cause. Next, compare
+the baseline and candidate source-coordinate maps over that fixed event at equal output probes, then repeat the
+same predeclared motion and blinded-review protocol on a disjoint qualifying window. If the map comparison does
+not account for the measured increase, audit rendered-image resampling and evaluator sensitivity. Do not tune
+on the already-inspected t039–041 event. Detailed ignored artifacts and per-pair data are under
+`out/bench/e02_source_highpass_s13_t032_10s/`, `out/bench/e02_anchor_s13_t571_1s/`, and
+`out/bench/e02_anchor_s30_t087_1s/`.
