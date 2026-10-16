@@ -240,6 +240,35 @@ reported separately from the sampled feasibility score, and this is a geometry/c
 does not prevent foldover or measure perceptual quality. The screen must not be used by itself to choose a
 production stabilization policy.
 
+### Border-component attribution (research diagnostic)
+
+`bench/real_border_component_audit.py` decomposes the same reconstructed production plan's invalid-pixel
+coverage by composition component. It loads the strict `motion_r0.npz` and the resolved manifest config,
+reconstructs the Plan with `mlxstab.stabilize.plan`, then decodes `mask_r0.mp4` and reconstructs the
+full-plan invalid mask with the production NumPy sampler
+(`_source_coords_ts_scales_np` at scale 1.0 + `_valid_mask_np`) on every encoded output frame. Only after the
+reconstruction is **pixel-exact** against the encoded mask does it measure four plans — `full` (G + mesh +
+rows), `global_only` (G), `global_mesh` (G + mesh, rows zero) and `global_rows` (G + rows, mesh zero) — and
+report per-frame and aggregate full-resolution and bottom-N-row invalid counts/fractions, each ablation's
+delta against `global_only`, the sign counts of those deltas, and the non-additive interaction
+`full - global_mesh - global_rows + global_only` (equivalently `combined - mesh - rows`). It is read-only and
+CPU/NumPy-only: it does not decode source footage, run flow, render/encode images, acquire the heavy lock or
+alter defaults. It requires a successful `run_case` manifest with sibling `motion_r0.npz` and `mask_r0.mp4`
+artifacts whose cadence agrees with the manifest (motion fps = analysis fps and mask fps = output fps, both
+to 1e-6, and an integer output decimation). The JSON report is path-free and strictly finite; use an output
+path under ignored `out/`:
+
+```bash
+.venv/bin/python -m bench.real_border_component_audit out/bench/RUN/manifest.json \
+    --out out/bench/RUN/real_border_component_audit.json --bottom-rows 4
+```
+
+The component deltas are **not** independent: the production sampler applies the mesh correction at the
+global-mapped coordinate and the row correction at the mesh-shifted `y`, so zeroing one residual still lets
+the other be sampled at its composed coordinate. The interaction term reports exactly that non-additivity.
+The full-resolution values are a coverage diagnostic, not a perceptual/quality/distortion metric, and the
+tool must not be used by itself to choose a production stabilization policy.
+
 ## Rendered composition candidate (E02 perceptual gate)
 
 The geometry-only composition audit above renders no pixels, so the next E02 gate is a perceptual check on
