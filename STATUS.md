@@ -2364,3 +2364,40 @@ position-reversal audit records **one complete paired tie**. Gemini reported no 
 stability or framing and noted equal compression artifacts. This is **inconclusive for fine shake and gives no
 evidence of a visible benefit**, so the fill is **not adopted from this clip**; because the candidate used
 CRF22 and the A/B is low-resolution, **compression and review limits apply**.
+
+## Matched t060–070 s baseline/warm-8 screen and blinded review (2026-10-16)
+
+Matched 10 s screen. Two `run_case` manifests completed `status=success` on the same 60–70 s window of local
+`00176.MTS`, both using source SHA
+`e4b1f80d54dfa9089741486be297c6fe74d754fe127ec04dfe5a7edcf8d9fbb3`, with matched input metrics. The only
+resolved configuration difference is `warm_iters=8` in the warm-8 case; the baseline is otherwise unchanged.
+Both runs recorded **57 shared-lock releases** and about **672.3 s** of reported pause total.
+
+Timing. Stabilization wall was **1030.965 s** for baseline versus **777.374 s** for warm-8 (**24.6% less**).
+Almost all of the saving is analysis: **742.367 s** versus **490.523 s** (**33.9% less**). Plan and render were
+essentially unchanged (**32.49 / 256.06 s** versus **31.13 / 255.68 s**), and evaluation was **536.83 s**
+versus **555.60 s**.
+
+Quality metrics. Output jitter was **0.5191697 px** (baseline) versus **0.5226940 px** (warm-8, **+0.68%**);
+output wobble was **0.0536469 px** versus **0.0549162 px** (**+2.37%**); Liu stability was **0.9255194**
+versus **0.9220134**. Both runs had **zero fit fallbacks**, and the input metrics matched.
+
+Blinded review. A baseline-versus-warm-8 blinded, position-reversed comparison was built (one original and one
+reversed pair). **Gemini 3.8 Flash returned a medium-confidence tie in both orders**, reporting no clearly
+visible stability difference. The position-reversal audit records **one complete paired tie**. Both reviews are
+limited by low resolution and the short ten-second duration.
+
+Caveat. The baseline manifest's source revision is **`1fb994d`** and the warm-8 manifest's is **`b93382f`**, so
+the two runs are **not byte-identical code**. Inspection found the intervening `mlxstab/stabilize.py` and
+`mlxstab/media.py` changes are encoder/error-cleanup/reliability changes rather than RAFT, motion-fitting or
+warp-equation changes, but strict one-variable attribution remains imperfect.
+
+Reading. The speed gain is **promising on this clip only**: warm-8 cut stabilization wall time by **24.6%**,
+almost all of it from analysis, and that is the encouraging result. The measured metrics did not match,
+however: warm-8 had small but real increases in jitter (**+0.68%**, 0.5191697 to 0.5226940 px) and wobble
+(**+2.37%**, 0.0536469 to 0.0549162 px) and a slightly **lower** Liu stability (0.9220134 versus 0.9255194).
+The blinded Gemini 3.8 Flash review could not distinguish the two methods (a medium-confidence tie in both
+orders), but that judgment is at **limited resolution and a ten-second duration**, so it does not resolve the
+small measured regressions. A promising speed result with small regressions and a perceptual review that
+cannot tell the methods apart is **insufficient to change a default**. Reports and clips remain in the
+ignored `out/` tree.
