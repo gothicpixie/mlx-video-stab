@@ -3657,7 +3657,33 @@ was used. The original single-shift screen and full 48-cell result are retained 
 Decision: drop inlier-fraction p10 as a scale-selection gate candidate. Its association with the two worst real
 seconds did not replicate in the controlled flow screen, and the signal had no dynamic range. This does not
 invalidate the original real-footage quality result: scale 4 still had higher flow error in every synthetic
-cell. The flow-only experiment cannot establish whether that error becomes visible as accumulated stabilized
-path error. Next run matched full stabilization on the existing layered synthetic scene (parallax, rolling
-shutter, moving subject), compare scales 2 and 4 to the intended camera path, and retain the fit statistic only
-as a diagnostic. Do not change auto selection or claim a calibrated confidence measure.
+cell. The first full-stabilization path controls are recorded below; they confirm a scale-4 high-frequency
+penalty in one far-only scene but do not yet test parallax or moving subjects. Keep the fit statistic diagnostic
+only. Do not change auto selection or claim a calibrated confidence measure.
+
+### Full-stabilization synthetic path controls (2026-10-17)
+
+`bench/flow_scale_synthetic_path_audit.py` maps a fixed grid of output pixels through each saved plan's full
+`source_coords` field, then through the synthetic source's exact camera transform, and compares those world
+coordinates with the intended camera path. It requires matched run manifests, plans, cadence, and source hash;
+the paired runs differed only in stabilization flow downscale and used the same fixed scale-2 output evaluator.
+The audit separates global bias, temporal path residual, linear drift, and high/low-frequency velocity error.
+The audit is a geometric synthetic metric, not a perceptual score.
+
+On a 60-frame 1080p far-layer-only seed-13 scene with rolling shutter enabled (`rho=0.8`), scale 2 / scale 4
+high-pass path-velocity error RMS was 0.445 / 0.503 px per frame (mean absolute error 0.166 / 0.270); the
+fixed evaluator reported jitter 0.078 / 0.201 px. In a matched global-shutter control (`rho=0`), the
+corresponding RMS values were 0.066 / 0.201 px per frame (mean absolute error 0.052 / 0.164), and evaluator
+jitter was 0.029 / 0.173 px. Thus scale 4 was worse on these high-frequency endpoints in both versions of
+this one generated scene. Both scales also accumulated roughly 59 px of linear path drift over the clip in
+each control, while raw input drift was only a few pixels. That shared drift is a low-frequency path-fidelity
+warning, but it does not identify the smoother as its cause: target semantics, trajectory mapping, integration
+bias, and boundary effects remain possible. Fit-inlier p10 was 1.0 and there were no fallback pairs, so those
+signals again did not expose the scale-4 difference.
+
+This is one seed and one far-only scene, without parallax or a moving subject; neither result generalizes to
+real footage or identifies an acceptable scale. The next experiment is a small static-camera and signed,
+known-pan control with the same flow and renderer settings. Check whether path error is near zero for static
+input and whether pan gain and sign track the intended path. Only then sweep smoother strength to diagnose
+low-frequency suppression. Keep scale selection unchanged and treat scale 4 as an observed quality-risk
+option pending more scenes and replication. Reports and videos remain under ignored `out/bench/`.
