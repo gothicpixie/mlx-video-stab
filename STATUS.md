@@ -3711,8 +3711,23 @@ Gemini 3.8 Flash via Vertex reviewed the paired outputs in original and position
 ties in both, explicitly saying the noise-texture scene lacked recognizable structure for visual stabilization
 assessment. Treat that review as inconclusive, not as evidence that the outputs are equivalent. The exact-Fit
 five-seed screen and this rendered run agree that higher fidelity can preserve intended pan while retaining
-strong jitter reduction, but this is still one rendered source and one pan profile. Do not change the production
-fidelity default yet. Next test both pan directions and speeds, sinusoidal intended motion, and independent
-jitter seeds in rendered layered scenes; include a natural real clip before choosing the path objective. Keep
-scale selection unchanged and treat scale 4 as an observed quality-risk option. Reports and videos remain under
-ignored `out/bench/`.
+strong jitter reduction, but this is still one rendered source and one pan profile.
+
+The follow-up on natural footage used `00177.MTS` at 50–60 s, the same 600-frame low-light dance window as the
+earlier scale screen. Scale 2, source hash, cadence, evaluation settings, and every other config field matched;
+only L1 fidelity changed from 0.1 to 3. Both runs had zero flow-fit fallbacks. Raw jitter/wobble were
+0.26891 / 0.05352 px; fidelity 0.1 output was 0.15611 / 0.05096 px, and fidelity 3 was 0.17096 / 0.05343 px.
+Fidelity 3 therefore raised jitter 9.5% and wobble 4.8% relative to 0.1, while still reducing jitter 36% from
+raw and leaving wobble essentially at raw. KLT path metrics remained unavailable in both outputs (two failed
+pairs each). Stabilization time was 537.7 s / 531.3 s (0.1 / 3), with no material time difference.
+
+Gemini 3.8 Flash via Vertex reviewed the position-balanced blind A/B pair and called tie in both orders. It
+reported no visible stabilization difference and cited darkness, blur, and rolling-shutter distortion as
+limitations. Treat this as inconclusive on subtle differences. The natural clip provides no measured benefit
+for fidelity 3; the synthetic exact-path result remains the only evidence that it preserves known pan better.
+Do not promote fidelity 3 or change the production default. Keep 0.1 provisional, not validated. The next gate
+is a multi-clip paired fidelity sweep with clips that have reliable independent tracking, plus exact-motion
+tests for multiple pan speeds and sinusoidal intentional motion. Evaluate path retention together with jitter,
+wobble, crop, and distortion; use frame-block bootstrap intervals and blind visual review as secondary evidence.
+Keep scale selection unchanged and treat scale 4 as an observed quality-risk option. Reports, comparisons and
+Gemini responses remain under ignored `out/bench/`.
