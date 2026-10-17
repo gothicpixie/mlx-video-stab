@@ -43,14 +43,15 @@ def exact_motion(width, height, fps, intended_x, actual_x, config):
     return plan(motion, config, n_frames=len(actual_x))
 
 
-def _path_metrics(plan_obj, intended_x, actual_x, fps, highpass_sigma=3.0):
+def _path_metrics(plan_obj, intended_x, actual_x, fps, profile, amplitude_px, period_frames,
+                  highpass_sigma=3.0, trim_frames=30):
     # path_quads are the planner's intended camera path in corner coordinates.
     base = np.asarray(plan_obj.path_quads[0, 0], np.float64)
     output_x = np.asarray(plan_obj.path_quads[:, 0, 0], np.float64) - base[0]
     intended_x = np.asarray(intended_x, np.float64)
     actual_x = np.asarray(actual_x, np.float64)
     idx = np.arange(len(output_x), dtype=np.float64)
-    if np.ptp(intended_x) > 1e-9:
+    if profile == "linear" and np.ptp(intended_x) > 1e-9:
         path_gain = float(np.polyfit(intended_x, output_x, 1)[0])
     else:
         path_gain = None
@@ -62,7 +63,7 @@ def _path_metrics(plan_obj, intended_x, actual_x, fps, highpass_sigma=3.0):
     raw_hp_velocity_error = raw_velocity_error - gaussian_filter1d(
         raw_velocity_error, highpass_sigma, mode="nearest")
     slope = np.polyfit(idx, error, 1)[0] if len(idx) > 1 else 0.0
-    return {
+    metrics = {
         "path_gain": path_gain,
         "output_endpoint_x_px": float(output_x[-1]),
         "intended_endpoint_x_px": float(intended_x[-1]),
@@ -73,18 +74,63 @@ def _path_metrics(plan_obj, intended_x, actual_x, fps, highpass_sigma=3.0):
         if len(hp_velocity_error) else 0.0,
         "raw_highpass_velocity_error_rms_px_per_frame": float(np.sqrt(np.mean(raw_hp_velocity_error ** 2)))
         if len(raw_hp_velocity_error) else 0.0,
-        "static_output_drift_px_per_frame": float(slope) if np.ptp(intended_x) <= 1e-9 else None,
+        "static_output_drift_px_per_frame": float(slope) if profile == "static" else None,
         "frames": len(output_x),
         "fps": float(fps),
     }
+    if profile == "sinusoid":
+        if period_frames <= 0 or amplitude_px <= 0:
+            raise ValueError("sinusoid amplitude and period must be positive")
+        use = np.arange(trim_frames, len(output_x) - trim_frames)
+        if len(use) < 4:
+            raise ValueError("sinusoid path is too short after trimming boundary transients")
+        omega = 2 * np.pi / period_frames
+        design = np.column_stack((np.ones(len(use)), np.sin(omega * use), np.cos(omega * use)))
+        fit = np.linalg.lstsq(design, output_x[use], rcond=None)[0]
+        fit_amplitude = float(np.hypot(fit[1], fit[2]))
+        predicted = design @ fit
+        residual = output_x[use] - predicted
+        total = output_x[use] - output_x[use].mean()
+        total_ss = float(np.sum(total ** 2))
+        fit_r2 = 1.0 - float(np.sum(residual ** 2)) / total_ss if total_ss > 1e-12 else None
+        phase_identifiable = fit_amplitude > max(amplitude_px * 1e-8, 1e-10)
+        if phase_identifiable:
+            phase_advance = float(np.arctan2(fit[2], fit[1]))
+            phase_lag = float(-phase_advance / omega)
+            phase_lag = (phase_lag + period_frames / 2) % period_frames - period_frames / 2
+            phase_degrees = float(phase_lag * 360 / period_frames)
+        else:
+            phase_lag = phase_degrees = None
+        metrics.update({
+            "sinusoid_fit_start_frame": int(trim_frames),
+            "sinusoid_fit_end_frame_exclusive": int(len(output_x) - trim_frames),
+            "sinusoid_amplitude_gain": fit_amplitude / amplitude_px,
+            "sinusoid_amplitude_output_px": fit_amplitude,
+            "sinusoid_phase_identifiable": phase_identifiable,
+            "sinusoid_phase_lag_frames": phase_lag,
+            "sinusoid_phase_lag_degrees": phase_degrees,
+            "sinusoid_fit_r2": fit_r2,
+            "sinusoid_fit_rmse_px": float(np.sqrt(np.mean(residual ** 2))),
+        })
+    return metrics
 
 
 def run_case(width=1920, height=1080, frames=60, fps=30.0, pan_px_per_frame=0.5, jitter_px=0.0,
-             seed=17, mode="l1", sigma=15.0, fidelity=0.1, budget_fraction=0.04):
+             seed=17, mode="l1", sigma=15.0, fidelity=0.1, budget_fraction=0.04,
+             profile="linear", amplitude_px=20.0, period_frames=120.0):
     if width < 1 or height < 1 or frames < 5 or fps <= 0 or jitter_px < 0:
         raise ValueError("width/height must be positive, frames >= 5, fps positive, and jitter nonnegative")
     t = np.arange(frames, dtype=np.float64)
-    intended_x = np.zeros(frames) if pan_px_per_frame == 0 else pan_px_per_frame * t
+    if profile == "static":
+        intended_x = np.zeros(frames, np.float64)
+    elif profile == "linear":
+        intended_x = pan_px_per_frame * t
+    elif profile == "sinusoid":
+        if amplitude_px <= 0 or period_frames <= 0:
+            raise ValueError("sinusoid amplitude and period must be positive")
+        intended_x = amplitude_px * np.sin(2 * np.pi * t / period_frames)
+    else:
+        raise ValueError("profile must be static, linear, or sinusoid")
     rng = np.random.default_rng(seed)
     noise = gaussian_filter1d(rng.standard_normal(frames), 0.8)
     noise = noise / (noise.std() + 1e-12) * jitter_px
@@ -92,10 +138,12 @@ def run_case(width=1920, height=1080, frames=60, fps=30.0, pan_px_per_frame=0.5,
     config = Config(mesh=(0, 0), rs_rows=0, smooth=mode, sigma=sigma,
                     budget=budget_fraction, fidelity=fidelity)
     plan_obj = exact_motion(width, height, fps, intended_x, actual_x, config)
-    metrics = _path_metrics(plan_obj, intended_x, actual_x, fps)
+    metrics = _path_metrics(plan_obj, intended_x, actual_x, fps, profile, amplitude_px, period_frames)
     return {
-        "trajectory": "static" if pan_px_per_frame == 0 else ("pan_positive" if pan_px_per_frame > 0 else "pan_negative"),
-        "pan_px_per_frame": float(pan_px_per_frame),
+        "trajectory": profile if profile != "linear" else ("pan_positive" if pan_px_per_frame > 0 else "pan_negative"),
+        "pan_px_per_frame": float(pan_px_per_frame) if profile == "linear" else None,
+        "amplitude_px": float(amplitude_px) if profile == "sinusoid" else None,
+        "period_frames": float(period_frames) if profile == "sinusoid" else None,
         "jitter_px_std": float(jitter_px),
         "smoother": {"mode": mode, "sigma_frames": float(sigma), "fidelity": float(fidelity),
                      "budget_fraction_of_width": float(budget_fraction),
@@ -112,6 +160,9 @@ def main():
     parser.add_argument("--frames", type=int, default=60)
     parser.add_argument("--fps", type=float, default=30.0)
     parser.add_argument("--pan-px-per-frame", type=float, default=0.5)
+    parser.add_argument("--profile", choices=("static", "linear", "sinusoid"), default="linear")
+    parser.add_argument("--amplitude-px", type=float, default=20.0)
+    parser.add_argument("--period-frames", type=float, default=120.0)
     parser.add_argument("--jitter-px", type=float, default=0.0)
     parser.add_argument("--seed", type=int, default=17)
     parser.add_argument("--mode", choices=("l1", "gauss"), default="l1")
@@ -125,7 +176,8 @@ def main():
     if not fidelities or any(not np.isfinite(v) or v < 0 for v in fidelities):
         parser.error("--fidelities must contain finite nonnegative values")
     results = [run_case(args.width, args.height, args.frames, args.fps, args.pan_px_per_frame,
-                        args.jitter_px, args.seed, args.mode, args.sigma, fidelity, args.budget_fraction)
+                        args.jitter_px, args.seed, args.mode, args.sigma, fidelity, args.budget_fraction,
+                        args.profile, args.amplitude_px, args.period_frames)
                for fidelity in fidelities]
     payload = {"schema": "mlxstab.path_smoother_gain_audit/1", "results": results}
     Path(args.out).write_text(dumps_json(payload) + "\n", encoding="utf-8")
