@@ -124,7 +124,7 @@ Remaining work: run matched 10-second/full-window configuration comparisons, rep
 
 **Exit:** a repeatable baseline report, independently checked metrics, meaningful failure counts and minimal regression fixtures. No new quality claim advances before this gate.
 
-Current next research candidate: test spatially localized support handling against the actual composed warp and sampler footprint. The existing clip-wide backoff can be too blunt for localized border wedges. Keep the candidate opt-in and judge rendered, matched outputs with RAFT/KLT jitter and full-support coverage before considering production use; details and evidence are in `STATUS.md`.
+The localized-support map candidate has now been rendered on three 10-second windows and the fixed eight-stream backend panel. It reduced geometric invalid support throughout, but motion results were mixed, the reference 5% jitter margin was not met, KLT coverage was incomplete, and position-reversed Gemini reviews were inconclusive. Keep this candidate research-only and do not integrate it. The next border experiment should preserve the estimated source-coordinate map and compare explicit crop/zoom against border fill on new source windows, with support, motion, shape and visible artifacts reported separately; see `STATUS.md`.
 
 ### Stage 1 Stabilize interfaces and the geometric baseline
 

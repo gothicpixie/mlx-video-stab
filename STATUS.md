@@ -3360,11 +3360,39 @@ visual benefit is unresolved, one independent source has a large RAFT jitter inc
 metrics, and the candidate has not been evaluated across a broad held-out set. Do not integrate it into the
 production warp or change defaults.
 
-Next test, fixed before measurement: apply the unchanged 8 px / 2-frame candidate to all eight previously frozen
-`backend_panel8_20261017` one-second anchors (one stream each). Use each MLX manifest's captured plan and original
-video as baseline. Report per-stream full-kernel support, encoded center-mask changes, RAFT jitter and fallback
-counts, and KLT path availability; streams are the units, not pixels or frames. Reuse the baseline metrics only
-after confirming the manifests have the same evaluator, cadence and config; otherwise rerun baseline and candidate
-with the same evaluator. Keep Gemini judgments secondary and position-audited. This is a multi-stream challenge
-panel assembled for backend work, not a newly sampled held-out corpus, so even a pass would justify only another
-validation stage, not a production change.
+The unchanged candidate was then rendered on all eight previously frozen `backend_panel8_20261017` anchors.
+Baseline/candidate metrics use the same source, MLX plan, output cadence, RAFT weights and evaluator; candidate
+RAFT evaluation used 12 iterations at 2x downscale, while KLT used the same seeded sparse tracker. Streams are
+the units of analysis, not pixels or frames:
+
+| Stream | Kernel-support invalid % | Center-mask invalid % | Support pixels repaired / regressed | RAFT jitter ratio | KLT jitter ratio |
+|---|---:|---:|---:|---:|---:|
+| S13 t048 | 7.836 → 7.527 | 7.494 → 7.221 | 206,436 / 14,242 | 1.015 | unavailable |
+| S16 t120 | 0.866 → 0.686 | 0.254 → 0.133 | 113,113 / 1,058 | 1.054 | 1.000 |
+| S17 t021 | 0.864 → 0.762 | 0.405 → 0.356 | 64,106 / 449 | 1.090 | 1.121 |
+| S23 t004 | 0.906 → 0.774 | 0.470 → 0.390 | 84,145 / 2,009 | 1.085 | 1.010 |
+| S24 t571 | 3.927 → 3.746 | 3.506 → 3.419 | 119,796 / 7,120 | 1.034 | 1.005 |
+| S25 t025 | 1.421 → 1.126 | 0.908 → 0.728 | 190,852 / 6,926 | 0.940 | 1.042 |
+| S30 t087 | 1.803 → 1.680 | 1.378 → 1.308 | 81,996 / 5,000 | 1.015 | 0.995 |
+| S37 t081 | 0.778 → 0.639 | 0.168 → 0.093 | 90,222 / 3,500 | 0.915 | unavailable |
+
+Kernel-support invalid fraction decreased on all eight streams. The paired RAFT jitter geometric-mean ratio was
+**1.0168** (candidate / baseline), with a one-sided 95% upper bound of **1.0608** (df=7). This exceeds the
+**1.05 reference margin** used in the earlier backend challenge; that margin was not registered specifically for
+this local-support test, so treat the comparison as exploratory rather than a formal gate. KLT path metrics were
+available on six streams only: geometric-mean ratio **1.0278**, one-sided 95% upper bound **1.0669** (df=5),
+with S17 at **1.121**. KLT is incomplete and the adverse stream result is retained. The candidate's complete
+machine-readable per-stream metrics are in ignored `out/bench/local_support_panel8_20261017/panel_eval.json`.
+
+Gemini reviewed 16 blinded baseline/candidate clips, each with a position-reversed control. It returned six
+candidate preferences and two ties in original position, then two baseline preferences and six ties after
+reversal. The bias audit found one pair non-tied in both orders; its mapped preference flipped from candidate to
+baseline, following screen side B. There were zero method-agreement pairs. Treat the visual review as
+position-confounded and inconclusive.
+
+Conclusion: the fixed candidate reliably repairs some sampler and center-mask support, but it does not show a
+quality improvement and its motion metrics worsen on several streams. Keep it research-only; do not integrate
+this map correction or change defaults. The 8-stream panel was previously inspected for backend work and is not
+a newly sampled held-out corpus. The next border experiment should preserve the estimated source-coordinate map
+and compare an explicit crop/zoom policy with border fill on new source windows; evaluate support, motion,
+shape and visible artifacts separately.
