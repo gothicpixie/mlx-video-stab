@@ -58,6 +58,14 @@ def _summary(manifest):
     }
 
 
+def _backend_order(order):
+    if order == "mlx-first":
+        return ("mlx", "torch-mps")
+    if order == "torch-first":
+        return ("torch-mps", "mlx")
+    raise ValueError("backend_order must be 'mlx-first' or 'torch-first'")
+
+
 def _plan_delta(first, second):
     if not first or not second:
         return {"available": False, "reason": "both runs must save a plan"}
@@ -121,13 +129,14 @@ def compare(source="synthetic", out_dir=None, weights=str(runner.DEFAULT_WEIGHTS
             torch_weights=str(runner.DEFAULT_TORCH_WEIGHTS), start=None, duration=None,
             flow_iters=12, flow_downscale=1, eval_iters=12, eval_downscale=2,
             warm_repeats=3, seed=0, synth_frames=30, synth_w=960, synth_h=544,
-            synth_fps=30.0, eval_tracks=False, output_fps=None, lock="auto"):
+            synth_fps=30.0, eval_tracks=False, output_fps=None, lock="auto", backend_order="mlx-first"):
     if warm_repeats < 1:
         raise ValueError("warm_repeats must be >= 1")
+    run_order = _backend_order(backend_order)
     root = Path(out_dir) if out_dir else runner.DEFAULT_OUT / (
         datetime.now().strftime("%Y%m%d-%H%M%S-%f") + "_stabilizer_backend_comparison")
     root.mkdir(parents=True, exist_ok=True)
-    for backend in ("mlx", "torch-mps"):
+    for backend in run_order:
         child = root / backend
         if child.exists() and any(child.iterdir()):
             raise FileExistsError(f"refusing to reuse non-empty backend run directory: {child}")
@@ -141,7 +150,7 @@ def compare(source="synthetic", out_dir=None, weights=str(runner.DEFAULT_WEIGHTS
         source_origin = "generated once and shared by both backends"
 
     manifests = {}
-    for backend in ("mlx", "torch-mps"):
+    for backend in run_order:
         opts = runner.RunOptions(
             case="baseline", source=source, weights=weights, backend=backend, torch_weights=torch_weights,
             start=start, duration=duration, out_dir=str(root / backend), seed=seed,
@@ -178,7 +187,7 @@ def compare(source="synthetic", out_dir=None, weights=str(runner.DEFAULT_WEIGHTS
         "source_origin": source_origin,
         "config": {"flow_iters": flow_iters, "flow_downscale": flow_downscale,
                    "eval_iters": eval_iters, "eval_downscale": eval_downscale,
-                   "warm_repeats": warm_repeats, "seed": seed},
+                   "warm_repeats": warm_repeats, "seed": seed, "backend_order": backend_order},
         "runs": summary,
         "exact_checkpoint_tensor_match": (summary["torch-mps"].get("weight_equivalence") or {}).get("exact_tensor_match") is True,
         "same_config_and_cadence": comparable,
@@ -230,6 +239,8 @@ def build_parser():
     p.add_argument("--eval-tracks", action="store_true")
     p.add_argument("--output-fps")
     p.add_argument("--lock", choices=["auto", "on", "off"], default="auto")
+    p.add_argument("--backend-order", choices=["mlx-first", "torch-first"], default="mlx-first",
+                   help="paired backend run order; alternate across windows to reduce order effects")
     return p
 
 
@@ -241,7 +252,8 @@ def main(argv=None):
                     eval_iters=args.eval_iters, eval_downscale=args.eval_downscale,
                     warm_repeats=args.warm_repeats, seed=args.seed, synth_frames=args.synth_frames,
                     synth_w=args.synth_w, synth_h=args.synth_h, synth_fps=args.synth_fps,
-                    eval_tracks=args.eval_tracks, output_fps=args.output_fps, lock=args.lock)
+                    eval_tracks=args.eval_tracks, output_fps=args.output_fps, lock=args.lock,
+                    backend_order=args.backend_order)
     print(json.dumps(result, indent=2, allow_nan=False))
     return 0 if result["status"] == "success" else 1
 

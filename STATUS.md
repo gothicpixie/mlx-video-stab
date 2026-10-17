@@ -3210,9 +3210,10 @@ in the benchmark output manifests.
 
 Run every window through the shared planner, renderer and evaluator at the same historical settings
 (20 flow iterations, half-resolution flow, 12 evaluation iterations at 2× downscale, three timed warm repeats,
-KLT enabled, seed 0). Require exact equality of all converted checkpoint tensors and matched source/config,
-frame count, and encoded cadence. Keep all eight windows in the primary result, including any weak or failed
-quality measurements. The anchor is the unit of analysis; frames, tracks and warm repeats are not independent
+KLT enabled, seed 0). Alternate `--backend-order mlx-first` and `--backend-order torch-first` across the frozen
+window list; each manifest comparison records the order used. Require exact equality of all converted checkpoint
+tensors and matched source/config, frame count, and encoded cadence. Keep all eight windows in the primary result,
+including any weak or failed quality measurements. The anchor is the unit of analysis; frames, tracks and warm repeats are not independent
 samples. Compare paired per-anchor MLX/MPS warm-median runtime ratios, and paired log ratios for each output
 jitter metric. Use a one-sided paired t confidence bound (df=7); call MLX faster on this panel only if the upper
 95% bound for runtime ratio is below 1.0, and non-inferior on RAFT and KLT jitter only if each upper bound is
@@ -3225,3 +3226,6 @@ otherwise record them as position-following/inconclusive. The previous Gemini ca
 not evidence. No algorithm or production defaults change from this challenge-panel experiment. Even a positive
 result supports only this fixed panel and backend swap, not corpus-wide performance or a full independent
 PyTorch stabilizer comparison.
+
+The benchmark CLI now records and honors the selected `--backend-order`; the multi-window run alternates it
+across anchors. Verification after this harness change: `.claude/verify.sh` passed **1591 tests in 57.70 s**.

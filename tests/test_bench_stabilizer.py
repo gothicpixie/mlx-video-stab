@@ -6,6 +6,17 @@ import numpy as np
 from bench import bench_stabilizer as BS
 
 
+def test_backend_order_is_explicit_and_validated():
+    assert BS._backend_order("mlx-first") == ("mlx", "torch-mps")
+    assert BS._backend_order("torch-first") == ("torch-mps", "mlx")
+    try:
+        BS._backend_order("mps-first")
+    except ValueError as exc:
+        assert "backend_order" in str(exc)
+    else:
+        raise AssertionError("unsupported backend order was accepted")
+
+
 def test_plan_delta_reports_global_mesh_and_row_changes(tmp_path):
     a = tmp_path / "a.npz"
     b = tmp_path / "b.npz"
@@ -58,3 +69,20 @@ def test_failed_backend_writes_failure_json_without_comparison_table(tmp_path, m
     assert result["failed_backend"] == "torch-mps"
     assert json.loads((root / "comparison.json").read_text())["status"] == "failure"
     assert not (root / "comparison.md").exists()
+
+
+def test_compare_honors_torch_first_order(tmp_path, monkeypatch):
+    root = tmp_path / "comparison"
+    def make_source(path, *args):
+        path.write_bytes(b"synthetic")
+    monkeypatch.setattr(BS.runner, "make_synthetic", make_source)
+    calls = []
+    def fail_first(opts):
+        calls.append(opts.backend)
+        return {"status": "failure", "flow_backend": {"name": opts.backend},
+                "error": {"stage": "model_construct", "message": "stop after first backend"}}
+    monkeypatch.setattr(BS.runner, "run_case", fail_first)
+    result = BS.compare(out_dir=str(root), synth_frames=2, synth_w=32, synth_h=32,
+                        warm_repeats=1, backend_order="torch-first")
+    assert calls == ["torch-mps"]
+    assert result["failed_backend"] == "torch-mps"
