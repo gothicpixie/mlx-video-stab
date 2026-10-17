@@ -3227,9 +3227,6 @@ not evidence. No algorithm or production defaults change from this challenge-pan
 result supports only this fixed panel and backend swap, not corpus-wide performance or a full independent
 PyTorch stabilizer comparison.
 
-The benchmark CLI now records and honors the selected `--backend-order`; the multi-window run alternates it
-across anchors. Verification after this harness change: `.claude/verify.sh` passed **1591 tests in 57.70 s**.
-
 Challenge-panel result (2026-10-17): all eight pairs succeeded with exact equality across 154 converted
 checkpoint tensors, matching config and encoded cadence, reliable RAFT metrics, and zero planner fallbacks.
 Each warm runtime is the median of three repeats. Ratios below are MLX / PyTorch MPS; KLT is absent where
@@ -3262,3 +3259,20 @@ manifests, blind review clips and audit are in the same ignored output directory
 fixed, previously inspected challenge panel: MLX passed the runtime criterion, RAFT jitter non-inferiority did
 not pass, KLT coverage is incomplete, and Gemini supplied no usable method preference. No overall quality
 winner or production default follows.
+
+The benchmark CLI records and honors the selected `--backend-order`; this run alternated it across windows.
+Verification after that harness change: `.claude/verify.sh` passed **1591 tests in 57.70 s**.
+
+## Exploratory fitted-motion localization (2026-10-17)
+
+The challenge-panel runs saved plans but not fitted-motion NPZs. The paired CLI now has an opt-in
+`--dump-motion` capture and records that setting in its comparison JSON and replayable run commands. The
+focused follow-up will rerun four already-reported windows in a separate output directory: S13 t048, S24 t571,
+S25 t025 and S37 t081. These were selected because the prior fixed-panel results showed high-motion plan
+divergence or RAFT/KLT disagreement; this is exploratory and selected after those results. Keep the same source,
+weights, config, and shared planner; use one timed warm repeat and alternate backend order. Inspect fitted
+homography, mesh, row, support and cycle fields alongside the existing plans. The NPZ stores fitted per-pair
+motion, not raw dense RAFT fields, so the diagnostic may locate divergence before versus after planning but
+cannot attribute it to raw flow prediction alone. No quality claim, gate, or prior result changes.
+
+Verification after adding the opt-in capture: `.claude/verify.sh` passed **1591 tests in 56.71 s**.

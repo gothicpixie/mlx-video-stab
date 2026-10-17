@@ -46,6 +46,7 @@ def _summary(manifest):
         "warm_repeat_s": warm,
         "warm_repeat_median_s": statistics.median(warm) if warm else None,
         "end_to_end_stabilization_s": manifest.get("timing", {}).get("end_to_end_stabilization_s"),
+        "motion": manifest.get("outputs", {}).get("motion"),
         "input_jitter_px": (manifest.get("metrics", {}).get("input") or {}).get("jitter_px"),
         "output_jitter_px": (manifest.get("metrics", {}).get("output") or {}).get("jitter_px"),
         "output_wobble_px": (manifest.get("metrics", {}).get("output") or {}).get("wobble_px"),
@@ -105,7 +106,7 @@ def _cadence_matches(left, right):
 
 def _runner_command(source, out_dir, backend, weights, torch_weights, start, duration,
                     flow_iters, flow_downscale, eval_iters, eval_downscale, warm_repeats,
-                    seed, eval_tracks, output_fps, lock):
+                    seed, eval_tracks, output_fps, lock, dump_motion=False):
     """Build the equivalent single-backend runner invocation stored in its manifest."""
     command = [sys.executable, "-I", str(ROOT / "bench" / "run_case.py"),
                "--case", "baseline", "--source", str(source), "--backend", backend,
@@ -120,6 +121,8 @@ def _runner_command(source, out_dir, backend, weights, torch_weights, start, dur
         command.extend(["--duration", str(duration)])
     if eval_tracks:
         command.append("--eval-tracks")
+    if dump_motion:
+        command.append("--dump-motion")
     if output_fps is not None:
         command.extend(["--output-fps", str(output_fps)])
     return command
@@ -129,7 +132,8 @@ def compare(source="synthetic", out_dir=None, weights=str(runner.DEFAULT_WEIGHTS
             torch_weights=str(runner.DEFAULT_TORCH_WEIGHTS), start=None, duration=None,
             flow_iters=12, flow_downscale=1, eval_iters=12, eval_downscale=2,
             warm_repeats=3, seed=0, synth_frames=30, synth_w=960, synth_h=544,
-            synth_fps=30.0, eval_tracks=False, output_fps=None, lock="auto", backend_order="mlx-first"):
+            synth_fps=30.0, eval_tracks=False, output_fps=None, lock="auto", backend_order="mlx-first",
+            dump_motion=False):
     if warm_repeats < 1:
         raise ValueError("warm_repeats must be >= 1")
     run_order = _backend_order(backend_order)
@@ -155,11 +159,11 @@ def compare(source="synthetic", out_dir=None, weights=str(runner.DEFAULT_WEIGHTS
             case="baseline", source=source, weights=weights, backend=backend, torch_weights=torch_weights,
             start=start, duration=duration, out_dir=str(root / backend), seed=seed,
             repeats=warm_repeats + 1, eval_iters=eval_iters, eval_downscale=eval_downscale,
-            eval_tracks=eval_tracks, output_fps=output_fps, lock=lock, dump_plan=True,
+            eval_tracks=eval_tracks, output_fps=output_fps, lock=lock, dump_plan=True, dump_motion=dump_motion,
             overrides={"flow_iters": flow_iters, "flow_downscale": flow_downscale, "seed": seed},
             command=_runner_command(source, root / backend, backend, weights, torch_weights, start, duration,
                                    flow_iters, flow_downscale, eval_iters, eval_downscale, warm_repeats,
-                                   seed, eval_tracks, output_fps, lock),
+                                   seed, eval_tracks, output_fps, lock, dump_motion),
             log=print,
         )
         man = runner.run_case(opts)
@@ -187,7 +191,8 @@ def compare(source="synthetic", out_dir=None, weights=str(runner.DEFAULT_WEIGHTS
         "source_origin": source_origin,
         "config": {"flow_iters": flow_iters, "flow_downscale": flow_downscale,
                    "eval_iters": eval_iters, "eval_downscale": eval_downscale,
-                   "warm_repeats": warm_repeats, "seed": seed, "backend_order": backend_order},
+                   "warm_repeats": warm_repeats, "seed": seed, "backend_order": backend_order,
+                   "dump_motion": dump_motion},
         "runs": summary,
         "exact_checkpoint_tensor_match": (summary["torch-mps"].get("weight_equivalence") or {}).get("exact_tensor_match") is True,
         "same_config_and_cadence": comparable,
@@ -241,6 +246,8 @@ def build_parser():
     p.add_argument("--lock", choices=["auto", "on", "off"], default="auto")
     p.add_argument("--backend-order", choices=["mlx-first", "torch-first"], default="mlx-first",
                    help="paired backend run order; alternate across windows to reduce order effects")
+    p.add_argument("--dump-motion", action="store_true",
+                   help="capture the retained repeat fitted-motion NPZ for offline diagnostics")
     return p
 
 
@@ -253,7 +260,7 @@ def main(argv=None):
                     warm_repeats=args.warm_repeats, seed=args.seed, synth_frames=args.synth_frames,
                     synth_w=args.synth_w, synth_h=args.synth_h, synth_fps=args.synth_fps,
                     eval_tracks=args.eval_tracks, output_fps=args.output_fps, lock=args.lock,
-                    backend_order=args.backend_order)
+                    backend_order=args.backend_order, dump_motion=args.dump_motion)
     print(json.dumps(result, indent=2, allow_nan=False))
     return 0 if result["status"] == "success" else 1
 
