@@ -82,8 +82,8 @@ def _path_metrics(plan_obj, intended_x, actual_x, fps, profile, amplitude_px, pe
         if period_frames <= 0 or amplitude_px <= 0:
             raise ValueError("sinusoid amplitude and period must be positive")
         use = np.arange(trim_frames, len(output_x) - trim_frames)
-        if len(use) < 4:
-            raise ValueError("sinusoid path is too short after trimming boundary transients")
+        if len(use) < max(4, int(np.ceil(2 * period_frames))):
+            raise ValueError("sinusoid path must retain at least two periods after trimming boundary transients")
         omega = 2 * np.pi / period_frames
         design = np.column_stack((np.ones(len(use)), np.sin(omega * use), np.cos(omega * use)))
         fit = np.linalg.lstsq(design, output_x[use], rcond=None)[0]
@@ -117,9 +117,10 @@ def _path_metrics(plan_obj, intended_x, actual_x, fps, profile, amplitude_px, pe
 
 def run_case(width=1920, height=1080, frames=60, fps=30.0, pan_px_per_frame=0.5, jitter_px=0.0,
              seed=17, mode="l1", sigma=15.0, fidelity=0.1, budget_fraction=0.04,
-             profile="linear", amplitude_px=20.0, period_frames=120.0):
-    if width < 1 or height < 1 or frames < 5 or fps <= 0 or jitter_px < 0:
-        raise ValueError("width/height must be positive, frames >= 5, fps positive, and jitter nonnegative")
+             profile="linear", amplitude_px=20.0, period_frames=120.0, jitter_correlation_frames=0.8):
+    if (width < 1 or height < 1 or frames < 5 or fps <= 0 or jitter_px < 0
+            or jitter_correlation_frames < 0):
+        raise ValueError("dimensions/fps must be positive, frames >= 5, and jitter parameters nonnegative")
     t = np.arange(frames, dtype=np.float64)
     if profile == "static":
         intended_x = np.zeros(frames, np.float64)
@@ -132,24 +133,27 @@ def run_case(width=1920, height=1080, frames=60, fps=30.0, pan_px_per_frame=0.5,
     else:
         raise ValueError("profile must be static, linear, or sinusoid")
     rng = np.random.default_rng(seed)
-    noise = gaussian_filter1d(rng.standard_normal(frames), 0.8)
+    noise = gaussian_filter1d(rng.standard_normal(frames), jitter_correlation_frames)
     noise = noise / (noise.std() + 1e-12) * jitter_px
     actual_x = intended_x + noise
     config = Config(mesh=(0, 0), rs_rows=0, smooth=mode, sigma=sigma,
                     budget=budget_fraction, fidelity=fidelity)
     plan_obj = exact_motion(width, height, fps, intended_x, actual_x, config)
-    metrics = _path_metrics(plan_obj, intended_x, actual_x, fps, profile, amplitude_px, period_frames)
+    trim_frames = max(30, int(np.ceil(2 * sigma))) if mode == "butter" else 30
+    metrics = _path_metrics(plan_obj, intended_x, actual_x, fps, profile, amplitude_px, period_frames,
+                            trim_frames=trim_frames)
     return {
         "trajectory": profile if profile != "linear" else ("pan_positive" if pan_px_per_frame > 0 else "pan_negative"),
         "pan_px_per_frame": float(pan_px_per_frame) if profile == "linear" else None,
         "amplitude_px": float(amplitude_px) if profile == "sinusoid" else None,
         "period_frames": float(period_frames) if profile == "sinusoid" else None,
         "jitter_px_std": float(jitter_px),
+        "jitter_correlation_frames": float(jitter_correlation_frames),
         "smoother": {"mode": mode, "sigma_frames": float(sigma), "fidelity": float(fidelity),
                      "budget_fraction_of_width": float(budget_fraction),
                      "budget_px": float(budget_fraction * width)},
         "metrics": metrics,
-        "scope": "Exact translation Fits through production plan(); bypasses flow, rendering, crop, parallax and rolling shutter.",
+        "scope": "Exact translation Fits through production plan(); bypasses flow, rendering, crop, parallax and rolling shutter. Butterworth comparisons trim 2 cutoff periods from each end to reduce zero-phase boundary effects.",
     }
 
 
@@ -164,9 +168,13 @@ def main():
     parser.add_argument("--amplitude-px", type=float, default=20.0)
     parser.add_argument("--period-frames", type=float, default=120.0)
     parser.add_argument("--jitter-px", type=float, default=0.0)
+    parser.add_argument("--jitter-correlation-frames", type=float, default=0.8,
+                        help="Gaussian temporal correlation of injected path disturbance")
     parser.add_argument("--seed", type=int, default=17)
-    parser.add_argument("--mode", choices=("l1", "gauss"), default="l1")
-    parser.add_argument("--sigma", type=float, default=15.0)
+    parser.add_argument("--mode", choices=("l1", "gauss", "butter"), default="l1",
+                        help="butter is an experimental zero-phase low-pass, not an intent classifier")
+    parser.add_argument("--sigma", type=float, default=15.0,
+                        help="Gaussian sigma for gauss; cutoff period in frames for butter")
     parser.add_argument("--fidelity", type=float, default=0.1)
     parser.add_argument("--budget-fraction", type=float, default=0.04)
     parser.add_argument("--fidelities", type=str, help="comma-separated L1 fidelity sweep; runs one output per value")
@@ -177,7 +185,7 @@ def main():
         parser.error("--fidelities must contain finite nonnegative values")
     results = [run_case(args.width, args.height, args.frames, args.fps, args.pan_px_per_frame,
                         args.jitter_px, args.seed, args.mode, args.sigma, fidelity, args.budget_fraction,
-                        args.profile, args.amplitude_px, args.period_frames)
+                        args.profile, args.amplitude_px, args.period_frames, args.jitter_correlation_frames)
                for fidelity in fidelities]
     payload = {"schema": "mlxstab.path_smoother_gain_audit/1", "results": results}
     Path(args.out).write_text(dumps_json(payload) + "\n", encoding="utf-8")

@@ -325,3 +325,12 @@ visual result is inconclusive. Next, test a frequency-aware objective on exact m
 then on disjoint natural windows with reliable independent tracking. Gate any candidate on path retention,
 jitter, wobble, crop, distortion, and uncertainty jointly; leave the production default unchanged until a
 repeatable Pareto improvement is demonstrated.
+
+## Frequency-aware path experiment update (2026-10-17)
+
+The experimental Butterworth path and the 99-case exact screen are documented in [STATUS.md](STATUS.md).
+It preserves known slow camera motion while suppressing fast shake in exact controls, but it also preserves
+slow shake and regresses jitter on both matched real windows. Do not ship or select it. Keep the current L1
+fidelity 0.1 default unchanged. The next planned experiment is trajectory replay: pass independent KLT paths
+through each smoother, inject controlled fit outliers, and test whether path residual kurtosis/outlier rate
+predicts the real-vs-synthetic gap. Only then run a predeclared held-out gate on distinct 00177/00178 windows.

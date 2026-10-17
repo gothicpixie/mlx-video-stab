@@ -25,3 +25,35 @@ def test_l1_path_is_piecewise_and_within_budget():
     d3 = np.abs(np.diff(p, 3)); assert (d3 < 1e-6).mean() > .8                           # constant-acceleration segments, jerk only at few knots
     assert np.abs(np.diff(p)).mean() < np.abs(np.diff(c)).mean() / 3
     assert np.abs(S.l1_path_windowed(c, 12.0, window=80, overlap=20) - c).max() <= 12.0 + 1e-6
+
+
+def test_butterworth_path_has_explicit_lowpass_response_and_budget():
+    n = 480
+    t = np.arange(n)
+    period = 60.0
+    c = 20.0 * np.sin(2 * np.pi * t / period) + 3.0 * np.sin(2 * np.pi * t / 12.0)
+    filtered = S.butterworth_path(c, cutoff_period_frames=70)
+    p = S.butterworth_path(c, cutoff_period_frames=70, budget=8.0)
+    use = slice(40, -40)
+
+    def gain(path, component_period):
+        omega = 2 * np.pi / component_period
+        design = np.column_stack((np.ones(len(t[use])), np.sin(omega * t[use]), np.cos(omega * t[use])))
+        fit = np.linalg.lstsq(design, path[use], rcond=None)[0]
+        return np.hypot(fit[1], fit[2])
+
+    assert np.isfinite(p).all()
+    assert np.max(np.abs(p - c)) <= 8.0 + 1e-9
+    assert gain(filtered, 60) < gain(c, 60)
+    # The 12-frame component is above the low-pass corner and should be attenuated more strongly.
+    assert gain(filtered, 12) / gain(c, 12) < gain(filtered, 60) / gain(c, 60)
+
+
+def test_butterworth_path_rejects_invalid_cutoff():
+    for period in (0, 2, np.inf, np.nan):
+        try:
+            S.butterworth_path(np.arange(20.0), period)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"accepted invalid cutoff period {period}")

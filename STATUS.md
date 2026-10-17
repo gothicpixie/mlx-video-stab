@@ -3762,3 +3762,46 @@ high-frequency disturbance), first against exact multiscale motion profiles and 
 windows with reliable independent tracking. Compare at matched high-frequency suppression and report path
 retention, jitter, wobble, crop, distortion, and uncertainty together; do not select a smoother from a single
 aggregate score.
+
+### Frequency-selective path candidate: exact controls and real-window rejection (2026-10-17)
+
+An opt-in `butter` smoother was added for research comparison. It applies a fourth-order Butterworth low-pass
+in both time directions to each path column; the realized magnitude response is therefore an effective
+8th-order rolloff, with -6 dB at the configured single-pass -3 dB cutoff period. This is offline and has
+boundary transients, so the exact-path audit trims two cutoff periods at each end and requires two complete
+sinusoid cycles. It is not an intent estimator, is not exposed as the application default, and leaves L1
+fidelity 0.1 unchanged.
+
+The 99-case exact-motion screen swept three seeds, pan amplitudes 5/20/40 px, periods 60/120/240 frames,
+static camera shake with temporal correlation 0.8 or 60 frames, and L1, Gaussian sigma 10, and Butterworth
+cutoff period 45. Butterworth retained roughly 0.90x / 1.01x / 0.98x amplitude at periods 60/120/240 for
+20 px pans; gains varied modestly with seed and amplitude. Gaussian retained about 0.58x / 0.88x / 0.95x.
+On static fast-shake controls, median output path RMSE was 3.45 px for Butterworth and 3.01 px for Gaussian.
+When static shake was slow (60-frame temporal correlation), both retained substantial motion (median output
+path RMSE about 11.7 px). This is the expected counterexample to treating low frequency as intent. Reports
+are in ignored `out/bench/path_frequency_candidate_screen.json` and
+`out/bench/path_frequency_multiseed_screen.json`; the single-seed cutoff sweep is exploratory, not a tuned
+or confirmatory result.
+
+The matched real renders changed only smoother mode/parameter (`butter`, period 45). Both were complete,
+with 60 aligned output/mask frames and zero flow-fit fallbacks. On the KLT-supported 00176.MTS t060 window,
+RAFT/KLT jitter was 0.1025/0.1019 px and wobble 0.0664 px. On t800 it was 0.1865/0.2118 px and wobble
+0.0278 px. In the same windows, L1 fidelity 0.1 measured 0.0203/0.0458 and 0.0274/0.0692 px jitter;
+Gaussian sigma 10 measured 0.0638/0.0718 and 0.1641/0.1889 px. Butterworth therefore did not improve the
+real jitter tradeoff over Gaussian and was much worse than L1, even though its mean border fractions were
+slightly lower. Do not promote this smoother or change defaults.
+
+Gemini 3.8 Flash via Vertex reviewed the Butterworth/default pairs in both panel orders. It preferred the
+candidate in both t800 orders, but its t060 preference flipped with panel position. Treat the visual result as
+mixed and secondary to the measured real-window jitter regression. DeepSeek Flash via Pi advised that the
+exact controls need intent labels, pan-amplitude/SNR variation, cutoff sweeps across the intended band, fair
+budget matching, and boundary treatment. These checks were added; DeepSeek then recommended testing whether
+measured-path outliers and robust trajectory estimation explain the gap between sinusoidal controls and real
+footage.
+
+Next, replay independent KLT-estimated real trajectories through the same planner with L1, Gaussian, and
+Butterworth, then perturb known trajectories with controlled outliers. Measure tracking residual kurtosis and
+outlier fraction against path retention, jitter and crop. If those cues explain the smoother gap, test the
+hypothesis on held-out windows from 00177/00178; otherwise return to a motion-intent cue that combines
+subject-relative scene motion and uncertainty. Frequency remains a useful descriptor, not a synonym for
+intent.
