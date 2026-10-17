@@ -179,11 +179,28 @@ def test_experiment_identity_records_plan_capture():
     off = runner._experiment_identity(opts, {"seed": 0}, src, "w", {}, {}, None, None, 0, False)
     on = runner._experiment_identity(opts, {"seed": 0}, src, "w", {}, {}, None, None, 0, True)
     assert off["capture"] == {"dump_plan": False, "dump_motion": False}
+    assert off["flow_backend"] == {"name": "mlx"}
     assert on["capture"] == {"dump_plan": True, "dump_motion": False}
     assert MF.content_key(off) != MF.content_key(on)
     motion = runner._experiment_identity(opts, {"seed": 0}, src, "w", {}, {}, None, None, 0, False, True)
     assert motion["capture"] == {"dump_plan": False, "dump_motion": True}
     assert MF.content_key(off) != MF.content_key(motion)
+
+
+def test_experiment_identity_changes_with_flow_backend():
+    src = {"sha256": "s", "window": {}, "preprocessing": {}, "selection_note": None}
+    mlx = runner._experiment_identity(runner.RunOptions(backend="mlx"), {"seed": 0}, src,
+                                      "w", {}, {}, None, None, 0)
+    torch = runner._experiment_identity(runner.RunOptions(backend="torch-mps"), {"seed": 0}, src,
+                                        "w", {}, {}, None, None, 0)
+    assert mlx["flow_backend"] != torch["flow_backend"]
+    assert MF.content_key(mlx) != MF.content_key(torch)
+
+
+def test_torch_backend_requires_its_own_weights(tmp_path):
+    missing = tmp_path / "missing.pth"
+    errors = runner.validate_options(runner.RunOptions(backend="torch-mps", torch_weights=str(missing)))
+    assert any("PyTorch RAFT weights not found" in error for error in errors)
 
 
 def test_code_fingerprint_hashes_relevant_code_not_docs():

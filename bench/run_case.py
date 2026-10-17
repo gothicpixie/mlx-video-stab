@@ -62,6 +62,10 @@ def build_parser():
     p.add_argument("--case", default="baseline", choices=list(cases.case_names))
     p.add_argument("--source", default="synthetic", help="'synthetic' or a local video path")
     p.add_argument("--weights", default=str(runner.DEFAULT_WEIGHTS))
+    p.add_argument("--backend", choices=["mlx", "torch-mps"], default="mlx",
+                   help="flow backend; the planner, renderer, media path and evaluator stay shared mlxstab code")
+    p.add_argument("--torch-weights", default=str(runner.DEFAULT_TORCH_WEIGHTS),
+                   help="upstream RAFT .pth weights used by --backend torch-mps")
     p.add_argument("--start", type=float, help="source window start (seconds)")
     p.add_argument("--duration", type=float, help="source window duration (seconds)")
     p.add_argument("--out-dir", help="explicit run directory (default out/bench/<time>_<case>_<tag>)")
@@ -134,7 +138,8 @@ def main(argv=None):
         logfile = open(a.log, "a", buffering=1)
         log = lambda m: (print(m), logfile.write(str(m) + "\n"))
     opts = runner.RunOptions(
-        case=a.case, source=a.source, weights=a.weights, start=a.start, duration=a.duration, out_dir=a.out_dir,
+        case=a.case, source=a.source, weights=a.weights, backend=a.backend, torch_weights=a.torch_weights,
+        start=a.start, duration=a.duration, out_dir=a.out_dir,
         overwrite=a.overwrite, seed=a.seed, repeats=a.repeats, eval_iters=a.eval_iters, eval_downscale=a.eval_downscale,
         eval_flow_dtype=a.eval_flow_dtype, eval_corr_dtype=a.eval_corr_dtype, eval_vf=a.eval_vf, output_fps=a.output_fps,
         eval_tracks=a.eval_tracks,

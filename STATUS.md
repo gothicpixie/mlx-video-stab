@@ -3147,3 +3147,30 @@ between fixed-grid accumulation and source-space composition on these fitted map
 filtering likely explains the prior screen. Either result is exploratory on an already inspected window and
 cannot select a default or establish perceptual quality. The audit report is under
 `out/bench/real_composition_audit/s13_t048_10s.json`.
+
+## Shared-pipeline MLX versus PyTorch MPS flow comparison (2026-10-17)
+
+Added `bench.bench_stabilizer`, a paired command that substitutes only the RAFT flow backend while keeping the
+planner, renderer, media I/O and MLX evaluator shared. The PyTorch adapter uses the upstream RAFT model on MPS,
+reuses frame features across adjacent pairs and matches the production bidirectional batch and warm-start path.
+Before running, it converts both checkpoint files to the same tensor layout and requires exact element-wise
+equality; the successful default check matched all 154 tensors. Each run records separate checkpoint hashes and
+the normalized tensor digest. Failed or cadence-mismatched pairs do not produce a Markdown comparison table.
+This measures a backend swap inside mlxstab, not an independently implemented PyTorch stabilizer.
+
+The full 540p synthetic comparison used one shared 30-frame 960×544 source, 12 RAFT iterations at full analysis
+resolution, 12-iteration evaluation at 2× downscale, and three timed cached-model repeats after each cold pass.
+Both runs succeeded with matching source hash, config digest, 30 output frames and encoded PTS. There were no
+fallback frames. Median warm stabilization time was **15.441 s for MLX** and **19.275 s for PyTorch MPS** (about
+**19.9% lower** for MLX on this run); end-to-end stabilization including model construction was **15.448 s** and
+**19.612 s**. The shared MLX evaluator measured output jitter **0.07423 / 0.07333 px** and wobble **0.03115 /
+0.03275 px** (MLX / PyTorch). Mean border fractions were **0.01722 / 0.01713**. Fitted plans differed: maximum
+absolute delta was **1.944** in global homographies, **1.253 px** in mesh correction and **1.206 px** in row
+correction. The run report is ignored under `out/bench/stabilizer_backend_540p_20261017/`.
+
+This is one synthetic sequence. The stability metrics use the same MLX RAFT evaluator for both outputs; KLT and
+blind visual review were not enabled, and plan differences are not a quality ranking. These numbers establish
+that the full shared pipeline comparison runs and provide one scoped runtime result, not general performance or
+perceptual superiority. Next, run the paired backends on real clips with KLT enabled and blinded visual review
+before making a stabilizer-quality claim. No production default changed. Verification: `.claude/verify.sh` passed
+**1589 tests in 57.60 s**.

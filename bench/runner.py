@@ -31,6 +31,7 @@ from .heavylock import HeavyLock
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_OUT = ROOT / "out" / "bench"
+DEFAULT_TORCH_WEIGHTS = ROOT / "vendor" / "weights" / "things" / "raft-things.pth"
 
 
 @dataclass
@@ -38,6 +39,8 @@ class RunOptions:
     case: str = "baseline"
     source: str = "synthetic"
     weights: str = str(DEFAULT_WEIGHTS)
+    backend: str = "mlx"               # mlx | torch-mps (flow only; planner/render/evaluator remain shared)
+    torch_weights: str = str(DEFAULT_TORCH_WEIGHTS)
     start: float | None = None
     duration: float | None = None
     out_dir: str | None = None
@@ -177,8 +180,13 @@ def validate_options(opts: RunOptions) -> list[str]:
         errs.append("--synth-frames must be >= 1")
     if opts.source != "synthetic" and not Path(opts.source).exists():
         errs.append(f"source not found: {opts.source}")
+    if opts.backend not in ("mlx", "torch-mps"):
+        errs.append("--backend must be mlx|torch-mps")
     if not Path(opts.weights).exists():
         errs.append(f"weights not found: {opts.weights}")
+    if opts.backend == "torch-mps":
+        if not Path(opts.torch_weights).exists():
+            errs.append(f"PyTorch RAFT weights not found: {opts.torch_weights}")
     return errs
 
 
@@ -215,6 +223,8 @@ def _empty_manifest(opts, run_dir):
                    "window": {"start_s": opts.start, "duration_s": opts.duration},
                    "selection_note": opts.selection_note, "preprocessing": None, "decoded": None},
         "weights": {"path": str(opts.weights), "sha256": None, "size_bytes": None},
+        "flow_backend": {"name": opts.backend, "weights_path": None, "weights_sha256": None,
+                         "scope": "flow backend only; planner, renderer, media I/O and evaluation are shared mlxstab code"},
         "config": None,
         "config_digest": None,
         "experiment_identity": None,
@@ -268,6 +278,7 @@ def _experiment_identity(opts, cfg_kwargs, source_hashes, weights_sha, code, eva
                    "preprocessing": source_hashes.get("preprocessing"),
                    "selection_note": source_hashes.get("selection_note")},
         "weights_sha256": weights_sha,
+        "flow_backend": {"name": opts.backend},
         "config": cfg_kwargs,
         "output_cadence": output_fps,
         "evaluation": eval_cfg,
@@ -310,6 +321,8 @@ def run_case(opts: RunOptions) -> dict:
         eval_vf = opts.eval_vf if opts.eval_vf is not None else case.eval_vf
         cfg_kwargs = case.resolved_config()
         cfg = Config(**cfg_kwargs)
+        if opts.backend == "torch-mps" and (cfg.flow_dtype != "float32" or cfg.corr_dtype != "float32"):
+            errs.append("torch-mps backend supports only float32 flow and correlation")
         if cfg.warp_diag and opts.diag_every > 0:
             errs.append("choose either warp_diag (all frames) or --diag-every (sampled), not both")
         if errs:
@@ -368,10 +381,19 @@ def run_case(opts: RunOptions) -> dict:
         }
         man["weights"]["sha256"] = MF.sha256_file(opts.weights)
         man["weights"]["size_bytes"] = Path(opts.weights).stat().st_size
+        flow_weights_path = opts.torch_weights if opts.backend == "torch-mps" else opts.weights
+        man["flow_backend"].update({"weights_path": str(flow_weights_path),
+                                    "weights_sha256": MF.sha256_file(flow_weights_path)})
+        if opts.backend == "torch-mps":
+            from .torch_flow import verify_weight_equivalence
+            man["flow_backend"]["weight_equivalence"] = verify_weight_equivalence(opts.weights, opts.torch_weights)
 
         identity = _experiment_identity(opts, cfg_kwargs, man["source"], man["weights"]["sha256"], man["code"],
                                         man["evaluation"], output_fps, eval_vf, opts.diag_every, opts.dump_plan,
                                         opts.dump_motion)
+        identity["flow_backend"]["weights_sha256"] = man["flow_backend"]["weights_sha256"]
+        identity["flow_backend"]["canonical_weights_sha256"] = (
+            man["flow_backend"].get("weight_equivalence", {}).get("canonical_sha256"))
         man["experiment_identity"] = identity
         man["content_key"] = MF.content_key(identity)
         _checkpoint(man, man_path, "source")
@@ -384,8 +406,13 @@ def run_case(opts: RunOptions) -> dict:
         stage = "model_construct"
         _checkpoint(man, man_path, "model_construct")   # persist before the long RAFT construction
         tmc = time.perf_counter()
-        flow = RaftFlow(opts.weights, cfg.flow_iters, cfg.flow_downscale, cfg.warm_start,
-                        getattr(mx, cfg.corr_dtype), getattr(mx, cfg.flow_dtype), cfg.warm_iters or None)
+        if opts.backend == "torch-mps":
+            from .torch_flow import TorchMPSFlow
+            flow = TorchMPSFlow(opts.torch_weights, cfg.flow_iters, cfg.flow_downscale, cfg.warm_start,
+                                getattr(mx, cfg.corr_dtype), getattr(mx, cfg.flow_dtype), cfg.warm_iters or None)
+        else:
+            flow = RaftFlow(opts.weights, cfg.flow_iters, cfg.flow_downscale, cfg.warm_start,
+                            getattr(mx, cfg.corr_dtype), getattr(mx, cfg.flow_dtype), cfg.warm_iters or None)
         man["timing"]["model_construct_s"] = time.perf_counter() - tmc
         gate = lock.on_step if opts.lock_chunk else None
 

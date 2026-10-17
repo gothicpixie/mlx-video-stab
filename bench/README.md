@@ -1625,6 +1625,30 @@ behavior and can be combined with `--paired-result`.
 Run `--help` for the CLI (repeatable `--original-result`, `--reversal-result`, `--paired-result`,
 `--source-review`; required `--out`; `--allow-unmatched`). Tests: `tests/test_gemini_position_bias_audit.py`.
 
+## Shared-pipeline MLX versus PyTorch MPS flow comparison
+
+Use the same stabilization planner, renderer, media path, and MLX evaluator while swapping only bidirectional RAFT
+flow between MLX and the upstream PyTorch model on MPS. Both runs use the same decoded source, resolved config,
+and model weights: the MLX safetensors and upstream `.pth` files are hashed separately, then their normalized
+tensor arrays are checked for exact equality before the PyTorch run. The result records cold
+model-load time, the first stabilization pass, cached-model repeat timings, flow-independent output metrics,
+encoded cadence, and per-frame global/mesh/row plan differences. It does **not** compare against a separately
+implemented PyTorch stabilizer, and the stock PyTorch adapter's flow transfer back to MLX is included in its
+stabilization timing.
+
+```bash
+.venv/bin/python -I bench/bench_stabilizer.py \
+    --source synthetic --synth-frames 30 --synth-w 960 --synth-h 544 \
+    --flow-iters 12 --flow-downscale 1 --warm-repeats 3
+```
+
+For a local clip, pass `--source /path/to/clip.MTS` and `--start`/`--duration`. The command runs both backends
+sequentially, writes a JSON manifest for each run, and writes `comparison.json` plus `comparison.md` only when
+source hash, config, output frame count, and encoded cadence match and both runs succeed. A PyTorch MPS or weight
+failure stops the comparison without producing a winner table. The default 960x544 synthetic run measures the
+same scale as the direct RAFT benchmark; use repeated, independent real clips before making any stabilizer-quality
+claim. The comparison outputs are local benchmark artifacts under ignored `out/`.
+
 ## Tests
 
 `tests/test_bench_runner.py` covers configuration/experiment identity, change labelling against the fully
