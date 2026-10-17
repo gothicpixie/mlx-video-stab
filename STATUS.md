@@ -3025,3 +3025,13 @@ any general quality claim requires a new source/window chosen without candidate 
 Decision: run this matched ablation before further local-support or source_highpass work. Use the residual arms
 to determine whether the reported deformation is present in the combined output and which fitted channel changes
 it; do not select a new default from this diagnostic comparison alone.
+
+Interim results (2026-10-16): the `global-only` and `mesh-only` 10 s arms both completed with 300-frame aligned
+CFR output, reliable RAFT metrics, 299/299 supported output pairs and zero fit fallbacks. The combined baseline
+has RAFT jitter/wobble **0.51917/0.05365 px** and KLT jitter **0.52383 px** (baseline KLT was measured
+separately from its saved output and aligned mask, without another RAFT pass). Global-only measured
+**0.51805/0.07810 px** RAFT jitter/wobble and **0.54210 px** KLT jitter. Mesh-only (global + mesh, rows
+disabled) measured **0.51648/0.06323 px** and **0.52542 px** KLT jitter. On this window mesh-only is close to
+the combined baseline for jitter but has higher wobble; global-only retains similar RAFT jitter while worsening
+both wobble and KLT jitter. The row-only arm remains pending, so this does not isolate the row contribution or
+the mesh/row interaction, and no visual review of the ablations has been performed yet.
