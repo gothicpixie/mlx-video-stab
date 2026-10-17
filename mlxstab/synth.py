@@ -29,15 +29,37 @@ def make_layers(W, H, seed=0, margin=160):
     return [np.clip(far, 0, 255).astype(np.float32), mid, near], margin
 
 
-def camera(T, seed=1, jitter=6.0, rot_jit=0.6):
-    """(intended [T,3], actual(tau) function) in px/px/deg. tau is in frames (continuous, for rolling shutter)."""
+def camera(T, seed=1, jitter=6.0, rot_jit=0.6, intent_mode="smooth"):
+    """Return known intent and actual camera pose in px/px/degrees.
+
+    ``intent_mode='smooth'`` preserves the historical predictable pan/oscillation exactly. ``'stochastic'`` uses
+    a seeded, correlated path with the same nominal per-axis scales. Camera shake uses a separate, unchanged RNG
+    stream, so paired intent modes receive identical shake for the same seed. ``tau`` is continuous frame time
+    for rolling-shutter row sampling.
+    """
     rng = np.random.default_rng(seed)
     knots = np.arange(-4, T + 6)
     jx, jy, jr = (gaussian_filter(rng.standard_normal(len(knots)), 0.8) for _ in range(3))
     jx, jy, jr = (v / (v.std() + 1e-9) for v in (jx, jy, jr))
-    def intended(tau):
-        tau = np.asarray(tau, np.float64)
-        return np.stack([40 * np.sin(tau / 70.0) + 0.5 * tau, 10 * np.sin(tau / 55.0), 1.2 * np.sin(tau / 90.0)], -1)
+
+    if intent_mode == "smooth":
+        def intended(tau):
+            tau = np.asarray(tau, np.float64)
+            return np.stack([40 * np.sin(tau / 70.0) + 0.5 * tau,
+                             10 * np.sin(tau / 55.0), 1.2 * np.sin(tau / 90.0)], -1)
+    elif intent_mode == "stochastic":
+        intent_rng = np.random.default_rng(int(seed) ^ 0x5EED5EED)
+        profiles = [gaussian_filter(intent_rng.standard_normal(len(knots)), 12.0) for _ in range(3)]
+        target_stds = (32.0, 10.0, 1.2)
+        profiles = [p / (p.std() + 1e-12) * std for p, std in zip(profiles, target_stds)]
+        profiles[0] = profiles[0] + 0.5 * knots
+
+        def intended(tau):
+            tau = np.asarray(tau, np.float64)
+            return np.stack([np.interp(tau, knots, p) for p in profiles], axis=-1)
+    else:
+        raise ValueError("intent_mode must be 'smooth' or 'stochastic'")
+
     def actual(tau):
         tau = np.asarray(tau, np.float64)
         j = np.stack([np.interp(tau, knots, jx) * jitter, np.interp(tau, knots, jy) * jitter, np.interp(tau, knots, jr) * rot_jit], -1)
@@ -45,9 +67,14 @@ def camera(T, seed=1, jitter=6.0, rot_jit=0.6):
     return intended, actual
 
 
-def render(T=90, W=320, H=180, seed=0, rho=0.8, jitter=6.0, rot_jit=0.6, depths=(1.0, 0.55, 0.25), subject=True):
+def render(T=90, W=320, H=180, seed=0, rho=0.8, jitter=6.0, rot_jit=0.6,
+           depths=(1.0, 0.55, 0.25), subject=True, subject_speed=1.6, intent_mode="smooth"):
     layers, m = make_layers(W, H, seed)
-    intended, actual = camera(T, seed + 1, jitter, rot_jit)
+    if len(depths) != 3 or not np.all(np.isfinite(depths)) or any(d <= 0 for d in depths):
+        raise ValueError("depths must contain three finite positive layer motion factors")
+    if not np.isfinite(subject_speed):
+        raise ValueError("subject_speed must be finite")
+    intended, actual = camera(T, seed + 1, jitter, rot_jit, intent_mode=intent_mode)
     ys, xs = np.mgrid[0:H, 0:W].astype(np.float32)
     cx, cy = (W - 1) / 2, (H - 1) / 2
     out = np.zeros((T, H, W, 3), np.uint8)
@@ -64,7 +91,7 @@ def render(T=90, W=320, H=180, seed=0, rho=0.8, jitter=6.0, rot_jit=0.6, depths=
             if L.shape[-1] == 3: acc = s
             else: a = s[..., 3:4]; acc = acc * (1 - a) + s[..., :3] * a
         if subject:                                                              # independently moving disk, fixed in the world
-            sxw = 60 + 1.6 * t; syw = H * 0.55
+            sxw = 60 + subject_speed * t; syw = H * 0.55
             ex = sxw - (ux + 0 * pose[:, 0:1]) + 0; ey = syw - uy
             disk = (ex ** 2 + ey ** 2) < 22 ** 2
             acc[disk] = np.array([240, 220, 60]) * (0.8 + 0.2 * np.sin(ex[disk] / 3))[:, None]

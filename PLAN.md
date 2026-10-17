@@ -344,3 +344,10 @@ no failed pairs or temporal outlier flags; the outlier hypothesis is not support
 synthetic factorial with known subject-relative motion and depth, varying parallax separation and trajectory
 predictability while holding camera shake fixed. Measure intended-camera retention, shake rejection and
 outlier response separately, then hold out real windows for validation. Do not change smoother defaults.
+
+## Synthetic intent controls
+
+The generator now has additive, tested controls for predictable versus stochastic camera intent and subject speed;
+the legacy smooth scene remains the default. This is fixture plumbing, not evidence of better stabilization. Next
+thread the scene factors through `bench/run_case.py` and its manifest, hold the far-layer motion factor fixed at 1.0,
+and run the paired-seed factorial with the same camera shake across conditions.

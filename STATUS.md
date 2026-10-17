@@ -3836,3 +3836,15 @@ outlier response separately. Existing `mlxstab.synth` already provides layered p
 moving subject, and smooth camera motion, so first extend it with controlled predictability/visibility arms and
 compare estimator signals before adding a learned intent classifier. Keep real 00176/00177 clips held out for
 subsequent external validation; the current replay does not justify any smoother or production-default change.
+
+### Synthetic intent-factor controls added (2026-10-17)
+
+The procedural scene generator now supports a paired predictable (`smooth`) versus correlated stochastic camera-intent
+trajectory, with an independent RNG stream so camera shake remains identical for a seed across intent modes. The
+existing smooth mode stays the default and retains its historical camera formula. `render()` also exposes subject
+world-speed and validates three positive layer motion factors; its existing arguments, defaults and return shape are
+unchanged. These are stimulus controls only; no factorial flow/stabilization result has been run yet. DeepSeek
+recommended holding the far-layer factor at 1.0 while varying only mid/near factors so parallax contrast is not
+confounded with global image speed. Next expose these controls through the benchmark runner and provenance manifest,
+then run paired seeds over intent predictability, depth separation and subject absent/static/moving. Keep all cells at
+the same camera-shake seed and record exact intended/actual paths.
