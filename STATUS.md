@@ -3501,3 +3501,47 @@ are recorded with this implementation; its graph heuristic found no linked test 
 run directly. The next gate is to measure peak MLX/process memory on additional safe reference sizes, then compare
 flow-downscale quality against full-resolution analysis on known-motion and real windows before advertising an
 automatic 4K preset.
+
+## RAFT flow-downscale quality screen (2026-10-17)
+
+The matched `00176.MTS` 1080i comparison used two non-overlapping one-second windows, at 60 s and 800 s. For
+each window, scale 2 and scale 4 used the same source hash, 60 deinterlaced frames at 59.940 fps, baseline
+planner and renderer settings, 20 analysis iterations, output cadence, 12-iteration scale-2 RAFT evaluator,
+and seeded KLT evaluator. Both scales completed with aligned timelines, 59 supported motion pairs, zero fit
+fallbacks, and reliable RAFT/KLT agreement that stabilization reduced measured jitter. These are two scenes
+from one source recording, not independent source clips or held-out validation.
+
+| Window | Flow scale | Stabilization (s) | Output RAFT jitter (px) | Output RAFT wobble (px) | Output KLT jitter (px) | Mean / max border fraction |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| t060 | 2 | 50.74 | 0.02028 | 0.02441 | 0.04580 | 0.00498 / 0.01920 |
+| t060 | 4 | 19.94 | 0.04674 | 0.03839 | 0.06557 | 0.00568 / 0.02179 |
+| t800 | 2 | 49.80 | 0.02739 | 0.01968 | 0.06915 | 0.00613 / 0.01257 |
+| t800 | 4 | 19.81 | 0.05484 | 0.03831 | 0.08860 | 0.00692 / 0.01315 |
+
+Scale 4 was about **2.5x faster** than scale 2 in both windows, while its output RAFT jitter was **130% higher**
+at t060 and **100% higher** at t800. RAFT wobble was 57% and 95% higher; KLT jitter was 43% and 28% higher.
+Scale 4 still improved jitter relative to raw in both windows. The absolute scale-4-minus-scale-2 residuals
+were 0.0265/0.0275 px for RAFT jitter, 0.0140/0.0186 px for wobble, and 0.0198/0.0194 px for KLT jitter
+(t060/t800). The relative increases are large because the scale-2 residuals are small; these single-run
+summaries provide no variance estimate or confidence interval. Mean and maximum border fractions also rose
+slightly at scale 4 in both windows.
+
+Gemini 3.8 Flash via the Vertex API reviewed the scale-2/scale-4 pair and its position reversal for each
+window. At t060 it called the original a tie and preferred scale 2 in the reversal; at t800 it preferred
+scale 4 in the original and called the reversal a tie. The position-bias audit found **zero two-order method
+agreements across two complete pairs**. Treat the visual review as inconclusive; it does not overturn or confirm
+the motion metrics.
+
+Two scale-1 attempts on t060 were stopped before output: an exploratory three-second run remained in analysis
+for roughly eight minutes, and a one-second run was cancelled after **648 s (10m48s)** while still in
+stabilization. They provide no quality result. At 1080p the estimator reports an 11,119,680,000-byte stored
+bidirectional correlation-pyramid payload at scale 1, versus 706,982,400 bytes at scale 2 and 44,031,360 bytes
+at scale 4. The payload estimate is not peak memory.
+
+Decision: these two windows reject a claim of **scale-4 quality parity with scale 2** for this source, while
+showing a substantial runtime gain. Do not treat this as a general scale-4 quality ranking: the absolute
+differences are small, there is no run variance, the scenes are from one source, and both are 1080i rather than
+4K. Keep `flow_downscale=auto` opt-in, report its resolved scale, and do not advertise a production 4K quality
+preset. Next compare scales 2 and 4 on a distinct source and longer real windows; separately validate quality
+on actual 4K footage before setting an acceptance threshold or changing auto-selection behavior. Manifests,
+blinded pairs, Gemini responses and the positional-bias audit remain under ignored `out/bench/`.
