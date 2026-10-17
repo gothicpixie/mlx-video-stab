@@ -3108,4 +3108,14 @@ anchor has 59 RAFT-supported pairs, zero RAFT fit fallbacks, and maximum absolut
 **1.3677 degrees** (2 pairs exceed 0.5 degrees), so it passes the motion gate. Its benchmark RAFT reliability
 flag is true; independent KLT is unavailable because 4 pairs failed. This is acceptable for the geometric
 motion/composition audit only, and cannot support a stabilization-quality claim. The rotation-screen reports
-are ignored under `out/bench/real_motion_field_audit/`; the baseline-only t048–058 capture is in progress.
+are ignored under `out/bench/real_motion_field_audit/`.
+
+The new t048–058 baseline capture completed successfully with the same config digest as S13 t032–042. It
+decoded 600 interlaced fields into 300 CFR outputs at 30000/1001 fps; video and mask are aligned, with
+299/299 supported RAFT pairs and zero fit fallbacks. Input-to-output RAFT jitter was **10.390 -> 5.761 px**;
+wobble was **0.496 -> 0.451 px**. The full-window motion audit also passes the **0.5 degree** rotation gate:
+599 fits, zero fallbacks, maximum absolute fitted rotation **1.3677 degrees**, with 2 pairs above the threshold.
+KLT path metrics are unavailable (4 input and 5 output failed pairs), as anticipated from the one-second anchor;
+this window is used only for the fitted-map geometry check. Its saved plan and motion are under
+`out/bench/stage0_composition_t048_10s_baseline/`. The full-frame composition audit is running; no composition
+result or production change is yet recorded.
