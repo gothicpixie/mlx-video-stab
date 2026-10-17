@@ -15,12 +15,15 @@ the matching validity mask:
   ``stabilize.render_from_src`` pipeline (no second warp pass, no re-fit). The **complete** output->source map
   (global homography + mesh + row corrections) and the **global-only** map (the same homography with the
   residual arrays zeroed) are both evaluated with the production sampler convention;
-- :func:`bench.local_support_candidate.local_support_failure` finds the pixels where the complete map left the
-  source but the global map is still supported (locally recoverable), and the **temporal union** of those
-  masks over a centered ``[t - temporal_radius, t + temporal_radius]`` output-frame window is turned into a
-  smooth output-space ``alpha`` taper with :func:`bench.local_support_candidate.local_support_alpha`. The two
-  maps are blended with :func:`bench.local_support_candidate.blend_source_maps`; pixels the global motion also
-  cannot recover are reported but never claimed fixed.
+- :func:`bench.local_support_candidate.local_support_failure` returns endpoint support classes: ``recoverable``
+  (the complete map is unsupported while the global-only map is supported) and
+  ``both_endpoint_maps_invalid`` (both endpoint maps are unsupported). The **temporal union** of the
+  ``recoverable`` masks over a centered ``[t - temporal_radius, t + temporal_radius]`` output-frame window is
+  turned into a smooth output-space ``alpha`` taper with
+  :func:`bench.local_support_candidate.local_support_alpha`. The two maps are blended with
+  :func:`bench.local_support_candidate.blend_source_maps`. The ``both_endpoint_maps_invalid`` class is an
+  endpoint classification, not a final post-blend outcome: interpolation between the maps can still make such
+  a pixel supported, so final support is reported separately.
 
 Streaming and bounded memory
 ----------------------------
@@ -68,7 +71,7 @@ from . import plan_shape_audit as PSA
 from . import real_pair_review as RPR
 from .heavylock import HeavyLock
 
-SCHEMA = "mlxstab.local_support_render/1"
+SCHEMA = "mlxstab.local_support_render/2"
 
 DEFAULT_RADIUS_PX = 8.0
 DEFAULT_TEMPORAL_RADIUS = 2
@@ -84,18 +87,21 @@ SUPPORT_DEFINITION = (
     "A source-map output pixel has full sampler support when every interpolation tap with absolute weight "
     "greater than 1e-6 lies inside the source image, using the configured kernel and the same tap convention as "
     "mlxstab.warpmetrics.full_support_mask. ``pre_invalid`` counts complete-map (global + mesh + rows) failures; "
-    "``post_invalid`` counts blended-candidate failures; ``locally_unrecoverable`` counts pixels that the "
-    "global-only map also cannot support, and these are never claimed fixed. ``affected`` is the fraction of "
-    "output pixels with alpha < 1. The encoded validity mask separately follows ``warp.valid_mask`` center "
-    "bounds. These are geometry/support diagnostics, NOT perceptual or visual-quality metrics."
+    "``post_invalid`` counts blended-candidate failures; ``recoverable`` is the endpoint class where the "
+    "complete map is unsupported but the global-only map is supported; ``both_endpoint_maps_invalid`` is the "
+    "endpoint class where both maps are unsupported. These two classes describe the endpoint maps before "
+    "blending, not the final outcome: interpolation between them can change support, so final support is "
+    "measured separately by ``post_invalid``. ``affected`` is the fraction of output pixels with alpha < 1. The "
+    "encoded validity mask separately follows ``warp.valid_mask`` center bounds. These are geometry/support "
+    "diagnostics, NOT perceptual or visual-quality metrics."
 )
 
 CANDIDATE_NOTE = (
     "Blend the complete output->source map back toward the global-only map only near pixels the complete map "
     "loses but the global map still supports. alpha is a smooth output-space taper (0 at an unsupported pixel, "
-    "1 at least radius_px away) over the temporal union of recoverable failures in a centered "
-    "[t-temporal_radius, t+temporal_radius] output-frame window, so a transient invalid pixel does not switch "
-    "the correction on and off on adjacent frames."
+    "1 at least radius_px away) over the temporal union of full-map-invalid / global-map-valid endpoint "
+    "failures in a centered [t-temporal_radius, t+temporal_radius] output-frame window, so a transient invalid "
+    "pixel does not switch the correction on and off on adjacent frames."
 )
 
 SCOPE_NOTE = (
@@ -112,8 +118,10 @@ LIMITATIONS = (
     "run/window and is not clip-wide or held-out evidence",
     "full-kernel-support counts and alpha statistics are geometry/support diagnostics, not a "
     "perceptual or visual-quality metric, and the candidate does not prevent foldover",
-    "the correction blends a locally-invalid complete map toward the global-only map with a spatial taper; it "
-    "cannot recover a pixel the global model also leaves out of bounds, and those are reported separately",
+    "the correction blends a locally-invalid complete map toward the global-only map with a spatial taper; "
+    "``both_endpoint_maps_invalid`` only means both endpoint maps are unsupported at that pixel, not that the "
+    "blended result is unsupported (interpolation between the maps can make it supported), and final support "
+    "is reported separately by ``post_invalid``",
     "alpha is evaluated on the temporal union over output frames, so the correction is temporally stable but "
     "is not a strict per-pixel guarantee",
     "no network call and no upload; a later review (bench.real_pair_review --candidate-video) happens "
@@ -234,9 +242,11 @@ def blend_frame(full_src, global_src, alpha, width, height, kernel="lanczos3"):
     """Blend the complete/global maps for one frame and measure its support statistics.
 
     Returns ``(candidate [H,W,2] float32, stats)``. The stats count pre-blend (complete-map) invalid pixels,
-    locally recoverable failures, locally unrecoverable failures, post-blend invalid pixels, the pixels where
-    the local correction is active (``alpha < 1``) and the alpha summary. Support is the kernel-aware
-    complete interpolation-kernel footprint (``mlxstab.warpmetrics.full_support_mask`` via
+    the full-map-invalid / global-map-valid endpoint class (``recoverable``), the both-endpoint-maps-invalid
+    endpoint class, post-blend invalid pixels, the pixels where the local correction is active (``alpha < 1``)
+    and the alpha summary. The endpoint classes classify the maps before blending and do not guarantee the
+    final support of the blended candidate, which is measured separately as ``post_invalid``. Support is the
+    kernel-aware complete interpolation-kernel footprint (``mlxstab.warpmetrics.full_support_mask`` via
     :func:`bench.local_support_candidate.local_support_failure`), so the kernel must be the one the frame was
     rendered with and this stays a pure-NumPy seam over :mod:`bench.local_support_candidate`, unit-testable
     without MLX or media.
@@ -244,18 +254,19 @@ def blend_frame(full_src, global_src, alpha, width, height, kernel="lanczos3"):
     full = np.asarray(full_src, np.float32)
     glob = np.asarray(global_src, np.float32)
     weight = np.asarray(alpha, np.float32)
-    recoverable, unrecoverable = LSC.local_support_failure(full, glob, width, height, kernel=kernel)
+    recoverable, both_endpoint_maps_invalid = LSC.local_support_failure(
+        full, glob, width, height, kernel=kernel)
     candidate = LSC.blend_source_maps(full, glob, weight)
     post_bad = ~LSC._source_valid(candidate, width, height, kernel)
     pre_bad = ~LSC._source_valid(full, width, height, kernel)
-    _require(np.array_equal(pre_bad, recoverable | unrecoverable), "support_accounting",
-             "recoverable and unrecoverable counts do not partition complete-map support failures")
+    _require(np.array_equal(pre_bad, recoverable | both_endpoint_maps_invalid), "support_accounting",
+             "recoverable and both-endpoint-maps-invalid counts do not partition complete-map support failures")
     affected = weight < 1.0
     total = int(full.shape[0] * full.shape[1])
     pre = int(np.count_nonzero(pre_bad))
     post = int(np.count_nonzero(post_bad))
     rec = int(np.count_nonzero(recoverable))
-    unf = int(np.count_nonzero(unrecoverable))
+    both = int(np.count_nonzero(both_endpoint_maps_invalid))
     aff = int(np.count_nonzero(affected))
     frac = (lambda n: (float(n) / total) if total else 0.0)
     return candidate, {
@@ -263,7 +274,7 @@ def blend_frame(full_src, global_src, alpha, width, height, kernel="lanczos3"):
         "pre_invalid_pixels": pre, "pre_invalid_fraction": frac(pre),
         "post_invalid_pixels": post, "post_invalid_fraction": frac(post),
         "recoverable_pixels": rec, "recoverable_fraction": frac(rec),
-        "unrecoverable_pixels": unf, "unrecoverable_fraction": frac(unf),
+        "both_endpoint_maps_invalid_pixels": both, "both_endpoint_maps_invalid_fraction": frac(both),
         "repaired_pixels": int(np.count_nonzero(pre_bad & ~post_bad)),
         "regressed_pixels": int(np.count_nonzero(~pre_bad & post_bad)),
         "affected_pixels": aff, "affected_fraction": frac(aff),
@@ -304,7 +315,7 @@ def aggregate_support(per_frame, width, height):
         "pre_invalid": _fraction_block(per_frame, "pre_invalid", total_pixels),
         "post_invalid": _fraction_block(per_frame, "post_invalid", total_pixels),
         "recoverable": _fraction_block(per_frame, "recoverable", total_pixels),
-        "locally_unrecoverable": _fraction_block(per_frame, "unrecoverable", total_pixels),
+        "both_endpoint_maps_invalid": _fraction_block(per_frame, "both_endpoint_maps_invalid", total_pixels),
         "affected": _fraction_block(per_frame, "affected", total_pixels),
         "render_center_invalid": render_center,
         "repaired_pixels": int(sum(int(pf["repaired_pixels"]) for pf in per_frame)),
@@ -533,7 +544,8 @@ def render_local_support(manifest_path, *, source_path=None, output, mask, repor
             glob = _field_np(gplan, t, W, H, grid)
             _require(bool(np.isfinite(full).all()) and bool(np.isfinite(glob).all()), "nonfinite_field",
                      f"source field at plan frame {t} contains non-finite values")
-            recoverable, _unrecoverable = LSC.local_support_failure(full, glob, W, H, kernel=cfg.kernel)
+            recoverable, _both_endpoint_maps_invalid = LSC.local_support_failure(
+                full, glob, W, H, kernel=cfg.kernel)
             buffer.append({"frame": i, "plan_frame": t, "frame_img": frame, "full": full, "global": glob})
             emitted = window.push(recoverable)
             if emitted is not None:

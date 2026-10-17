@@ -23,31 +23,34 @@ def test_local_backoff_repairs_recoverable_border_and_preserves_distant_map():
     full_src = global_src.copy()
     full_src[..., 0] -= 2.0
 
-    unsupported, unfixable = local_support_failure(full_src, global_src, width, height, kernel="bilinear")
+    unsupported, both_endpoint_maps_invalid = local_support_failure(
+        full_src, global_src, width, height, kernel="bilinear")
     assert unsupported[:, :2].all()
     assert not unsupported[:, 2:].any()
-    assert not unfixable.any()
+    assert not both_endpoint_maps_invalid.any()
 
     alpha = local_support_alpha(unsupported, radius_px=3.0)
     candidate = blend_source_maps(full_src, global_src, alpha)
-    _, candidate_unfixable = local_support_failure(candidate, global_src, width, height, kernel="bilinear")
-    assert not candidate_unfixable.any()
+    _, candidate_both_endpoint_maps_invalid = local_support_failure(
+        candidate, global_src, width, height, kernel="bilinear")
+    assert not candidate_both_endpoint_maps_invalid.any()
     assert alpha[:, :2].max() == 0.0
     assert np.array_equal(candidate[:, 8:], full_src[:, 8:])
     assert np.all((candidate[..., 0] >= 0.0) & (candidate[..., 0] <= width - 1))
 
 
-def test_local_backoff_does_not_claim_to_fix_global_only_invalid_pixels():
+def test_local_support_failure_separates_both_endpoint_invalid_pixels():
     height, width = 5, 8
     global_src = _identity_map(height, width)
     global_src[..., 0] -= 1.0
     full_src = global_src.copy()
     full_src[..., 0] -= 2.0
-    unsupported, unfixable = local_support_failure(full_src, global_src, width, height, kernel="bilinear")
+    unsupported, both_endpoint_maps_invalid = local_support_failure(
+        full_src, global_src, width, height, kernel="bilinear")
     assert unsupported[:, 1:3].all()
     assert not unsupported[:, 0].any()
-    assert unfixable[:, 0].all()
-    assert not unfixable[:, 1:].any()
+    assert both_endpoint_maps_invalid[:, 0].all()
+    assert not both_endpoint_maps_invalid[:, 1:].any()
 
 
 def test_alpha_is_one_without_failures_and_has_a_bounded_spatial_taper():
@@ -110,9 +113,10 @@ def test_nonfinite_full_map_is_replaced_only_where_local_alpha_is_zero():
     global_src = _identity_map(3, 4)
     full_src = global_src.copy()
     full_src[1, 1, 0] = np.nan
-    unsupported, unfixable = local_support_failure(full_src, global_src, 4, 3, kernel="bilinear")
+    unsupported, both_endpoint_maps_invalid = local_support_failure(
+        full_src, global_src, 4, 3, kernel="bilinear")
     assert unsupported[1, 1]
-    assert not unfixable.any()
+    assert not both_endpoint_maps_invalid.any()
     alpha = np.ones((3, 4), np.float32)
     alpha[1, 1] = 0.0
     candidate = blend_source_maps(full_src, global_src, alpha)

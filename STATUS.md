@@ -2968,3 +2968,36 @@ held-out manipulation reduces at least half of the event excess while leaving th
 otherwise close this mechanism as unproven without tuning a production path.
 
 Ignored S24 mask/frame/LL audit artifacts are under `out/bench/e02_source_highpass_s24_t109_10s/`.
+
+## Localized sampler-support candidate replay on `00176.MTS` t060–070 (2026-10-16)
+
+A research-only local border-support correction was replayed from the successful baseline capture at
+`out/bench/current_source_t060_10s_baseline/` without rerunning RAFT. It blends the complete source-coordinate map
+toward the global-only map near a temporal union of full-kernel-support failures. The rendered candidate and
+mask are under `out/bench/local_support_t060_10s_r8_t2/`; the paired RAFT/KLT evaluation is
+`evaluation.json`. The 300 output frames are cadence aligned at 30000/1001 fps. Raw-input RAFT numbers exactly
+reproduce the baseline manifest, confirming the matched evaluation settings.
+
+On this 10 s window, full-kernel-support invalid pixels fell from **2.640%** before correction to **2.350%**
+after correction (1,807,861 net pixels). The candidate repaired 1,828,570 pixels and introduced 20,709 new
+invalid pixels. Masked RAFT jitter was **0.51917 -> 0.51902 px** and wobble **0.05365 -> 0.05352 px** relative
+to the existing baseline: effectively unchanged quality metrics. On raw input to candidate, RAFT and KLT both
+reported reduced jitter (1.58734 -> 0.51902 px and 1.56631 -> 0.52454 px), but this run did not compute KLT
+for the baseline output, so it does not establish a KLT difference between baseline and candidate. This is one
+window and the support gain is not a demonstrated perceptual improvement.
+
+The audit exposed a reporting bug: the class where both the complete and global-only endpoint maps were
+unsupported was named “unrecoverable,” implying the blended map must also be unsupported. In fact, interpolation
+between two unsupported endpoints can yield a supported result. The endpoint class contains 14,595,859 pixels;
+the candidate repaired 207 more pixels than the “complete unsupported / global supported” class alone. The
+report now calls this class `both_endpoint_maps_invalid` and reports final post-blend support separately. The
+saved report was migrated to schema 2 labels without changing the previously measured counts or video/mask.
+DeepSeek Flash via Pi reviewed this distinction; a regression test demonstrates an unsupported-to-supported
+interpolation between endpoint maps.
+
+Decision: keep the support correction research-only. It improves the sampler-support count on this window but
+does not move measured stabilization quality. For the earlier source_highpass event analysis, the t039–041
+window was selected after its metric increase was observed. Any split-based reweighting or replay on that same
+event is exploratory mechanism analysis, not a held-out confirmation. Freeze any formula and control windows
+before viewing a new candidate outcome; confirmation requires a new qualifying event selected from baseline-only
+evidence. Do not tune production behavior on either already-inspected window.

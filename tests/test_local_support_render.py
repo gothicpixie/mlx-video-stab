@@ -51,15 +51,16 @@ def test_blend_frame_repairs_recoverable_failures_and_preserves_distant_map():
     global_src = _identity_map(H, W)
     full_src = global_src.copy()
     full_src[..., 0] -= 2.0
-    recoverable, unrecoverable = LSC.local_support_failure(full_src, global_src, W, H, kernel="bilinear")
+    recoverable, both_endpoint_maps_invalid = LSC.local_support_failure(
+        full_src, global_src, W, H, kernel="bilinear")
     alpha = np.ones((H, W), np.float32)
     alpha[recoverable] = 0.0
     candidate, stats = R.blend_frame(full_src, global_src, alpha, W, H, kernel="bilinear")
 
     assert stats["frame_pixels"] == H * W
-    assert stats["pre_invalid_pixels"] == int((recoverable | unrecoverable).sum()) > 0
+    assert stats["pre_invalid_pixels"] == int((recoverable | both_endpoint_maps_invalid).sum()) > 0
     assert stats["recoverable_pixels"] == int(recoverable.sum())
-    assert stats["unrecoverable_pixels"] == 0
+    assert stats["both_endpoint_maps_invalid_pixels"] == 0
     assert stats["post_invalid_pixels"] == 0
     assert stats["repaired_pixels"] == stats["pre_invalid_pixels"]
     assert stats["regressed_pixels"] == 0
@@ -83,7 +84,7 @@ def test_blend_frame_kernel_changes_the_support_footprint():
     assert lanczos["pre_invalid_pixels"] > bilinear["pre_invalid_pixels"]
 
 
-def test_blend_frame_counts_locally_unrecoverable_and_leaves_them_invalid():
+def test_blend_frame_counts_both_endpoint_invalid_when_no_correction_is_applied():
     H, W = 5, 8
     global_src = _identity_map(H, W)
     global_src[..., 0] -= 1.0                      # global map itself loses column 0
@@ -92,11 +93,31 @@ def test_blend_frame_counts_locally_unrecoverable_and_leaves_them_invalid():
     alpha = np.ones((H, W), np.float32)            # no correction: candidate == complete map
     candidate, stats = R.blend_frame(full_src, global_src, alpha, W, H, kernel="bilinear")
 
-    expected_unfixable = int((~LSC._source_valid(global_src, W, H, "bilinear")).sum())
-    assert stats["unrecoverable_pixels"] == expected_unfixable > 0
-    assert stats["post_invalid_pixels"] >= stats["unrecoverable_pixels"]
+    expected_both_invalid = int((~LSC._source_valid(global_src, W, H, "bilinear")).sum())
+    assert stats["both_endpoint_maps_invalid_pixels"] == expected_both_invalid > 0
+    assert stats["post_invalid_pixels"] >= stats["both_endpoint_maps_invalid_pixels"]
     assert stats["affected_pixels"] == 0           # alpha is all ones, so nothing is locally active
     np.testing.assert_array_equal(candidate, full_src)
+
+
+def test_endpoint_both_invalid_is_distinct_from_post_blend_support():
+    """A pixel unsupported by both endpoint maps can still be supported after interpolating between them."""
+    H, W = 5, 10
+    global_src = _identity_map(H, W)
+    full_src = _identity_map(H, W)
+    y, x = 2, 5
+    full_src[y, x, 0] = W - 0.75       # unsupported beyond the right edge
+    global_src[y, x, 0] = -0.75        # unsupported beyond the left edge
+
+    alpha = np.ones((H, W), np.float32)
+    alpha[y, x] = 0.5                  # halfway between the two unsupported endpoints is supported
+    candidate, stats = R.blend_frame(full_src, global_src, alpha, W, H, kernel="bilinear")
+
+    assert stats["recoverable_pixels"] == 0
+    assert stats["both_endpoint_maps_invalid_pixels"] == 1
+    assert stats["pre_invalid_pixels"] == 1
+    assert stats["post_invalid_pixels"] == 0
+    assert LSC._source_valid(candidate[y:y + 1, x:x + 1], W, H, "bilinear").all()
 
 
 def test_blend_frame_replaces_nonfinite_with_global_and_reports_alpha():
@@ -142,6 +163,7 @@ def test_aggregate_support_recomputes_pooled_mean_max_and_alpha():
     assert agg["pre_invalid"]["pooled_fraction"] == pytest.approx(agg["pre_invalid"]["total_pixels"] / total)
     assert agg["post_invalid"]["total_pixels"] == 0
     assert agg["recoverable"]["total_pixels"] == frame0["recoverable_pixels"]
+    assert agg["both_endpoint_maps_invalid"]["total_pixels"] == frame0["both_endpoint_maps_invalid_pixels"]
     assert agg["affected"]["total_pixels"] == frame0["affected_pixels"]
     assert agg["repaired_pixels"] == frame0["repaired_pixels"] + frame1["repaired_pixels"]
     assert agg["regressed_pixels"] == 0
@@ -155,6 +177,7 @@ def test_aggregate_support_empty_is_defined():
     agg = R.aggregate_support([], 4, 6)
     assert agg["frames"] == 0 and agg["total_pixels"] == 0
     assert agg["pre_invalid"]["pooled_fraction"] == 0.0
+    assert agg["both_endpoint_maps_invalid"]["total_pixels"] == 0
     assert agg["alpha"] == {"mean": 0.0, "min": 0.0, "max": 0.0}
 
 

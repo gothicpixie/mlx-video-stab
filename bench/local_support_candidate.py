@@ -21,7 +21,14 @@ def _source_valid(src, width, height, kernel):
 
 
 def local_support_failure(full_src, global_src, width, height, kernel="lanczos3"):
-    """Return pixels locally recoverable by dropping residuals, and pixels global motion cannot recover."""
+    """Classify complete-map support failures by the support of the two endpoint maps.
+
+    Returns ``(recoverable, both_endpoint_maps_invalid)``. ``recoverable`` is the full-map-invalid /
+    global-map-valid class; ``both_endpoint_maps_invalid`` is the full-map-invalid / global-map-invalid
+    class. These are per-pixel properties of the *endpoint* maps only. A pixel in the second class can still
+    become supported after the maps are interpolated, so final post-blend support must be measured separately
+    and neither class is a guaranteed final outcome.
+    """
     full_src = np.asarray(full_src)
     global_src = np.asarray(global_src)
     if full_src.shape != global_src.shape or full_src.ndim != 3 or full_src.shape[-1] != 2:
@@ -36,8 +43,9 @@ def local_support_failure(full_src, global_src, width, height, kernel="lanczos3"
 def local_support_alpha(unsupported, radius_px):
     """Build a smooth output-space taper: zero at unsupported pixels, one at least radius_px away.
 
-    ``unsupported`` is the temporal union of recoverable support failures for the current frame and its temporal
-    neighbours. The Euclidean distance field makes the correction spatially continuous at the mask boundary.
+    ``unsupported`` is the temporal union of the full-map-invalid / global-map-valid endpoint failures for the
+    current frame and its temporal neighbours. The Euclidean distance field makes the correction spatially
+    continuous at the mask boundary.
     """
     bad = np.asarray(unsupported, dtype=bool)
     if bad.ndim != 2 or not bad.size:
@@ -54,8 +62,10 @@ def local_support_alpha(unsupported, radius_px):
 def blend_source_maps(full_src, global_src, alpha):
     """Blend complete and global-only maps using an ``[H,W]`` local correction weight.
 
-    Non-finite complete-map entries are replaced by the global map before blending. If the global map is also
-    invalid, the resulting point stays invalid and is reported by :func:`local_support_failure`.
+    Non-finite complete-map entries are replaced by the global map before blending. A pixel whose complete and
+    global endpoint maps are both unsupported is classified as ``both_endpoint_maps_invalid`` by
+    :func:`local_support_failure`, but the blended point can still become supported after interpolation; it is
+    not automatically invalid.
     """
     full = np.asarray(full_src, dtype=np.float32)
     glob = np.asarray(global_src, dtype=np.float32)
