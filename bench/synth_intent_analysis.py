@@ -25,6 +25,11 @@ METRICS = {
     "shake_y_residual_db": ("shake_rejection", "translation_y_px", "attenuation_db"),
     "shake_rotation_residual_db": ("shake_rejection", "rotation_deg", "attenuation_db"),
 }
+EXPECTED_CELL_SUFFIXES = {
+    f"{layer}__{subject}"
+    for layer in ("far_only", "parallax")
+    for subject in ("absent", "static", "moving")
+}
 
 
 def _metric(run: dict, spec: tuple[str, str, str]) -> float | None:
@@ -74,6 +79,13 @@ def analyze(screen: dict) -> dict:
     runs = screen.get("runs")
     if not isinstance(runs, list):
         raise ValueError("screen must contain a runs list")
+    design = screen.get("design") or {}
+    configured_cells = design.get("cells_per_seed") or []
+    expected_cell_suffixes = {
+        str(cell["id"]).split("__", 1)[1]
+        for cell in configured_cells
+        if cell.get("kind") == "main" and "__" in str(cell.get("id", ""))
+    } or EXPECTED_CELL_SUFFIXES
 
     main: dict[int, dict[str, list[dict]]] = {}
     for run in runs:
@@ -92,8 +104,17 @@ def analyze(screen: dict) -> dict:
     }
     incomplete_seeds: list[dict] = []
     for seed, modes in sorted(main.items()):
-        if (len(modes["smooth"]) != 6 or len(modes["stochastic"]) != 6
-                or any(run.get("status") != "success" for rows in modes.values() for run in rows)):
+        design_mismatch = any(
+            {str(run["cell_id"]).split("__", 1)[1] for run in rows} != expected_cell_suffixes
+            or len(rows) != 6
+            for rows in modes.values()
+        )
+        if design_mismatch:
+            incomplete_seeds.append({"seed": seed, "smooth_cells": len(modes["smooth"]),
+                                     "stochastic_cells": len(modes["stochastic"]),
+                                     "reason": "main_cell_design_mismatch"})
+            continue
+        if any(run.get("status") != "success" for rows in modes.values() for run in rows):
             incomplete_seeds.append({"seed": seed, "smooth_cells": len(modes["smooth"]),
                                      "stochastic_cells": len(modes["stochastic"]),
                                      "reason": "missing_or_failed_main_cells"})
@@ -212,6 +233,12 @@ def analyze(screen: dict) -> dict:
             contrast: _summarize(contrast_rows)
             for contrast, contrast_rows in interaction_rows.items()
         }
+
+    configured_seeds = {int(seed) for seed in design.get("seeds", [])}
+    for seed in sorted(configured_seeds - set(main)):
+        incomplete_seeds.append({"seed": seed, "smooth_cells": 0, "stochastic_cells": 0,
+                                 "reason": "no_main_cells"})
+    incomplete_seeds.sort(key=lambda row: row["seed"])
 
     return {
         "schema": "synth-intent-factorial-analysis-v1",

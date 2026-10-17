@@ -65,3 +65,27 @@ def test_analyze_omits_seed_with_failed_cell():
         "seed": 3, "smooth_cells": 6, "stochastic_cells": 6, "reason": "missing_or_failed_main_cells"
     }]
     assert report["summaries"]["intent_x_rmse_px"]["n_seeds"] == 0
+
+
+def test_analyze_omits_seed_with_duplicate_cell_even_when_count_is_six():
+    runs = []
+    for index in range(6):
+        runs.append(_run(5, "smooth", index, intent_rmse=2.0, shake_db=-10))
+        runs.append(_run(5, "stochastic", index, intent_rmse=1.0, shake_db=-12))
+    smooth_rows = [run for run in runs if run["seed"] == 5 and run["cell_id"].startswith("smooth__")]
+    smooth_rows[-1]["cell_id"] = smooth_rows[0]["cell_id"]
+
+    report = analyze({"runs": runs})
+    assert report["complete_seeds"] == []
+    assert report["incomplete_seeds"] == [{
+        "seed": 5, "smooth_cells": 6, "stochastic_cells": 6, "reason": "main_cell_design_mismatch"
+    }]
+
+
+def test_analyze_reports_configured_seed_with_no_main_cells():
+    report = analyze({"design": {"seeds": [5, 6]}, "runs": []})
+    assert report["complete_seeds"] == []
+    assert report["incomplete_seeds"] == [
+        {"seed": 5, "smooth_cells": 0, "stochastic_cells": 0, "reason": "no_main_cells"},
+        {"seed": 6, "smooth_cells": 0, "stochastic_cells": 0, "reason": "no_main_cells"},
+    ]

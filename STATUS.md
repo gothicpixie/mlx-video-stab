@@ -3964,5 +3964,8 @@ pan.
 and summarizes paired stochastic-minus-smooth contrasts with seed-level bootstrap intervals and per-seed signs.
 It excludes calibration anchors and reports layer/subject strata, each cell's phase contrast, and phase-by-layer,
 phase-by-subject and three-way difference-in-differences. Lower intent RMSE is better; lower (more negative)
-shake residual dB means stronger rejection. Keep the screen frozen and do not tune parameters to interim
-outcomes. The eight-seed run is active at 45/120 cells with zero failures.
+shake residual dB means stronger rejection. DeepSeek code review caught a count-only completeness check that could
+have allowed a duplicate cell to stand in for a missing one; the analyzer now validates the exact designed cell
+set per mode and lists configured seeds with no main cells. A regression test covers duplicate cells. Keep the
+screen frozen and do not tune parameters to interim outcomes. The eight-seed run is active at 60/120 cells with
+zero failures.
