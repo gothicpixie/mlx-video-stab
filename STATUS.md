@@ -3805,3 +3805,34 @@ outlier fraction against path retention, jitter and crop. If those cues explain 
 hypothesis on held-out windows from 00177/00178; otherwise return to a motion-intent cue that combines
 subject-relative scene motion and uncertainty. Frequency remains a useful descriptor, not a synonym for
 intent.
+
+### Fixed-trajectory replay and controlled outlier screen (2026-10-17)
+
+`bench/path_trajectory_replay.py` now reuses one `Motion` estimate for all smoother arms. Its synthetic arm
+starts from known static or sinusoidal camera motion, injects pair-fit translation errors at predeclared rates,
+and runs the resulting transforms through production `plan()`. The 33-case screen uses three seeds, static
+paths at 0/2/5/10% outlier pairs and 12/36 px errors, plus 120-frame intended sinusoids with 6 px jitter and
+0/2/5% 24 px fit outliers. On static paths with injected outliers, median output error ratios (smoothed path
+RMSE / corrupted path RMSE) at 2/5/10% were 0.70/0.54/0.54 for L1 fidelity 0.1, 0.96/0.99/0.98 for
+Gaussian sigma 10, and 0.97/0.99/0.98 for Butterworth period 45. This confirms that the L1 path objective
+rejects these large isolated errors better. When an intended sinusoid is present, the same L1 robustness can
+also remove wanted movement; the known-path reference and outlier-error ratio must therefore be read together.
+
+The real arm decodes one window, tracks it once with KLT, and replays the same resulting `Motion` through all
+three planners. On `00176.MTS` t060/t800, KLT fallback fractions were zero and mean inlier fractions were
+0.921/0.997. The diagnostic temporal residual outlier fraction was zero in both, with excess kurtosis
+-0.18/-1.04. That statistic is exploratory and uncalibrated, but these windows do not support the hypothesis
+that isolated KLT trajectory outliers explain the Butterworth regression. Relative to the raw KLT path, the
+planner correction RMSE was L1 7.81/11.47 px, Gaussian 1.24/3.47 px, and Butterworth 1.29/3.68 px. This
+shows the candidate smoothers produce similar KLT paths and L1 produces a much stronger correction; it is
+descriptive only, not a quality ranking or ground-truth measurement. Both replay artifacts are under ignored
+`out/bench/path_trajectory_real_t060.json` and `path_trajectory_real_t800.json`; the synthetic report is
+`out/bench/path_trajectory_synthetic_outlier_screen.json`.
+
+DeepSeek Flash via Pi recommends the next causal screen: a paired-seed synthetic factorial that varies
+subject-relative motion, depth/parallax separation, and trajectory predictability independently while holding
+camera shake fixed. Use known camera/subject/depth truth; score camera-motion retention, shake rejection, and
+outlier response separately. Existing `mlxstab.synth` already provides layered parallax, an independently
+moving subject, and smooth camera motion, so first extend it with controlled predictability/visibility arms and
+compare estimator signals before adding a learned intent classifier. Keep real 00176/00177 clips held out for
+subsequent external validation; the current replay does not justify any smoother or production-default change.

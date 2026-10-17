@@ -334,3 +334,13 @@ slow shake and regresses jitter on both matched real windows. Do not ship or sel
 fidelity 0.1 default unchanged. The next planned experiment is trajectory replay: pass independent KLT paths
 through each smoother, inject controlled fit outliers, and test whether path residual kurtosis/outlier rate
 predicts the real-vs-synthetic gap. Only then run a predeclared held-out gate on distinct 00177/00178 windows.
+
+## Fixed-trajectory replay update (2026-10-17)
+
+The KLT replay and synthetic pair-fit outlier intervention are recorded in [STATUS.md](STATUS.md). The synthetic
+arm confirms that L1 rejects isolated fit corruption better than Gaussian/Butterworth on a static path, but
+that result cannot choose stabilization intent because L1 can erase a known pan. The two real KLT windows had
+no failed pairs or temporal outlier flags; the outlier hypothesis is not supported there. Next build a paired
+synthetic factorial with known subject-relative motion and depth, varying parallax separation and trajectory
+predictability while holding camera shake fixed. Measure intended-camera retention, shake rejection and
+outlier response separately, then hold out real windows for validation. Do not change smoother defaults.
