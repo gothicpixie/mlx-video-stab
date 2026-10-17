@@ -1,8 +1,14 @@
 import numpy as np, pytest
 import mlx.core as mx
-torch = pytest.importorskip("torch")
+try:
+    import torch
+except ImportError:  # keep the pure payload-accounting tests runnable without the dev torch install
+    torch = None
 from . import ref
-pytestmark = pytest.mark.skipif(not ref.available, reason="vendor/reference/RAFT not present")
+requires_reference = pytest.mark.skipif(torch is None or not ref.available,
+                                         reason="torch / vendor/reference/RAFT not present")
+requires_weights = pytest.mark.skipif(torch is None or not ref.available or not ref.WEIGHTS.exists(),
+                                      reason="torch, RAFT reference and weights not present")
 from mlxstab.raft import model as M
 
 
@@ -55,6 +61,7 @@ def synth(h=136, w=160, seed=0):  # >=16 cells at 1/8 so the coarsest corr level
     return a[None].astype(np.float32), b[None].astype(np.float32)
 
 
+@requires_reference
 def test_random_init_stages():
     tm = ref.torch_raft(random_init_seed=0); mm = ref.convert_in_memory(tm)
     a, b = synth()
@@ -63,7 +70,7 @@ def test_random_init_stages():
     for k, v in r.items(): assert v < 2e-3, (k, v)
 
 
-@pytest.mark.skipif(not ref.WEIGHTS.exists(), reason="raft-things weights absent")
+@requires_weights
 def test_real_weights_synthetic_and_demo():
     from PIL import Image
     tm = ref.torch_raft(); mm = ref.convert_in_memory(tm)
@@ -79,6 +86,7 @@ def test_real_weights_synthetic_and_demo():
 def _epe(a, b): return float(np.sqrt(((np.array(a) - np.array(b)) ** 2).sum(-1)).mean())
 
 
+@requires_reference
 def test_fast_paths_match_reference_path_random_init():
     """New lookup kernel == grid_sample lookup; batch-2 bidirectional compiled path == two independent fp32 calls."""
     tm = ref.torch_raft(random_init_seed=3); mm = ref.convert_in_memory(tm)
@@ -94,7 +102,7 @@ def test_fast_paths_match_reference_path_random_init():
     l2, u2 = mm(A, B, 6, compiled=False); assert _epe(uf[0], u2[0]) < 1e-3
 
 
-@pytest.mark.skipif(not ref.WEIGHTS.exists(), reason="raft-things weights absent")
+@requires_weights
 def test_real_weights_bidir_and_fp16():
     from PIL import Image
     tm = ref.torch_raft(); mm = ref.convert_in_memory(tm)
@@ -115,7 +123,7 @@ def test_real_weights_bidir_and_fp16():
     assert e16 < 0.05
 
 
-@pytest.mark.skipif(not ref.WEIGHTS.exists(), reason="raft-things weights absent")
+@requires_weights
 def test_real_weights_bidir_fp16_correlation(monkeypatch):
     """fp16 correlation storage alone and combined with an fp16 network in the bidirectional path.
 
@@ -156,3 +164,97 @@ def test_real_weights_bidir_fp16_correlation(monkeypatch):
     assert stored == [(mx.float16,) * 4, (mx.float16,) * 4]
     e_both = max(_epe(uf[0], tf), _epe(ub[0], tb)); print("bidir fp16-net fp16-corr EPE vs torch", e_both)
     assert e_both < 0.05
+
+
+# --- pure correlation-payload accounting (no tensors, no reference, no weights) --------------------------------
+
+def test_corr_pyramid_bytes_exact_hand_computed_sizes():
+    # 1080p dimensions are both divisible by 8 -> encoder grid 240x135.
+    # Level areas: 135*240 + 67*120 + 33*60 + 16*30 = 42900; 32400 * 42900 * 4 bytes * 2 directions.
+    assert M.estimate_corr_pyramid_bytes(1080, 1920) == 11_119_680_000
+    assert M.estimate_corr_pyramid_bytes(1080, 1920, dtype="float16") == 5_559_840_000
+    # 4K: 3840x2160 -> encoder grid 480x270 with level areas 129600, 32400, 8040, 1980.
+    assert M.estimate_corr_pyramid_bytes(2160, 3840) == 178_350_336_000
+    assert M.estimate_corr_pyramid_bytes(2160, 3840, dtype="float16") == 89_175_168_000
+
+
+@pytest.mark.parametrize("name, dtype", [("float32", mx.float32), ("float16", mx.float16)])
+def test_corr_pyramid_estimate_matches_stored_mlx_corrblocks(name, dtype):
+    # Tiny feature maps exercise the actual CorrBlock pooling and dtype behavior without loading RAFT weights.
+    features = mx.zeros((1, 16, 24, 8), dtype=mx.float32)
+    forward = M.CorrBlock(features, features, levels=4, radius=1, dtype=dtype)
+    backward = M.CorrBlock(features, features, levels=4, radius=1, dtype=dtype)
+    mx.eval(*forward.pyr, *backward.pyr)
+    measured = sum(int(level.nbytes) for level in forward.pyr + backward.pyr)
+    expected = M.estimate_corr_pyramid_bytes(16 * 8, 24 * 8, levels=4, dtype=name)
+    assert measured == expected
+
+
+def test_corr_pyramid_bytes_floor_downscale_and_pad_boundaries():
+    # Downscale=2 floors 1080 -> 540 and 1920 -> 960; 540 then pads to 544 (68 encoder rows).
+    assert M.estimate_corr_pyramid_bytes(1080, 1920, downscale=2) == 706_982_400
+    assert M.estimate_corr_pyramid_bytes(1080, 1920, downscale=2, dtype="float16") == 353_491_200
+    # Flooring happens before padding: 17, 16 and 15 at downscale 2 all become an 8x8 or smaller image -> 1x1 cell.
+    assert M.estimate_corr_pyramid_bytes(17, 17, downscale=2, levels=1) == 8
+    assert M.estimate_corr_pyramid_bytes(16, 16, downscale=2, levels=1) == 8
+    assert M.estimate_corr_pyramid_bytes(15, 15, downscale=2, levels=1) == 8
+    # An already-padded dimension stays put; one extra pixel rounds the encoder grid up from 1x1 to 2x2.
+    assert M.estimate_corr_pyramid_bytes(8, 8, levels=1) == 8
+    assert M.estimate_corr_pyramid_bytes(9, 9, levels=1) == 128
+    assert M.estimate_corr_pyramid_bytes(1088, 1920) > M.estimate_corr_pyramid_bytes(1080, 1920)
+    assert M.estimate_corr_pyramid_bytes(1089, 1920) > M.estimate_corr_pyramid_bytes(1088, 1920)
+    # A 2x2 encoder grid has a 1x1 second level: (4 + 1) * 4 pair elements * 2 directions * 4 bytes.
+    assert M.estimate_corr_pyramid_bytes(16, 16, levels=2) == 160
+
+
+def test_select_flow_downscale_prefers_smallest_fitting_scale_in_any_order():
+    h, w = 1080, 1920
+    b1 = M.estimate_corr_pyramid_bytes(h, w, 1)
+    b2 = M.estimate_corr_pyramid_bytes(h, w, 2)
+    b4 = M.estimate_corr_pyramid_bytes(h, w, 4)
+    assert b1 > b2 > b4
+    for candidates in ([1, 2, 4], [4, 2, 1], [2, 4, 1], [4, 1, 2]):
+        assert M.select_flow_downscale(h, w, candidates, b1) == (1, b1)
+        assert M.select_flow_downscale(h, w, candidates, b2) == (2, b2)
+        assert M.select_flow_downscale(h, w, candidates, b2 - 1) == (4, b4)
+        assert M.select_flow_downscale(h, w, candidates, b4) == (4, b4)
+    # A smaller scale is not invented when it is absent from the candidate set.
+    assert M.select_flow_downscale(h, w, [4, 2], b1) == (2, b2)
+
+
+@pytest.mark.parametrize("bad", [[], [1, 1], [2, 1, 2], [0], [-1], [1.5], [True], ["1"]])
+def test_select_flow_downscale_rejects_invalid_candidates(bad):
+    with pytest.raises(ValueError):
+        M.select_flow_downscale(1080, 1920, bad, 1 << 40)
+
+
+def test_select_flow_downscale_rejects_non_iterable_and_bad_budget():
+    with pytest.raises(ValueError, match="candidates"):
+        M.select_flow_downscale(1080, 1920, None, 1 << 40)
+    with pytest.raises(ValueError, match="budget_bytes"):
+        M.select_flow_downscale(1080, 1920, [1, 2], -1)
+    with pytest.raises(ValueError, match="budget_bytes"):
+        M.select_flow_downscale(1080, 1920, [1, 2], 1.5)
+
+
+def test_select_flow_downscale_raises_when_nothing_fits():
+    with pytest.raises(ValueError, match="no flow downscale candidate fits"):
+        M.select_flow_downscale(1080, 1920, [1, 2, 4], 0)
+
+
+def test_corr_pyramid_bytes_validates_inputs_and_empty_levels():
+    for height, width in ((0, 1920), (1080, 0), (-1, 1920), (1080.0, 1920)):
+        with pytest.raises(ValueError, match="height|width"):
+            M.estimate_corr_pyramid_bytes(height, width)
+    with pytest.raises(ValueError, match="downscale"):
+        M.estimate_corr_pyramid_bytes(1080, 1920, downscale=0)
+    with pytest.raises(ValueError, match="downscale"):
+        M.estimate_corr_pyramid_bytes(8, 8, downscale=9)
+    with pytest.raises(ValueError, match="levels"):
+        M.estimate_corr_pyramid_bytes(1080, 1920, levels=0)
+    with pytest.raises(ValueError, match="level 1 is empty"):
+        M.estimate_corr_pyramid_bytes(8, 8, levels=2)
+    with pytest.raises(ValueError, match="float16.*float32"):
+        M.estimate_corr_pyramid_bytes(1080, 1920, dtype="float64")
+    with pytest.raises(ValueError, match="float16.*float32"):
+        M.select_flow_downscale(1080, 1920, [1], 1 << 40, dtype="bfloat16")

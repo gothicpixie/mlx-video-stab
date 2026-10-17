@@ -576,6 +576,161 @@ def test_max_sampled_border_frac_rejects_invalid_config(bad):
         S.Config(max_sampled_border_frac=bad)
 
 
+# ----------------------------------------------------------------------------------------
+# opt-in auto flow downscale and correlation-pyramid budget
+# ----------------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("value", [1, 2, 3, 4, 8, np.int64(2)])
+def test_flow_downscale_accepts_positive_integer(value):
+    assert S.Config(flow_downscale=value).flow_downscale == int(value)
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, True, "2", "AUTO", "", None])
+def test_flow_downscale_rejects_nonpositive_or_nonliteral_values(bad):
+    with pytest.raises(ValueError, match="flow_downscale"):
+        S.Config(flow_downscale=bad)
+
+
+def test_flow_downscale_auto_requires_positive_budget():
+    with pytest.raises(ValueError, match="auto.*budget"):
+        S.Config(flow_downscale="auto")
+    cfg = S.Config(flow_downscale="auto", max_flow_corr_bytes=1)
+    assert cfg.flow_downscale == "auto" and cfg.max_flow_corr_bytes == 1
+
+
+@pytest.mark.parametrize("bad", [0, -1, 1.5, True, "1", np.nan])
+def test_max_flow_corr_bytes_rejects_invalid_config(bad):
+    with pytest.raises(ValueError, match="max_flow_corr_bytes"):
+        S.Config(max_flow_corr_bytes=bad)
+    assert S.Config(max_flow_corr_bytes=None).max_flow_corr_bytes is None
+
+
+def test_resolve_flow_downscale_auto_picks_smallest_fitting_candidate():
+    h, w = 1080, 1920
+    b1 = S.estimate_corr_pyramid_bytes(h, w, downscale=1)
+    b2 = S.estimate_corr_pyramid_bytes(h, w, downscale=2)
+    b4 = S.estimate_corr_pyramid_bytes(h, w, downscale=4)
+    assert b1 > b2 > b4
+
+    r1 = S.resolve_flow_downscale(S.Config(flow_downscale="auto", max_flow_corr_bytes=b1), w, h)
+    assert (r1.requested, r1.resolved, r1.estimated_corr_bytes) == ("auto", 1, b1)
+    r2 = S.resolve_flow_downscale(S.Config(flow_downscale="auto", max_flow_corr_bytes=b1 - 1), w, h)
+    assert (r2.resolved, r2.estimated_corr_bytes) == (2, b2)
+    r4 = S.resolve_flow_downscale(S.Config(flow_downscale="auto", max_flow_corr_bytes=b2 - 1), w, h)
+    assert (r4.resolved, r4.estimated_corr_bytes) == (4, b4)
+    with pytest.raises(ValueError, match="no flow downscale candidate fits"):
+        S.resolve_flow_downscale(S.Config(flow_downscale="auto", max_flow_corr_bytes=1), w, h)
+
+
+def test_resolve_flow_downscale_4k_payload_budget_choices():
+    gib = 1 << 30
+    under_8 = S.resolve_flow_downscale(
+        S.Config(flow_downscale="auto", max_flow_corr_bytes=8 * gib), width=3840, height=2160)
+    under_12 = S.resolve_flow_downscale(
+        S.Config(flow_downscale="auto", max_flow_corr_bytes=12 * gib), width=3840, height=2160)
+    assert (under_8.resolved, under_8.estimated_corr_bytes) == (4, 706_982_400)
+    assert (under_12.resolved, under_12.estimated_corr_bytes) == (2, 11_119_680_000)
+
+
+def test_resolve_flow_downscale_fixed_scale_rejects_oversize_budget():
+    h, w = 1080, 1920
+    b1 = S.estimate_corr_pyramid_bytes(h, w, downscale=1)
+    ok = S.resolve_flow_downscale(S.Config(flow_downscale=1, max_flow_corr_bytes=b1), w, h)
+    assert (ok.requested, ok.resolved, ok.estimated_corr_bytes) == (1, 1, b1)
+    with pytest.raises(ValueError, match="exceeding max_flow_corr_bytes"):
+        S.resolve_flow_downscale(S.Config(flow_downscale=1, max_flow_corr_bytes=b1 - 1), w, h)
+    # No budget: the fixed scale is returned with its estimate for reporting.
+    fixed = S.resolve_flow_downscale(S.Config(flow_downscale=1), w, h)
+    assert fixed.resolved == 1 and fixed.estimated_corr_bytes == b1
+
+
+def test_resolve_flow_downscale_auto_is_rejected_for_custom_flow():
+    with pytest.raises(ValueError, match="built-in MLX RAFT"):
+        S.resolve_flow_downscale(S.Config(flow_downscale="auto", max_flow_corr_bytes=1), 1920, 1080,
+                                 custom_flow=True)
+
+
+def _fake_media(monkeypatch, vid, W, H):
+    from mlxstab import media
+    monkeypatch.setattr(media, "probe", lambda p: {"width": W, "height": H, "fps": 30.0,
+                                                    "field_order": "unknown", "interlaced": False, "duration": 0.0})
+    monkeypatch.setattr(media, "decode", lambda *a, **k: (iter(vid), 30.0, (W, H)))
+    monkeypatch.setattr(media, "prefetch", lambda gen, n=4: gen)
+
+    class FakeEncoder:
+        def __init__(self, *a, **k): pass
+        def write(self, frame): pass
+        def close(self): pass
+
+    monkeypatch.setattr(media, "Encoder", FakeEncoder)
+
+
+def test_stabilize_resolves_auto_flow_downscale_before_constructing_raft(monkeypatch):
+    vid, _ = synth.render(T=5, W=256, H=256, jitter=3.0)
+    H, W = 256, 256
+    _fake_media(monkeypatch, vid, W, H)
+    b2 = S.estimate_corr_pyramid_bytes(H, W, downscale=2)
+    b1 = S.estimate_corr_pyramid_bytes(H, W, downscale=1)
+    assert b1 > b2
+
+    constructed = []
+
+    class FakeRaft:
+        def __init__(self, *args, **kwargs):
+            constructed.append((args[0], args[1], args[2]))
+
+        def bidir(self, a, b):
+            return farneback(a, b, "f"), farneback(b, a, "b")
+
+        def reset(self):
+            pass
+
+    monkeypatch.setattr(S, "RaftFlow", FakeRaft)
+    cfg = S.Config(mesh=(0, 0), rs_rows=0, flow_downscale="auto", max_flow_corr_bytes=b2)
+    rep = S.stabilize("in.mp4", "out.mp4", None, None, cfg, log=lambda m: None)
+
+    assert constructed == [(None, cfg.flow_iters, 2)]
+    assert rep["flow_downscale_requested"] == "auto"
+    assert rep["flow_downscale_resolved"] == 2
+    assert rep["flow_corr_pyramid_bytes"] == b2
+    assert rep["max_flow_corr_bytes"] == b2
+    assert "not peak process memory" in rep["flow_corr_memory_scope"]
+
+
+def test_stabilize_fixed_scale_budget_fails_before_raft_construction(monkeypatch):
+    vid, _ = synth.render(T=5, W=96, H=64, jitter=3.0)
+    H, W = 64, 96
+    _fake_media(monkeypatch, vid, W, H)
+    b1 = S.estimate_corr_pyramid_bytes(H, W, downscale=1)
+    constructed = []
+
+    class FakeRaft:
+        def __init__(self, *args, **kwargs):
+            constructed.append(args)
+
+    monkeypatch.setattr(S, "RaftFlow", FakeRaft)
+    cfg = S.Config(flow_downscale=1, max_flow_corr_bytes=b1 - 1, mesh=(0, 0), rs_rows=0)
+    with pytest.raises(ValueError, match="exceeding max_flow_corr_bytes"):
+        S.stabilize("in.mp4", "out.mp4", None, None, cfg, log=lambda m: None)
+    assert constructed == []
+
+
+def test_stabilize_auto_with_caller_supplied_flow_is_rejected(monkeypatch):
+    vid, _ = synth.render(T=3, W=96, H=64, jitter=3.0)
+    _fake_media(monkeypatch, vid, 96, 64)
+    cfg = S.Config(flow_downscale="auto", max_flow_corr_bytes=1, mesh=(0, 0), rs_rows=0)
+    with pytest.raises(ValueError, match="built-in MLX RAFT"):
+        S.stabilize("in.mp4", "out.mp4", None, None, cfg, flow_fn=farneback, log=lambda m: None)
+
+
+def test_stabilize_fixed_scale_budget_is_rejected_for_custom_flow(monkeypatch):
+    vid, _ = synth.render(T=3, W=96, H=64, jitter=3.0)
+    _fake_media(monkeypatch, vid, 96, 64)
+    cfg = S.Config(flow_downscale=1, max_flow_corr_bytes=1024, mesh=(0, 0), rs_rows=0)
+    with pytest.raises(ValueError, match="only to the built-in MLX RAFT"):
+        S.stabilize("in.mp4", "out.mp4", None, None, cfg, flow_fn=farneback, log=lambda m: None)
+
+
 def test_stabilize_report_reports_sampled_border_backoff(monkeypatch):
     """The stabilize report exposes the requested cap, applied scale and measured worst sampled fraction."""
     import json
@@ -618,6 +773,44 @@ def test_main_wires_max_sampled_border_frac(monkeypatch):
     monkeypatch.setattr(M, "stabilize", fake_stabilize)
     M.main(["in.mp4", "out.mp4", "--max-sampled-border-frac", "0.03"])
     assert captured["cfg"].max_sampled_border_frac == 0.03
+
+
+def test_main_wires_flow_downscale_and_gib_budget(monkeypatch):
+    import mlxstab.__main__ as M
+    captured = {}
+
+    def fake_stabilize(*args, **kwargs):
+        captured["cfg"] = args[4]
+        return {"ok": True}
+
+    monkeypatch.setattr(M, "stabilize", fake_stabilize)
+    M.main(["in.mp4", "out.mp4", "--flow-downscale", "auto", "--max-flow-corr-gib", "1.5"])
+    cfg = captured["cfg"]
+    assert cfg.flow_downscale == "auto"
+    assert cfg.max_flow_corr_bytes == int(1.5 * (1 << 30))
+
+
+def test_main_flow_downscale_accepts_only_documented_choices(monkeypatch):
+    import mlxstab.__main__ as M
+    captured = {}
+
+    def fake_stabilize(*args, **kwargs):
+        captured["cfg"] = args[4]
+        return {"ok": True}
+
+    monkeypatch.setattr(M, "stabilize", fake_stabilize)
+    for scale in (1, 2, 4):
+        M.main(["in.mp4", "out.mp4", "--flow-downscale", str(scale)])
+        assert captured["cfg"].flow_downscale == scale
+    with pytest.raises(SystemExit):
+        M.main(["in.mp4", "out.mp4", "--flow-downscale", "3"])
+
+
+def test_main_rejects_nonpositive_or_nonfinite_flow_budget():
+    import mlxstab.__main__ as M
+    for bad in ("0", "-1", "nan", "inf", "1e308"):
+        with pytest.raises(SystemExit):
+            M.main(["in.mp4", "out.mp4", "--max-flow-corr-gib", bad])
 
 
 class _OwnedEncoder:

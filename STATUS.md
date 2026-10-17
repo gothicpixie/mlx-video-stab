@@ -3450,3 +3450,46 @@ filled only **122 (0.010%)** and **496 (0.040%)** of invalid pixels, versus **36
 Those gated candidates were not sent for visual review because their filled area is negligible. This color
 consistency test is not motion alignment and is not a selected setting; it shows that simple symmetric RGB
 agreement is too conservative here to preserve much coverage.
+
+## Crop plus scalar border backoff rejection and correlation-payload preflight (2026-10-17)
+
+### Fixed 1.02 crop with global path backoff
+
+The development-only `00176.MTS` t0613 captured plan was rendered with a fixed `crop_zoom=1.02` and one
+clip-wide correction scale chosen to satisfy the existing 0.5% sampled border limit. The selected path scale was
+0.255. The render kept mean center-invalid coverage at 0.497% (maximum 1.481%) and full-support Lanczos-3 at
+99.01% mean / 98.14% minimum; crop area loss was 3.88%.
+
+Matched evaluation used the raw source window, 12 RAFT iterations at 2x downscale, 30000/1001 fps, and the
+independent seeded KLT estimator. Raw jitter was 1.1431 px RAFT / 1.1542 px KLT. The crop-plus-backoff output
+measured 0.8490 / 0.8584 px, respectively, with RAFT wobble 0.03764 px. The ordinary stabilized baseline on
+this window measured 0.06150 px RAFT jitter, 0.03042 px wobble and 0.08080 px KLT jitter. The backoff candidate
+does improve on raw, but gives up most of the existing stabilization to preserve coverage. Reject this
+crop-plus-scalar-backoff policy; no crop or path-scale default changes follow. This is a development-window
+screen and does not establish a held-out crop policy.
+
+### Opt-in bidirectional correlation-payload estimate and flow-scale resolver
+
+`mlxstab.raft.model.estimate_corr_pyramid_bytes` now computes the stored payload for both RAFT correlation
+pyramids from source dimensions, integer flow downscale, four-level floor pooling and correlation dtype.
+`select_flow_downscale` chooses the highest flow resolution in a supplied candidate set that fits a byte budget.
+The estimate was checked against actual small MLX `CorrBlock` pyramid arrays for both fp32 and fp16; their
+summed `nbytes` matched exactly.
+
+The stabilizer API and CLI now accept opt-in `flow_downscale="auto"` with a required positive
+`max_flow_corr_bytes` budget. The auto choices are 1, 2 and 4; a fixed scale can also be rejected before RAFT
+construction if its stored-payload estimate exceeds the supplied budget. `bench.runner` records the requested
+configuration separately from the resolved scale in the manifest and experiment identity. Defaults remain
+unchanged, and the memory scope is included in reports because this estimate excludes feature maps, activations,
+temporaries and allocator/cache overhead; it is **not peak process memory or an OOM guarantee**.
+
+For the implemented four-level shape, the estimate is 11,119,680,000 bytes at 1920x1080 fp32, 178,350,336,000
+bytes at 3840x2160 fp32, 11,119,680,000 bytes at 4K with flow downscale 2, and 706,982,400 bytes at 4K with
+downscale 4. These are payload calculations, not measured process-memory values and not evidence that the
+selected flow resolution preserves output quality.
+
+Focused verification: `tests/test_raft.py`, `tests/test_stabilize.py` and `tests/test_bench_runner.py` passed
+**153 tests**. The complete `.claude/verify.sh` passed **1,653 tests in 58.05 s**. CodeGraph sync/affected checks
+are recorded with this implementation. The next gate is to measure peak MLX/process memory on safe reference
+sizes, then run a controlled 4K smoke; evaluate any downscale's stabilization quality separately before
+advertising an automatic 4K preset.

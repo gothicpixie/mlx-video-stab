@@ -63,8 +63,15 @@ or the [launch kit](marketing/README.md) for graphics and announcement copy.
 
 ```
 python -m mlxstab in.mp4 out.mp4 --mask mask.mp4 [--sigma 15] [--roll roll.json] [--budget 0.04] [--smooth l1|gauss]
-                                  [--mesh 16x9|0x0] [--rs-rows 18] [--iters 24] [--flow-downscale 1|2|4] [--start S --duration D] [--fps F]
+                                  [--mesh 16x9|0x0] [--rs-rows 18] [--iters 24] [--flow-downscale 1|2|4|auto]
+                                  [--max-flow-corr-gib GiB] [--start S --duration D] [--fps F]
 ```
+`--flow-downscale auto` chooses the highest flow resolution among 1, 2 and 4 that fits the required positive
+`--max-flow-corr-gib` budget. The estimate counts only the stored forward and backward correlation pyramids; it
+excludes features, activations, temporary allocations and allocator caching, so it is not a peak-memory limit.
+With a fixed downscale, the same option can reject a setting whose estimated correlation payload exceeds the budget.
+Automatic selection is opt-in; the default remains full-resolution flow (`1`).
+
 `roll.json`: `[deg per frame]`, or `[[t_seconds, deg], ...]`, or `{"series": ...}`.
 
 ## Setup

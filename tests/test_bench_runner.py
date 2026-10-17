@@ -201,6 +201,21 @@ def test_experiment_identity_changes_with_flow_backend():
     assert MF.content_key(mlx) != MF.content_key(torch)
 
 
+def test_experiment_identity_records_resolved_flow_downscale():
+    src = {"sha256": "s", "window": {}, "preprocessing": {}, "selection_note": None}
+    opts = runner.RunOptions()
+    requested = runner._experiment_identity(opts, {"flow_downscale": "auto", "max_flow_corr_bytes": 1}, src,
+                                            "w", {}, {}, None, None, 0)
+    resolved = runner._experiment_identity(
+        opts, {"flow_downscale": "auto", "max_flow_corr_bytes": 1}, src, "w", {}, {}, None, None, 0,
+        flow_downscale={"requested": "auto", "resolved": 2, "corr_pyramid_bytes": 123,
+                        "max_flow_corr_bytes": 1, "width": 1920, "height": 1080})
+    assert "flow_downscale" not in requested
+    assert resolved["flow_downscale"]["requested"] == "auto"
+    assert resolved["flow_downscale"]["resolved"] == 2
+    assert MF.content_key(resolved) != MF.content_key(requested)
+
+
 def test_torch_backend_requires_its_own_weights(tmp_path):
     missing = tmp_path / "missing.pth"
     errors = runner.validate_options(runner.RunOptions(backend="torch-mps", torch_weights=str(missing)))
@@ -444,19 +459,19 @@ def _patch_provenance(monkeypatch):
                                                     "available": True, "unavailable_reason": None})
 
 
-def _patch_media(monkeypatch, source_fps=30.0, output_fps=30000 / 1001, frames=3):
+def _patch_media(monkeypatch, source_fps=30.0, output_fps=30000 / 1001, frames=3, width=4, height=4):
     from fractions import Fraction
 
     def probe(p):
         encoded = Path(p).name.startswith(("stabilized_r", "mask_r"))
         fps = output_fps if encoded else source_fps
-        return {"fps": fps, "width": 4, "height": 4, "interlaced": False, "duration": frames / fps}
+        return {"fps": fps, "width": width, "height": height, "interlaced": False, "duration": frames / fps}
 
     def decode(p, info=None, start=None, duration=None, vf=None):
         rate = probe(p)["fps"]
         fps = float(Fraction(vf[4:])) if vf else rate
         n = round(frames * fps / rate)
-        return iter([np.zeros((4, 4, 3), np.uint8)] * n), fps, (4, 4)
+        return iter([np.zeros((height, width, 3), np.uint8)] * n), fps, (width, height)
 
     def pts(p):
         times = [i / probe(p)["fps"] for i in range(frames)]
@@ -1090,6 +1105,61 @@ def test_run_case_rejects_warp_diag_plus_sampled_diagnostics(tmp_path, monkeypat
                                             lock="off", diag_every=5, overrides={"warp_diag": True}))
     assert man["status"] == "failure" and man["error"]["stage"] == "validate"
     assert "not both" in man["error"]["message"]
+
+
+def test_run_case_resolves_auto_flow_downscale_after_probe_and_preserves_requested_config(tmp_path, monkeypatch):
+    _patch_provenance(monkeypatch)
+    _patch_media(monkeypatch, width=256, height=256)
+    src = tmp_path / "in.mp4"; src.write_bytes(b"x")
+    w = tmp_path / "w.safetensors"; w.write_bytes(b"w")
+
+    from mlxstab.raft.model import estimate_corr_pyramid_bytes
+    b2 = estimate_corr_pyramid_bytes(256, 256, downscale=2)
+    constructed = []
+
+    class _CaptureFlow(_FakeFlow):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            constructed.append(a)
+
+    monkeypatch.setattr(runner, "RaftFlow", _CaptureFlow)
+    seen_cfg = []
+
+    def fake_stabilize(*a, **k):
+        seen_cfg.append(a[4])
+        return {"frames": 3, "decoded_frames": 3, "rendered_frames": 3,
+                "timing_s": {"analysis": 1.0, "plan": 0.1, "render": 0.2},
+                "fps": 30.0, "fallback_frames": 0, "diagnostics_total_s": 0.0, "observed_nondiag_render_s": 0.2}
+    monkeypatch.setattr(runner, "stabilize", fake_stabilize)
+
+    man = runner.run_case(runner.RunOptions(
+        case="baseline", source=str(src), weights=str(w), out_dir=str(tmp_path / "auto"), lock="off",
+        overrides={"flow_downscale": "auto", "max_flow_corr_bytes": b2}, command=["run_case"]))
+    assert man["status"] == "success", man.get("error")
+    assert constructed and constructed[0][2] == 2                 # model constructed with the resolved scale
+    assert seen_cfg and seen_cfg[0].flow_downscale == 2
+    assert man["config"]["flow_downscale"] == "auto"             # requested configuration is preserved
+    assert man["flow_downscale"]["requested"] == "auto"
+    assert man["flow_downscale"]["resolved"] == 2
+    assert man["flow_downscale"]["corr_pyramid_bytes"] == b2
+    assert man["flow_downscale"]["max_flow_corr_bytes"] == b2
+    assert "not peak process memory" in man["flow_downscale"]["memory_scope"]
+    assert man["experiment_identity"]["flow_downscale"]["resolved"] == 2
+    assert man["repeats"][0]["stabilize_report"]["flow_downscale_requested"] == "auto"
+    assert man["repeats"][0]["stabilize_report"]["flow_downscale_resolved"] == 2
+
+
+def test_run_case_rejects_auto_flow_downscale_with_torch_mps(tmp_path, monkeypatch):
+    _patch_provenance(monkeypatch)
+    src = tmp_path / "in.mp4"; src.write_bytes(b"x")
+    w = tmp_path / "w.safetensors"; w.write_bytes(b"w")
+    tw = tmp_path / "raft.pth"; tw.write_bytes(b"t")
+    man = runner.run_case(runner.RunOptions(
+        case="baseline", source=str(src), weights=str(w), backend="torch-mps", torch_weights=str(tw),
+        out_dir=str(tmp_path / "torch_auto"), lock="off",
+        overrides={"flow_downscale": "auto", "max_flow_corr_bytes": 1}, command=["run_case"]))
+    assert man["status"] == "failure" and man["error"]["stage"] == "validate"
+    assert "does not support flow_downscale='auto'" in man["error"]["message"]
 
 
 def test_run_case_records_encoded_pts_timeline(tmp_path, monkeypatch):

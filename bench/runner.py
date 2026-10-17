@@ -13,6 +13,7 @@ hardware) to invalidate a comparison. Private paths live only in the ignored ``o
 from __future__ import annotations
 
 import re
+import json
 import sys
 import time
 from dataclasses import dataclass, field
@@ -23,7 +24,7 @@ from pathlib import Path
 import mlx.core as mx
 
 from mlxstab import media, metrics, synth, tracks, warpmetrics
-from mlxstab.stabilize import Config, RaftFlow, stabilize
+from mlxstab.stabilize import Config, RaftFlow, resolve_flow_downscale, stabilize
 from mlxstab.__main__ import DEFAULT_WEIGHTS
 
 from . import cases, manifest as MF
@@ -228,6 +229,7 @@ def _empty_manifest(opts, run_dir):
                          "scope": "flow backend only; planner, renderer, media I/O and evaluation are shared mlxstab code"},
         "config": None,
         "config_digest": None,
+        "flow_downscale": None,
         "experiment_identity": None,
         "content_key": None,
         "code": None,
@@ -273,8 +275,8 @@ def _checkpoint(man, path, stage, required=False):
 # --------------------------------------------------------------------------------------
 
 def _experiment_identity(opts, cfg_kwargs, source_hashes, weights_sha, code, eval_cfg, output_fps, eval_vf, diag_every,
-                         dump_plan=False, dump_motion=False, dump_flow_samples=False):
-    return {
+                         dump_plan=False, dump_motion=False, dump_flow_samples=False, flow_downscale=None):
+    identity = {
         "source": {"sha256": source_hashes.get("sha256"), "window": source_hashes.get("window"),
                    "preprocessing": source_hashes.get("preprocessing"),
                    "selection_note": source_hashes.get("selection_note")},
@@ -290,6 +292,9 @@ def _experiment_identity(opts, cfg_kwargs, source_hashes, weights_sha, code, eva
         "code": {"revision": (code or {}).get("revision"), "files": (code or {}).get("files"),
                  "dirty_relevant": (code or {}).get("dirty_relevant")},
     }
+    if flow_downscale is not None:
+        identity["flow_downscale"] = flow_downscale
+    return identity
 
 
 def run_case(opts: RunOptions) -> dict:
@@ -328,6 +333,9 @@ def run_case(opts: RunOptions) -> dict:
         cfg = Config(**cfg_kwargs)
         if opts.backend == "torch-mps" and (cfg.flow_dtype != "float32" or cfg.corr_dtype != "float32"):
             errs.append("torch-mps backend supports only float32 flow and correlation")
+        if opts.backend == "torch-mps" and cfg.flow_downscale == "auto":
+            errs.append("torch-mps backend does not support flow_downscale='auto' (the auto budget is defined for the "
+                        "built-in MLX RAFT path); use a fixed scale")
         if cfg.warp_diag and opts.diag_every > 0:
             errs.append("choose either warp_diag (all frames) or --diag-every (sampled), not both")
         if errs:
@@ -393,9 +401,17 @@ def run_case(opts: RunOptions) -> dict:
             from .torch_flow import verify_weight_equivalence
             man["flow_backend"]["weight_equivalence"] = verify_weight_equivalence(opts.weights, opts.torch_weights)
 
+        stage = "resolve_flow_downscale"
+        _checkpoint(man, man_path, stage)
+        resolution = resolve_flow_downscale(cfg, info["width"], info["height"],
+                                            custom_flow=opts.backend == "torch-mps")
+        cfg.flow_downscale = resolution.resolved          # the requested config stays in cfg_kwargs/man["config"]
+        man["flow_downscale"] = resolution.manifest_fields()
+
         identity = _experiment_identity(opts, cfg_kwargs, man["source"], man["weights"]["sha256"], man["code"],
                                         man["evaluation"], output_fps, eval_vf, opts.diag_every, opts.dump_plan,
-                                        opts.dump_motion, opts.dump_flow_samples)
+                                        opts.dump_motion, opts.dump_flow_samples,
+                                        flow_downscale=resolution.manifest_fields())
         identity["flow_backend"]["weights_sha256"] = man["flow_backend"]["weights_sha256"]
         identity["flow_backend"]["canonical_weights_sha256"] = (
             man["flow_backend"].get("weight_equivalence", {}).get("canonical_sha256"))
@@ -453,6 +469,8 @@ def run_case(opts: RunOptions) -> dict:
                             diag_callback=cb, dump_motion_npz=rep_dump_motion, dump_plan=rep_dump_plan,
                             dump_flow_samples_npz=str(flow_samples_path) if (flow_samples_path is not None and r == 0) else None,
                             log=(lambda m: opts.log(f"[{case.name}] {m}")) if opts.log else (lambda m: None))
+            rep.update(resolution.report_fields())
+            Path(rep_path).write_text(json.dumps(rep, indent=1))
             wall = time.perf_counter() - t0
             repeat_walls.append(wall)
             man["repeats"].append({

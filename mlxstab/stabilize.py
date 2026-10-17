@@ -1,13 +1,49 @@
 """No-crop video stabilizer: RAFT flow -> robust global homography + mesh/row residuals -> L1-optimal camera paths -> one
 Lanczos resample to the full original frame, plus a per-frame mask of pixels that have no source."""
 import json
+import operator
 from dataclasses import dataclass, field
 from pathlib import Path
 import numpy as np
 import mlx.core as mx
 from . import geometry as G, motion as MO, smooth as SM, media, warpmetrics
 from .warp import sample, valid_mask
-from .raft.model import load_raft, raft_flow
+from .raft.model import estimate_corr_pyramid_bytes, load_raft, raft_flow, select_flow_downscale
+
+
+_AUTO_FLOW_DOWNSCALE_CANDIDATES = (1, 2, 4)
+
+
+def _validate_flow_downscale(value):
+    """Validate ``Config.flow_downscale``: a positive integer or the literal ``"auto"``."""
+    if isinstance(value, str):
+        if value == "auto":
+            return value
+        raise ValueError(f"flow_downscale must be a positive integer or 'auto', got {value!r}")
+    if isinstance(value, bool):
+        raise ValueError(f"flow_downscale must be a positive integer or 'auto', got {value!r}")
+    try:
+        v = operator.index(value)
+    except TypeError:
+        raise ValueError(f"flow_downscale must be a positive integer or 'auto', got {value!r}") from None
+    if v <= 0:
+        raise ValueError(f"flow_downscale must be a positive integer or 'auto', got {value!r}")
+    return int(v)
+
+
+def _validate_max_flow_corr_bytes(value):
+    """Validate ``Config.max_flow_corr_bytes``: ``None`` disables; otherwise a positive integer."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError(f"max_flow_corr_bytes must be a positive integer, got {value!r}")
+    try:
+        v = operator.index(value)
+    except TypeError:
+        raise ValueError(f"max_flow_corr_bytes must be a positive integer, got {value!r}") from None
+    if v <= 0:
+        raise ValueError(f"max_flow_corr_bytes must be a positive integer, got {value!r}")
+    return int(v)
 
 
 def _validate_sampled_border_frac(value):
@@ -57,7 +93,7 @@ class Config:
     mesh_budget: float = 0.012     # residual correction cap, fraction of width
     rs_rows: int = 18              # row bands for rolling-shutter correction; 0 disables
     flow_iters: int = 24
-    flow_downscale: int = 1        # 1 = full resolution flow
+    flow_downscale: int | str = 1   # positive integer, or "auto" to pick from (1, 2, 4) under max_flow_corr_bytes
     warm_start: bool = True
     step: int = 8                  # flow sampling grid for motion fitting
     kernel: str = "lanczos3"       # final resampling kernel
@@ -72,10 +108,92 @@ class Config:
     warp_diag: bool = False        # opt-in: complete-warp shape/coverage diagnostics in the report (extra host math per frame)
     max_sampled_border_frac: float | None = None   # opt-in: cap the sampled out-of-bounds fraction (finite, [0,1)); None disables
     crop_zoom: float = 1.0         # opt-in: isotropic center zoom on output coords, composed before the output->source map (finite, >=1)
+    max_flow_corr_bytes: int | None = None   # opt-in correlation-pyramid payload budget (stored bytes, both directions)
 
     def __post_init__(self):
+        self.flow_downscale = _validate_flow_downscale(self.flow_downscale)
+        self.max_flow_corr_bytes = _validate_max_flow_corr_bytes(self.max_flow_corr_bytes)
+        if self.flow_downscale == "auto" and self.max_flow_corr_bytes is None:
+            raise ValueError("flow_downscale='auto' requires a positive max_flow_corr_bytes budget")
         self.max_sampled_border_frac = _validate_sampled_border_frac(self.max_sampled_border_frac)
         self.crop_zoom = _validate_crop_zoom(self.crop_zoom)
+
+
+@dataclass(frozen=True)
+class FlowDownscaleResolution:
+    """Resolved RAFT flow resolution and its correlation-pyramid payload accounting.
+
+    ``estimated_corr_bytes`` counts the stored forward+backward correlation pyramids only (not peak memory); it is
+    ``None`` when the dimensions are too small for the four-level pyramid and no budget forced an estimate.
+    """
+
+    requested: int | str
+    resolved: int
+    estimated_corr_bytes: int | None
+    max_flow_corr_bytes: int | None
+    width: int
+    height: int
+
+    def report_fields(self):
+        return {
+            "flow_downscale_requested": self.requested,
+            "flow_downscale_resolved": self.resolved,
+            "flow_corr_pyramid_bytes": self.estimated_corr_bytes,
+            "max_flow_corr_bytes": self.max_flow_corr_bytes,
+            "flow_corr_memory_scope": ("stored forward+backward correlation-pyramid payload only; excludes feature maps, "
+                                       "activations, temporaries and allocator/cache overhead; not peak process memory"),
+        }
+
+    def manifest_fields(self):
+        return {
+            "requested": self.requested,
+            "resolved": self.resolved,
+            "corr_pyramid_bytes": self.estimated_corr_bytes,
+            "max_flow_corr_bytes": self.max_flow_corr_bytes,
+            "memory_scope": ("stored forward+backward correlation-pyramid payload only; excludes feature maps, "
+                             "activations, temporaries and allocator/cache overhead; not peak process memory"),
+            "width": self.width,
+            "height": self.height,
+        }
+
+
+def resolve_flow_downscale(cfg, width, height, custom_flow=False):
+    """Resolve ``Config.flow_downscale`` for a probed source size.
+
+    ``"auto"`` selects the smallest candidate in ``(1, 2, 4)`` whose bidirectional correlation-pyramid payload fits
+    ``cfg.max_flow_corr_bytes`` and is available only for the built-in MLX RAFT flow (``custom_flow`` rejects it).
+    A fixed positive scale is returned unchanged; when a budget is supplied its estimate is checked here, before
+    any RAFT weights are loaded or evaluator/model construction begins. Estimates count stored pyramid payload
+    bytes only, not feature maps, temporaries or allocator overhead.
+    """
+    requested = cfg.flow_downscale
+    budget = cfg.max_flow_corr_bytes
+    if custom_flow:
+        if requested == "auto":
+            raise ValueError("flow_downscale='auto' requires the built-in MLX RAFT flow backend; "
+                             "a caller-supplied flow_fn must use a fixed positive flow_downscale")
+        if budget is not None:
+            raise ValueError("max_flow_corr_bytes applies only to the built-in MLX RAFT flow backend")
+        scale = int(requested)
+        return FlowDownscaleResolution(requested, scale, None, None, width, height)
+    if requested == "auto":
+        if budget is None:
+            raise ValueError("flow_downscale='auto' requires a positive max_flow_corr_bytes budget")
+        scale, estimate = select_flow_downscale(height, width, _AUTO_FLOW_DOWNSCALE_CANDIDATES, budget,
+                                                levels=4, dtype=cfg.corr_dtype)
+        return FlowDownscaleResolution(requested, scale, estimate, budget, width, height)
+    scale = int(requested)
+    try:
+        estimate = estimate_corr_pyramid_bytes(height, width, downscale=scale, levels=4, dtype=cfg.corr_dtype)
+    except ValueError:
+        if budget is not None:
+            raise
+        estimate = None
+    if budget is not None and estimate is not None and estimate > budget:
+        raise ValueError(
+            f"flow_downscale={scale} needs an estimated {estimate}-byte bidirectional correlation pyramid at "
+            f"{width}x{height}, exceeding max_flow_corr_bytes={budget}")
+    return FlowDownscaleResolution(requested, scale, estimate, budget, width, height)
 
 
 def load_roll(path):
@@ -876,8 +994,11 @@ def stabilize(src, out, mask=None, weights=None, cfg=None, roll=None, start=None
     if cfg.warp_diag and diag_callback is not None and diag_every:
         raise ValueError("choose all-frame warp_diag or sampled diagnostics, not both")
     info = media.probe(src)
+    builtin_flow = flow_fn is None or isinstance(flow_fn, RaftFlow)
+    flow_resolution = resolve_flow_downscale(cfg, info["width"], info["height"], custom_flow=not builtin_flow)
     if flow_fn is None:
-        flow_fn = RaftFlow(weights, cfg.flow_iters, cfg.flow_downscale, cfg.warm_start, getattr(mx, cfg.corr_dtype), getattr(mx, cfg.flow_dtype), cfg.warm_iters or None)
+        flow_fn = RaftFlow(weights, cfg.flow_iters, flow_resolution.resolved, cfg.warm_start,
+                           getattr(mx, cfg.corr_dtype), getattr(mx, cfg.flow_dtype), cfg.warm_iters or None)
     frames, fps, (W, H) = media.decode(src, info, start, duration); frames = media.prefetch(frames)
     if info["interlaced"]: log(f"interlaced ({info['field_order']}): bwdif send_field -> {fps:.3f} fps")
     import time; t0 = time.perf_counter()
@@ -945,6 +1066,7 @@ def stabilize(src, out, mask=None, weights=None, cfg=None, roll=None, start=None
            "warp_diag": warpmetrics.aggregate(diags) if cfg.warp_diag else None,
            "max_sampled_border_frac": getattr(cfg, "max_sampled_border_frac", None),
            "crop_zoom": cfg.crop_zoom,
+           **flow_resolution.report_fields(),
            "sampled_border_scale": pl.sampled_border_scale if pl.sampled_border_measured else None,
            "sampled_border_worst_frac": pl.sampled_border_worst_frac if pl.sampled_border_measured else None,
            "sampled_border_measured": bool(pl.sampled_border_measured),

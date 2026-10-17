@@ -2,6 +2,7 @@
 
 Parameter names mirror the PyTorch reference so a converted state dict loads 1:1 (see convert.py)."""
 import math
+import operator
 import mlx.core as mx
 import mlx.nn as nn
 from ..warp import sample
@@ -166,6 +167,128 @@ class CorrBlock:
             g = cen / 2 ** i + self.delta[None]
             out.append(sample(self.pyr[i].astype(mx.float32), g, "bilinear", "zeros").reshape(1, h, w, -1))
         return mx.concatenate(out, -1)
+
+
+# --- pure correlation-payload accounting (no tensors allocated) ------------------------------------------------
+_CORR_DTYPE_BYTES = {"float16": 2, "float32": 4}
+
+
+def _positive_int(value, name):
+    """Return ``value`` as a Python int, rejecting bools, non-integers and values <= 0."""
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a positive integer, got {value!r}")
+    try:
+        v = operator.index(value)
+    except TypeError:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}") from None
+    if v <= 0:
+        raise ValueError(f"{name} must be a positive integer, got {value!r}")
+    return int(v)
+
+
+def _nonnegative_int(value, name):
+    """Return ``value`` as a Python int, rejecting bools, non-integers and negatives."""
+    if isinstance(value, bool):
+        raise ValueError(f"{name} must be a non-negative integer, got {value!r}")
+    try:
+        v = operator.index(value)
+    except TypeError:
+        raise ValueError(f"{name} must be a non-negative integer, got {value!r}") from None
+    if v < 0:
+        raise ValueError(f"{name} must be a non-negative integer, got {value!r}")
+    return int(v)
+
+
+def _corr_dtype_bytes(dtype):
+    if not isinstance(dtype, str) or dtype not in _CORR_DTYPE_BYTES:
+        raise ValueError(f"corr dtype must be 'float16' or 'float32', got {dtype!r}")
+    return _CORR_DTYPE_BYTES[dtype]
+
+
+def _corr_feature_grid(height, width, downscale):
+    """Encoder grid for a bidirectional RAFT pair, matching RaftFlow._prep + pad8 + BasicEncoder."""
+    h = _positive_int(height, "height") // downscale
+    w = _positive_int(width, "width") // downscale
+    if h == 0 or w == 0:
+        raise ValueError(f"downscale {downscale} leaves an empty image for height={height}, width={width}")
+    # pad8 rounds each floored dimension up to a multiple of 8; the encoder stride 8 then gives ceil(n / 8) cells.
+    return (h + 7) // 8, (w + 7) // 8
+
+
+def estimate_corr_pyramid_bytes(height, width, downscale=1, levels=4, dtype="float32"):
+    """Exact stored payload bytes of both directional RAFT correlation pyramids (forward and backward).
+
+    Mirrors the real pipeline: ``RaftFlow._prep`` floors to ``(H // downscale, W // downscale)``; ``pad8`` rounds
+    each spatial dimension up to a multiple of 8; ``BasicEncoder`` strides by 8, so the correlation grid is
+    ``ceil((H // downscale) / 8) x ceil((W // downscale) / 8)``. ``CorrBlock`` level ``i`` stores
+    ``h*w * floor(h / 2**i) * floor(w / 2**i)`` elements for ``i = 0 .. levels-1``, and ``flow_bidir`` keeps a
+    separate forward and backward pyramid.
+
+    Only the stored pyramid payload is counted. Feature maps, GRU/update state, lookup buffers, temporaries and
+    MLX allocator/cache overhead are excluded, so this is **not** peak process memory. ``dtype`` is the stored
+    correlation label, exactly ``"float16"`` or ``"float32"`` (matching ``Config.corr_dtype``).
+
+    Raises :class:`ValueError` for invalid dimensions/downscale/levels/dtype or when any pooled level would be
+    empty (a zero-sized grid, which the reference cannot process).
+    """
+    ds = _positive_int(downscale, "downscale")
+    nlevels = _positive_int(levels, "levels")
+    item = _corr_dtype_bytes(dtype)
+    h, w = _corr_feature_grid(height, width, ds)
+    pair = h * w
+    elements = 0
+    for i in range(nlevels):
+        lh, lw = h >> i, w >> i
+        if lh == 0 or lw == 0:
+            raise ValueError(
+                f"correlation level {i} is empty for feature grid {h}x{w} "
+                f"(height={height}, width={width}, downscale={ds}, levels={nlevels})")
+        elements += pair * lh * lw
+    return 2 * elements * item
+
+
+def select_flow_downscale(height, width, candidates, budget_bytes, levels=4, dtype="float32"):
+    """Choose the smallest candidate downscale whose bidirectional correlation payload fits the byte budget.
+
+    ``candidates`` is an iterable of unique positive integer downscales. The result is independent of candidate
+    order and always prefers the highest flow resolution (smallest downscale) that fits.
+
+    Returns ``(downscale, estimated_bytes)``. Raises :class:`ValueError` for an empty or malformed candidate
+    list, duplicate candidates, a negative/non-integer budget, an empty correlation level, or when no candidate
+    fits (the error lists every candidate and its estimate).
+
+    As with :func:`estimate_corr_pyramid_bytes`, these are stored pyramid payload bytes only, not peak process
+    memory.
+    """
+    _positive_int(height, "height")
+    _positive_int(width, "width")
+    _positive_int(levels, "levels")
+    _corr_dtype_bytes(dtype)
+    budget = _nonnegative_int(budget_bytes, "budget_bytes")
+    if isinstance(candidates, (str, bytes)):
+        raise ValueError("candidates must be an iterable of positive integer downscales")
+    try:
+        raw = list(candidates)
+    except TypeError:
+        raise ValueError("candidates must be an iterable of positive integer downscales") from None
+    if not raw:
+        raise ValueError("candidates must not be empty")
+    scales = [_positive_int(c, "candidate downscale") for c in raw]
+    seen = set()
+    for scale in scales:
+        if scale in seen:
+            raise ValueError(f"duplicate candidate downscale: {scale}")
+        seen.add(scale)
+    estimates = []
+    for scale in sorted(scales):
+        nbytes = estimate_corr_pyramid_bytes(height, width, scale, levels, dtype)
+        if nbytes <= budget:
+            return scale, nbytes
+        estimates.append((scale, nbytes))
+    detail = ", ".join(f"{scale} -> {nbytes} bytes" for scale, nbytes in estimates)
+    raise ValueError(
+        f"no flow downscale candidate fits the {budget}-byte budget at {height}x{width} "
+        f"(levels={levels}, dtype={dtype!r}); estimates: {detail}")
 
 
 def coords_grid(h, w):
