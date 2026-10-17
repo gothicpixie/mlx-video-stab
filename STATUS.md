@@ -3397,3 +3397,27 @@ this map correction or change defaults. The 8-stream panel was previously inspec
 a newly sampled held-out corpus. The next border experiment should preserve the estimated source-coordinate map
 and compare an explicit crop/zoom policy with border fill on new source windows; evaluate support, motion,
 shape and visible artifacts separately.
+
+## Minimal crop support screen (2026-10-17)
+
+On the same development-only `00176.MTS` t0613 one-second window, I replayed the retained baseline plan and
+swept output-side center zoom against exact production source coordinates and Lanczos-3 support. The first
+tested zoom with full support on all 30 encoded output frames was **1.088** (increments of 0.002); 1.086 still
+had a minimum support fraction of 0.999827. At 1.088, the output-side crop removes about **15.5% of frame
+area**. This is a frame-specific support threshold, not a general per-clip policy.
+
+Matched production runs used the same source hash, window, config and evaluator, with KLT enabled for both. The
+baseline and 1.088 candidate both completed without fit fallbacks and retained 29/29 supported evaluation
+frames. Full-support Lanczos-3 coverage changed from **0.97610 mean / 0.93883 minimum** to **1.0 / 1.0**.
+RAFT jitter/wobble changed from **0.061504 / 0.030419 px** to **0.064008 / 0.032556 px** (**+4.1% / +7.0%**);
+independent KLT jitter changed from **0.080803** to **0.078133 px** (**−3.3%**). The motion estimators therefore
+do not show a common regression direction. Gemini 3.8 Flash via the Vertex API preferred the candidate in the
+original pair and baseline in the position reversal; the audit found one side-following pair and zero method
+agreement. Visual review is inconclusive.
+
+Decision: this resolves that a minimal full-support zoom can reduce the measured RAFT jitter penalty relative
+to fixed 1.10 on this one window, but it is still **not a selected policy**: the tuning and evaluation used the
+same single window, the crop is substantial, and KLT/RAFT and Gemini do not give a consistent quality verdict.
+Do not tune on the reserved S16/S25 windows. To pursue borders, prioritize preserved-framing fill against
+source-coordinate maps on new source windows; revisit adaptive cropping only after a crop-area cap and a
+development/held-out split are declared.
