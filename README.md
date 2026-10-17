@@ -72,6 +72,12 @@ excludes features, activations, temporary allocations and allocator caching, so 
 With a fixed downscale, the same option can reject a setting whose estimated correlation payload exceeds the budget.
 Automatic selection is opt-in; the default remains full-resolution flow (`1`).
 
+`auto` is a memory-budget resolver, not a quality optimizer. On two one-second windows from one 1080i camcorder
+source, scale 4 ran about 2.5x faster than scale 2 but had higher residual jitter and border loss; the visual
+review was inconclusive. This small screen does not establish a general ranking, and scale 4 has not been
+validated for 4K quality. Check the resolved scale in the report before treating an automatic run as
+quality-equivalent to scale 2.
+
 `roll.json`: `[deg per frame]`, or `[[t_seconds, deg], ...]`, or `{"series": ...}`.
 
 ## Setup
