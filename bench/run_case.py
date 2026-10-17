@@ -108,8 +108,10 @@ def build_parser():
     p.add_argument("--synth-w", type=int, default=320)
     p.add_argument("--synth-h", type=int, default=180)
     p.add_argument("--synth-fps", type=float, default=30.0)
-    p.add_argument("--synth-intent-mode", choices=("smooth", "stochastic"), default="smooth",
-                   help="known predictable or stochastic camera-intent path; paired seeds share identical shake")
+    p.add_argument("--synth-intent-mode", choices=("smooth", "stochastic", "static"), default="smooth",
+                   help="known predictable or stochastic intent, or zero intended motion for calibration")
+    p.add_argument("--synth-intent-profile", choices=("historical", "matched-spectrum"), default="historical",
+                   help="historical preserves the legacy smooth path; matched-spectrum pairs smooth/stochastic PSD")
     p.add_argument("--synth-layer-motion-factors", type=_parse_layer_motion_factors, default=(1.0, 0.55, 0.25),
                    metavar="FAR,MID,NEAR",
                    help="camera-translation multipliers for scene layers; keep FAR=1.0 to isolate parallax separation")
@@ -155,6 +157,7 @@ def main(argv=None):
                           "output_fps": output_fps,
                           "preset_overrides": case.config, "resolved_config": resolved,
                           "synthetic_scene": {"intent_mode": a.synth_intent_mode,
+                              "intent_profile": a.synth_intent_profile,
                               "layer_motion_factors": a.synth_layer_motion_factors,
                               "subject_mode": a.synth_subject_mode,
                               "subject_speed_px_per_frame": a.synth_subject_speed,
@@ -180,7 +183,8 @@ def main(argv=None):
         dump_flow_samples=a.dump_flow_samples, lock=a.lock,
         lock_chunk=a.lock_chunk, lock_pause_s=a.lock_pause,
         synth_frames=a.synth_frames, synth_w=a.synth_w, synth_h=a.synth_h, synth_fps=a.synth_fps,
-        synth_intent_mode=a.synth_intent_mode, synth_layer_motion_factors=a.synth_layer_motion_factors,
+        synth_intent_mode=a.synth_intent_mode, synth_intent_profile=a.synth_intent_profile,
+        synth_layer_motion_factors=a.synth_layer_motion_factors,
         synth_subject_mode=a.synth_subject_mode, synth_subject_speed=a.synth_subject_speed,
         synth_jitter_px=a.synth_jitter, synth_rot_jitter_deg=a.synth_rot_jitter, synth_rho=a.synth_rho,
         selection_note=a.selection_note, overrides=overrides, command=[sys.executable, *sys.argv], log=log)

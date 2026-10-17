@@ -3884,3 +3884,56 @@ judgments); the next request stalled beyond two minutes and was interrupted, lea
 under ignored `out/bench/synth_intent_factorial_seed17/gemini_review.json`. Both predictable-scene judgments
 were ties, citing no clearly discernible motion/difference at this resolution and duration. Treat those as
 evidence that the smoke stimuli are too weak for visual adjudication, not evidence that stabilization has no effect.
+
+### Matched intent and subject-transform controls (2026-10-17)
+
+DeepSeek's construction review recommends a shared Fourier envelope with phase-only variation: equal spectral
+support and amplitudes, with one random phase per frequency shared by x/y/rotation. This preserves the cross-spectrum
+as well as marginal power; independently randomizing camera axes would create a different joint motion process.
+`synth.camera(..., intent_profile="matched-spectrum")` now implements that paired control while the historical
+smooth path remains the default. The paired path includes a shared x drift and uses deterministic coherent phases
+for `smooth`, seeded randomized phases for `stochastic`. A `static` intent mode provides zero-motion calibration
+clips. Tests verify equal FFT magnitudes, cross-spectra and spectral derivative RMS of the periodic component,
+distinct waveforms, seed reproducibility and identical shake. The matched profile requires at least 16 frames.
+
+This phase-only pair is specifically a **phase-coherence** contrast. The common non-periodic x drift is identical
+across arms; compare the periodic component when measuring matched displacement/velocity/acceleration energy.
+Because it preserves second-order statistics, a linear time-invariant/linear-MSE predictor should perform
+similarly on both arms; this is a useful null, not proof of general predictability. Test phase-sensitive or
+nonlinear cues separately before calling the contrast a general camera-intent predictor. DeepSeek also recommends
+not combining px and degrees without an image-space rotation scale.
+
+The renderer's subject had previously been overlaid in image coordinates, so the supposedly world-static subject
+did not respond to camera translation. It now uses the same inverse camera transform as the near scene layer.
+Focused synth, runner and stabilizer tests passed (79 passed at that checkpoint). A 96-frame 320x192 seed-17 matched-spectrum pair
+completed with identical shake and zero output fallbacks. Whole-frame jitter diagnostics were input/output
+1.76/0.16 px for coherent phase and 1.94/0.33 px for randomized phase; these are not a method comparison or
+content-understanding result because whole-frame flow mixes camera, parallax and subject motion. Longer clips
+are under ignored `out/bench/synth_matched_seed17/`; blinded review artifacts and the completed Gemini result
+are in that ignored run directory. Gemini preferred raw over stabilized in all four original/reversed panel
+judgments, citing shifting black edge gaps in the stabilized panel while noting slightly lower interior movement.
+This is consistent across panel order but is only a visual tradeoff judgment on a short synthetic clip; it
+reinforces that crop/border coverage must be reported with motion retention and shake rejection.
+
+### Truth-aware synthetic stabilization measures (2026-10-17)
+
+The renderer can now return a per-frame visible-layer ID map. The runner saves it as a compressed, hash-verified
+`synthetic_truth.npz` sidecar in each synthetic run directory; scene generation guarantees that the near layer
+intersects the camera window while preserving randomized additional blobs. `bench.synth_intent_metrics` loads a
+successful manifest and saved plan, composes the production output-to-input map with the exact row-time input
+camera-to-world transform, then robustly fits output-to-world similarity using only known visible-layer samples.
+It reports the effective far-layer camera path, band-limited intent gain/correlation/RMSE, shake-band attenuation,
+map-fit distortion, visible support, input-valid/crop fraction and unavailable frames. Translation and rotation
+remain separate units. It refuses plan/truth dimension mismatches and checks the truth sidecar hash.
+
+The current truth-aware 24-frame integration smoke (`out/bench/synth_metrics_smoke_v4/`) recovered all 24 frames
+for far, mid, near and subject layers. Far visible support averaged 44.5%, output-map fit RMSE 0.75 px, and
+input-map valid coverage 93.3%. The report correctly flags that the run is below the recommended 64-frame
+minimum and raises the shake-band boundary to keep it disjoint from intent harmonics. These short-run metric
+values are plumbing checks only, not evidence for selecting or tuning stabilization. A smaller, frame-relative
+near anchor also restored the full-suite no-fallback flow fixture while keeping near-layer visibility.
+
+Next build a sequential, resumable 2x2x3 factorial runner with at least eight paired seeds, calibration anchors,
+frozen configuration, and explicit failure rows. Increase the truth-map sampling density enough for thin layers;
+run one resolution/frame-length sensitivity check. Keep path retention, shake rejection, layer distortion, crop,
+and failure rate separate. The 96-frame smoke and Gemini border judgment do not substitute for this factorial.

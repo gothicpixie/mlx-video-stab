@@ -68,6 +68,7 @@ class RunOptions:
     synth_h: int = 180
     synth_fps: float = 30.0
     synth_intent_mode: str = "smooth"
+    synth_intent_profile: str = "historical"
     synth_layer_motion_factors: tuple = (1.0, 0.55, 0.25)
     synth_subject_mode: str = "moving"       # absent | static | moving
     synth_subject_speed: float = 1.6
@@ -85,14 +86,17 @@ class RunOptions:
 # --------------------------------------------------------------------------------------
 
 def make_synthetic(path, W, H, T, seed, fps, *, intent_mode="smooth", layer_motion_factors=(1.0, 0.55, 0.25),
-                   subject_mode="moving", subject_speed=1.6, jitter_px=6.0, rot_jitter_deg=0.6, rho=0.8):
+                   subject_mode="moving", subject_speed=1.6, jitter_px=6.0, rot_jitter_deg=0.6, rho=0.8,
+                   intent_profile="historical"):
     has_subject = subject_mode != "absent"
     speed = 0.0 if subject_mode == "static" else float(subject_speed)
     depths = tuple(float(v) for v in layer_motion_factors)
-    vid, intended = synth.render(T=T, W=W, H=H, seed=seed, rho=rho, jitter=jitter_px,
-                                 rot_jit=rot_jitter_deg, depths=depths, subject=has_subject,
-                                 subject_speed=speed, intent_mode=intent_mode)
-    intended_fn, actual_fn = synth.camera(T, seed + 1, jitter_px, rot_jitter_deg, intent_mode=intent_mode)
+    vid, intended, truth = synth.render(T=T, W=W, H=H, seed=seed, rho=rho, jitter=jitter_px,
+                                       rot_jit=rot_jitter_deg, depths=depths, subject=has_subject,
+                                       subject_speed=speed, intent_mode=intent_mode,
+                                       intent_profile=intent_profile, return_truth=True)
+    intended_fn, actual_fn = synth.camera(T, seed + 1, jitter_px, rot_jitter_deg, intent_mode=intent_mode,
+                                          intent_profile=intent_profile)
     time = np.arange(T, dtype=np.float64)
     intended_pose = intended_fn(time)
     actual_pose = actual_fn(time)
@@ -100,8 +104,11 @@ def make_synthetic(path, W, H, T, seed, fps, *, intent_mode="smooth", layer_moti
     for f in vid:
         enc.write(f)
     enc.close()
+    truth_path = Path(path).with_name("synthetic_truth.npz")
+    np.savez_compressed(truth_path, visible_layer_id=np.asarray(truth["visible_layer_id"], np.uint8))
     return {"frames_requested": T, "width": W, "height": H, "fps": fps,
             "intent_mode": intent_mode,
+            "intent_profile": intent_profile,
             "layer_motion_factors": list(depths),
             "layer_factor_semantics": "multipliers on camera translation; far layer fixed at 1.0 for factorial comparisons",
             "subject_mode": subject_mode, "subject_present": has_subject,
@@ -109,7 +116,9 @@ def make_synthetic(path, W, H, T, seed, fps, *, intent_mode="smooth", layer_moti
             "jitter_px": float(jitter_px), "rot_jitter_deg": float(rot_jitter_deg), "rolling_shutter_rho": float(rho),
             "intended_camera_pose_px_px_deg": intended_pose.tolist(),
             "actual_camera_pose_px_px_deg": actual_pose.tolist(),
-            "camera_shake_rms_px_px_deg": np.sqrt(np.mean((actual_pose - intended_pose) ** 2, axis=0)).tolist()}
+            "camera_shake_rms_px_px_deg": np.sqrt(np.mean((actual_pose - intended_pose) ** 2, axis=0)).tolist(),
+            "truth_file": truth_path.name, "truth_sha256": MF.sha256_file(truth_path),
+            "truth_layer_ids": {"far": 0, "mid": 1, "near": 2, "subject": 3}}
 
 
 def decode_meta(path, info, start, duration, vf=None):
@@ -212,8 +221,12 @@ def validate_options(opts: RunOptions) -> list[str]:
             errs.append("synthetic width/height must be positive")
         if not np.isfinite(opts.synth_fps) or opts.synth_fps <= 0:
             errs.append("--synth-fps must be finite and > 0")
-        if opts.synth_intent_mode not in ("smooth", "stochastic"):
-            errs.append("--synth-intent-mode must be smooth|stochastic")
+        if opts.synth_intent_mode not in ("smooth", "stochastic", "static"):
+            errs.append("--synth-intent-mode must be smooth|stochastic|static")
+        if opts.synth_intent_profile not in ("historical", "matched-spectrum"):
+            errs.append("--synth-intent-profile must be historical|matched-spectrum")
+        if opts.synth_intent_profile == "matched-spectrum" and opts.synth_frames < 16:
+            errs.append("matched-spectrum intent requires --synth-frames >= 16")
         if opts.synth_subject_mode not in ("absent", "static", "moving"):
             errs.append("--synth-subject-mode must be absent|static|moving")
         try:
@@ -432,7 +445,8 @@ def run_case(opts: RunOptions) -> dict:
                 src, opts.synth_w, opts.synth_h, opts.synth_frames, opts.seed, opts.synth_fps,
                 intent_mode=opts.synth_intent_mode, layer_motion_factors=opts.synth_layer_motion_factors,
                 subject_mode=opts.synth_subject_mode, subject_speed=opts.synth_subject_speed,
-                jitter_px=opts.synth_jitter_px, rot_jitter_deg=opts.synth_rot_jitter_deg, rho=opts.synth_rho)
+                jitter_px=opts.synth_jitter_px, rot_jitter_deg=opts.synth_rot_jitter_deg, rho=opts.synth_rho,
+                intent_profile=opts.synth_intent_profile)
             man["source"]["window"] = {"start_s": 0.0, "duration_s": opts.synth_frames / opts.synth_fps}
         else:
             src = Path(opts.source)

@@ -360,9 +360,20 @@ The main screen is path regime (smooth/stochastic) x layers (far-only/far+mid-ne
 both and neither, plus a small resolution/length sensitivity check. Keep the far layer rigid/camera-locked as
 camera-path reference and use the same intent realization for layer/subject comparisons within each path regime.
 
-Before running the full screen, add per-layer truth-based measures for intent retention (band-limited gain,
-correlation, RMSE and endpoint drift), shake rejection (RMS and PSD attenuation), scene/subject distortion,
-common-valid-mask crop and rule-based failure events. Report identity and freeze baselines; show retention versus
-rejection jointly with distortion and failures, not as one composite score. Freeze estimator configuration and
-predeclare contrasts. Current smoke and partial Gemini ties only show that the synthetic review video was too
-short/low-resolution to judge; they cannot select a model or smoother.
+`bench.synth_intent_metrics` now composes the saved output-to-input plan with the known row-time camera-to-world
+transform, fits output camera pose on far-visible ground-truth pixels, and reports band-limited retention, shake
+attenuation, per-layer support/map-fit residual, crop and unavailable frames. The runner saves hash-verified
+visible-layer maps. A 24-frame integration smoke validated the path and is explicitly marked below the 64-frame
+screen minimum. Next add the resumable factorial harness, calibration anchors, full failure accounting, and
+identity/freeze baselines. Freeze estimator configuration and predeclare contrasts. The 96-frame raw-versus-
+stabilized Gemini picks reflect border visibility and cannot select a camera-intent model.
+
+The generator now offers an opt-in matched-spectrum phase-coherence pair and a static-intent calibration mode;
+legacy smooth generation remains unchanged. Phase randomization preserves second-order statistics, so this is a
+null control for linear predictors and must not be described as general predictability without phase-sensitive
+tests. World-static subjects now follow camera motion through the renderer's camera transform, with regression
+coverage for both camera-induced and independent subject motion. The truth-aware camera recovery and its exact
+transform tests are implemented; the existing full-frame flow metrics remain supplementary only.
+The 96-frame smoke's Gemini review preferred raw in all four panel-order judgments because the stabilized
+comparison showed blank edge gaps. Include crop/border coverage as an explicit decision axis and diagnose
+whether a matched crop policy changes that judgment before interpreting stabilization quality.
