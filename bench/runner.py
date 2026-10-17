@@ -22,6 +22,7 @@ from itertools import tee
 from pathlib import Path
 
 import mlx.core as mx
+import numpy as np
 
 from mlxstab import media, metrics, synth, tracks, warpmetrics
 from mlxstab.stabilize import Config, RaftFlow, resolve_flow_downscale, stabilize
@@ -66,6 +67,13 @@ class RunOptions:
     synth_w: int = 320
     synth_h: int = 180
     synth_fps: float = 30.0
+    synth_intent_mode: str = "smooth"
+    synth_layer_motion_factors: tuple = (1.0, 0.55, 0.25)
+    synth_subject_mode: str = "moving"       # absent | static | moving
+    synth_subject_speed: float = 1.6
+    synth_jitter_px: float = 6.0
+    synth_rot_jitter_deg: float = 0.6
+    synth_rho: float = 0.8
     selection_note: str | None = None
     overrides: dict = field(default_factory=dict)
     command: list | None = None
@@ -76,13 +84,32 @@ class RunOptions:
 # small media helpers
 # --------------------------------------------------------------------------------------
 
-def make_synthetic(path, W, H, T, seed, fps):
-    vid, _ = synth.render(T=T, W=W, H=H, seed=seed)
+def make_synthetic(path, W, H, T, seed, fps, *, intent_mode="smooth", layer_motion_factors=(1.0, 0.55, 0.25),
+                   subject_mode="moving", subject_speed=1.6, jitter_px=6.0, rot_jitter_deg=0.6, rho=0.8):
+    has_subject = subject_mode != "absent"
+    speed = 0.0 if subject_mode == "static" else float(subject_speed)
+    depths = tuple(float(v) for v in layer_motion_factors)
+    vid, intended = synth.render(T=T, W=W, H=H, seed=seed, rho=rho, jitter=jitter_px,
+                                 rot_jit=rot_jitter_deg, depths=depths, subject=has_subject,
+                                 subject_speed=speed, intent_mode=intent_mode)
+    intended_fn, actual_fn = synth.camera(T, seed + 1, jitter_px, rot_jitter_deg, intent_mode=intent_mode)
+    time = np.arange(T, dtype=np.float64)
+    intended_pose = intended_fn(time)
+    actual_pose = actual_fn(time)
     enc = media.Encoder(str(path), W, H, fps, crf=18, preset="veryfast")
     for f in vid:
         enc.write(f)
     enc.close()
-    return {"frames_requested": T, "width": W, "height": H, "fps": fps}
+    return {"frames_requested": T, "width": W, "height": H, "fps": fps,
+            "intent_mode": intent_mode,
+            "layer_motion_factors": list(depths),
+            "layer_factor_semantics": "multipliers on camera translation; far layer fixed at 1.0 for factorial comparisons",
+            "subject_mode": subject_mode, "subject_present": has_subject,
+            "subject_speed_px_per_frame": speed if has_subject else None,
+            "jitter_px": float(jitter_px), "rot_jitter_deg": float(rot_jitter_deg), "rolling_shutter_rho": float(rho),
+            "intended_camera_pose_px_px_deg": intended_pose.tolist(),
+            "actual_camera_pose_px_px_deg": actual_pose.tolist(),
+            "camera_shake_rms_px_px_deg": np.sqrt(np.mean((actual_pose - intended_pose) ** 2, axis=0)).tolist()}
 
 
 def decode_meta(path, info, start, duration, vf=None):
@@ -180,6 +207,31 @@ def validate_options(opts: RunOptions) -> list[str]:
         errs.append("--start must be >= 0")
     if opts.synth_frames < 1 and opts.source == "synthetic":
         errs.append("--synth-frames must be >= 1")
+    if opts.source == "synthetic":
+        if opts.synth_w < 1 or opts.synth_h < 1:
+            errs.append("synthetic width/height must be positive")
+        if not np.isfinite(opts.synth_fps) or opts.synth_fps <= 0:
+            errs.append("--synth-fps must be finite and > 0")
+        if opts.synth_intent_mode not in ("smooth", "stochastic"):
+            errs.append("--synth-intent-mode must be smooth|stochastic")
+        if opts.synth_subject_mode not in ("absent", "static", "moving"):
+            errs.append("--synth-subject-mode must be absent|static|moving")
+        try:
+            factors = tuple(float(v) for v in opts.synth_layer_motion_factors)
+            if len(factors) != 3 or not np.isfinite(factors).all() or any(v <= 0 for v in factors):
+                raise ValueError
+            if not np.isclose(factors[0], 1.0):
+                errs.append("the synthetic far-layer motion factor must remain 1.0 to isolate parallax separation")
+        except (TypeError, ValueError):
+            errs.append("synthetic layer motion factors must be three finite positive values")
+        if not np.isfinite(opts.synth_subject_speed) or opts.synth_subject_speed < 0:
+            errs.append("--synth-subject-speed must be finite and >= 0")
+        if not np.isfinite(opts.synth_jitter_px) or opts.synth_jitter_px < 0:
+            errs.append("--synth-jitter must be finite and >= 0")
+        if not np.isfinite(opts.synth_rot_jitter_deg) or opts.synth_rot_jitter_deg < 0:
+            errs.append("--synth-rot-jitter must be finite and >= 0")
+        if not np.isfinite(opts.synth_rho) or not 0 <= opts.synth_rho <= 1:
+            errs.append("--synth-rho must be in [0,1]")
     if opts.source != "synthetic" and not Path(opts.source).exists():
         errs.append(f"source not found: {opts.source}")
     if opts.backend not in ("mlx", "torch-mps"):
@@ -376,8 +428,12 @@ def run_case(opts: RunOptions) -> dict:
         stage = "source"
         if opts.source == "synthetic":
             src = run_dir / "synthetic.mp4"
-            man["source"]["synthetic"] = make_synthetic(src, opts.synth_w, opts.synth_h, opts.synth_frames,
-                                                        opts.seed, opts.synth_fps)
+            man["source"]["synthetic"] = make_synthetic(
+                src, opts.synth_w, opts.synth_h, opts.synth_frames, opts.seed, opts.synth_fps,
+                intent_mode=opts.synth_intent_mode, layer_motion_factors=opts.synth_layer_motion_factors,
+                subject_mode=opts.synth_subject_mode, subject_speed=opts.synth_subject_speed,
+                jitter_px=opts.synth_jitter_px, rot_jitter_deg=opts.synth_rot_jitter_deg, rho=opts.synth_rho)
+            man["source"]["window"] = {"start_s": 0.0, "duration_s": opts.synth_frames / opts.synth_fps}
         else:
             src = Path(opts.source)
         man["source"]["path"] = str(src)

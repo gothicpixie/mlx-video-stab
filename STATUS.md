@@ -3848,3 +3848,19 @@ recommended holding the far-layer factor at 1.0 while varying only mid/near fact
 confounded with global image speed. Next expose these controls through the benchmark runner and provenance manifest,
 then run paired seeds over intent predictability, depth separation and subject absent/static/moving. Keep all cells at
 the same camera-shake seed and record exact intended/actual paths.
+
+### Runner integration smoke test (2026-10-17)
+
+`bench/run_case.py` now exposes the synthetic intent, layer factors, subject mode/speed, shake amplitude,
+rotation shake and temporal correlation; `bench/runner.py` validates and records these settings along with the
+exact intended and generated camera paths and shake RMS. Synthetic manifest windows are explicit, allowing the
+existing `bench.real_pair_review` and `bench.gemini_blind_review` path to review generated sources after hash
+verification. Focused validation passed 107 tests across runner, source-review and synthetic-control tests.
+
+Two seed-17 smoke runs completed at 24 frames and 160x96, with layer factors far/mid/near 1/.85/.7, a moving
+subject, and matching shake settings. They differed only in smooth versus stochastic camera-intent mode. Both
+source windows and truth arrays are recorded in their manifests under ignored
+`out/bench/synth_intent_factorial_seed17/*_windowfix/`. Raw-versus-stabilized, position-reversed Gemini review
+clips were built and submitted. This tiny pair checks plumbing only: it is not a multi-seed factorial, does not
+compare stabilization methods, and cannot establish whether visual content cues improve stabilization. Record
+Gemini's per-clip judgments when returned, but keep objective metrics and known camera truth primary.

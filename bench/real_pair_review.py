@@ -172,7 +172,7 @@ def _build_candidate(manifest_path, manifest, candidate_video, *, out_video, out
     outputs = manifest.get("outputs") or {}
     window = source.get("window") or {}
     source_path = Path(source.get("path") or "").expanduser()
-    if not source_path.is_file() or source.get("path_type") != "file":
+    if not source_path.is_file() or source.get("path_type") not in ("file", "synthetic"):
         raise ReviewBuildError("manifest must reference an existing local source file")
     source_sha = source.get("sha256")
     if not source_sha or MF.sha256_file(source_path) != source_sha:
@@ -414,7 +414,7 @@ def build(manifest_path, *, out_video=None, out_report=None, out_reversed=None,
     outputs = manifest.get("outputs") or {}
     window = source.get("window") or {}
     source_path = Path(source.get("path") or "").expanduser()
-    if not source_path.is_file() or source.get("path_type") != "file":
+    if not source_path.is_file() or source.get("path_type") not in ("file", "synthetic"):
         raise ReviewBuildError("manifest must reference an existing local source file")
     source_sha = source.get("sha256")
     if not source_sha or MF.sha256_file(source_path) != source_sha:

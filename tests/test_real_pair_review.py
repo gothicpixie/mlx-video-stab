@@ -134,6 +134,16 @@ def test_build_writes_original_and_position_reversed_clips_with_provenance(tmp_p
     assert {task["position_reversal"]["group"] for task in tasks} == groups
 
 
+def test_build_accepts_hash_verified_generated_synthetic_source(tmp_path, monkeypatch):
+    manifest_path, _raw, _stab = _setup(monkeypatch, tmp_path)
+    manifest = json.loads(manifest_path.read_text())
+    manifest["source"]["path_type"] = "synthetic"
+    manifest_path.write_text(json.dumps(manifest))
+    report = R.build(manifest_path, out_video=tmp_path / "synthetic_pair.mp4",
+                     out_report=tmp_path / "synthetic_pair.json", panel_width=40, panel_height=32)
+    assert [entry["role"] for entry in report["evidence"]["outputs"]] == ["original", "position_reversed"]
+
+
 def test_build_enforces_inline_cap_for_each_clip(tmp_path, monkeypatch):
     manifest_path, _, _ = _setup(monkeypatch, tmp_path)
 

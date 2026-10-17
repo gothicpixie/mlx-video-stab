@@ -55,6 +55,16 @@ def _parse_set(pairs):
     return out
 
 
+def _parse_layer_motion_factors(value):
+    try:
+        factors = tuple(float(x.strip()) for x in value.split(","))
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("expected three comma-separated numeric motion factors") from exc
+    if len(factors) != 3:
+        raise argparse.ArgumentTypeError("expected three comma-separated motion factors: FAR,MID,NEAR")
+    return factors
+
+
 def build_parser():
     p = argparse.ArgumentParser(prog="bench/run_case.py", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -98,6 +108,21 @@ def build_parser():
     p.add_argument("--synth-w", type=int, default=320)
     p.add_argument("--synth-h", type=int, default=180)
     p.add_argument("--synth-fps", type=float, default=30.0)
+    p.add_argument("--synth-intent-mode", choices=("smooth", "stochastic"), default="smooth",
+                   help="known predictable or stochastic camera-intent path; paired seeds share identical shake")
+    p.add_argument("--synth-layer-motion-factors", type=_parse_layer_motion_factors, default=(1.0, 0.55, 0.25),
+                   metavar="FAR,MID,NEAR",
+                   help="camera-translation multipliers for scene layers; keep FAR=1.0 to isolate parallax separation")
+    p.add_argument("--synth-subject-mode", choices=("absent", "static", "moving"), default="moving",
+                   help="independently moving synthetic foreground subject")
+    p.add_argument("--synth-subject-speed", type=float, default=1.6,
+                   help="world-space horizontal speed in px/frame for a moving subject")
+    p.add_argument("--synth-jitter", type=float, default=6.0,
+                   help="synthetic camera translation-shake scale in px")
+    p.add_argument("--synth-rot-jitter", type=float, default=0.6,
+                   help="synthetic camera rotation-shake scale in degrees")
+    p.add_argument("--synth-rho", type=float, default=0.8,
+                   help="rolling-shutter readout duration in frames")
     p.add_argument("--set", action="append", metavar="KEY=VALUE", help="override one Config field (JSON value)")
     p.add_argument("--config-json", help="JSON object of Config overrides")
     p.add_argument("--dry-run", action="store_true", help="print the resolved case and exit without running")
@@ -129,6 +154,12 @@ def main(argv=None):
         print(json.dumps({"case": case.name, "changed": case.changed, "eval_vf": eval_vf,
                           "output_fps": output_fps,
                           "preset_overrides": case.config, "resolved_config": resolved,
+                          "synthetic_scene": {"intent_mode": a.synth_intent_mode,
+                              "layer_motion_factors": a.synth_layer_motion_factors,
+                              "subject_mode": a.synth_subject_mode,
+                              "subject_speed_px_per_frame": a.synth_subject_speed,
+                              "jitter_px": a.synth_jitter, "rot_jitter_deg": a.synth_rot_jitter,
+                              "rho": a.synth_rho},
                           "canonical": cases.canonical_config(resolved),
                           "config_digest": cases.config_digest(resolved)}, indent=1, sort_keys=True))
         return 0
@@ -149,6 +180,9 @@ def main(argv=None):
         dump_flow_samples=a.dump_flow_samples, lock=a.lock,
         lock_chunk=a.lock_chunk, lock_pause_s=a.lock_pause,
         synth_frames=a.synth_frames, synth_w=a.synth_w, synth_h=a.synth_h, synth_fps=a.synth_fps,
+        synth_intent_mode=a.synth_intent_mode, synth_layer_motion_factors=a.synth_layer_motion_factors,
+        synth_subject_mode=a.synth_subject_mode, synth_subject_speed=a.synth_subject_speed,
+        synth_jitter_px=a.synth_jitter, synth_rot_jitter_deg=a.synth_rot_jitter, synth_rho=a.synth_rho,
         selection_note=a.selection_note, overrides=overrides, command=[sys.executable, *sys.argv], log=log)
     try:
         man = runner.run_case(opts)

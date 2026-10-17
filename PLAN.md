@@ -348,6 +348,10 @@ outlier response separately, then hold out real windows for validation. Do not c
 ## Synthetic intent controls
 
 The generator now has additive, tested controls for predictable versus stochastic camera intent and subject speed;
-the legacy smooth scene remains the default. This is fixture plumbing, not evidence of better stabilization. Next
-thread the scene factors through `bench/run_case.py` and its manifest, hold the far-layer motion factor fixed at 1.0,
-and run the paired-seed factorial with the same camera shake across conditions.
+the legacy smooth scene remains the default. The runner now threads these controls through CLI options and manifest
+provenance, including exact intended/actual camera paths; review tooling accepts hash-verified generated sources.
+This is fixture plumbing, not evidence of better stabilization. A 24-frame paired-seed smoke is documented in
+`STATUS.md`; next run the predeclared multi-seed factorial at useful resolution and duration, keep far-layer motion
+at 1.0, and vary mid/near factors, predictability and subject absent/static/moving while reusing identical shake per
+seed. Evaluate path retention, shake rejection, subject distortion, crop and failure rates separately. Do not use
+the initial smoke or Gemini judgments to select a model or smoother.
