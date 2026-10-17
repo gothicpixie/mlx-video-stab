@@ -3961,7 +3961,8 @@ distinctly: shake-only removes the injected shake, while intent-only retains the
 pan.
 
 `bench.synth_intent_analysis` treats seed as the experimental unit, averages the six main cells per intent mode,
-and summarizes paired stochastic-minus-smooth contrasts with seed-level bootstrap intervals and per-seed signs.
+and summarizes paired stochastic-minus-smooth contrasts with per-seed signs and a seed-level Student-t interval;
+the percentile bootstrap interval is retained as a sensitivity check because it is coarse at small n.
 It excludes calibration anchors and reports layer/subject strata, each cell's phase contrast, and phase-by-layer,
 phase-by-subject and three-way difference-in-differences. Lower intent RMSE is better; lower (more negative)
 shake residual dB means stronger rejection. DeepSeek code review caught a count-only completeness check that could

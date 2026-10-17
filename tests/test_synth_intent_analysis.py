@@ -42,6 +42,9 @@ def test_analyze_uses_seed_as_unit_and_excludes_calibration_anchors():
     assert result["mean_delta_stochastic_minus_smooth"] == 1.25
     assert result["negative_seed_deltas"] == 1
     assert result["positive_seed_deltas"] == 1
+    assert result["t_95pct_ci_for_mean"][0] < 1.25 < result["t_95pct_ci_for_mean"][1]
+    assert result["bootstrap_95pct_ci_for_mean"][0] <= result["mean_delta_stochastic_minus_smooth"]
+    assert result["bootstrap_95pct_ci_for_mean"][1] >= result["mean_delta_stochastic_minus_smooth"]
     assert result["stratified"]["by_layer"]["far_only"]["n_seeds"] == 2
     assert result["stratified"]["by_subject"]["moving"]["n_seeds"] == 2
     assert result["stratified"]["by_cell"]["far_only__absent"]["n_seeds"] == 2

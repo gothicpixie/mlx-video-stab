@@ -15,6 +15,7 @@ from pathlib import Path
 from statistics import fmean, median, stdev
 
 import numpy as np
+from scipy.stats import t as student_t
 
 
 METRICS = {
@@ -60,6 +61,14 @@ def _bootstrap_mean_ci(values: list[float], *, draws: int = 20_000, seed: int = 
     return [float(x) for x in np.quantile(means, [0.025, 0.975])]
 
 
+def _t_mean_ci(values: list[float]) -> list[float] | None:
+    if len(values) < 2:
+        return None
+    mean = fmean(values)
+    half_width = float(student_t.ppf(0.975, df=len(values) - 1)) * stdev(values) / math.sqrt(len(values))
+    return [mean - half_width, mean + half_width]
+
+
 def _summarize(rows: list[dict]) -> dict:
     deltas = [row["delta_stochastic_minus_smooth"] for row in rows]
     return {
@@ -67,6 +76,7 @@ def _summarize(rows: list[dict]) -> dict:
         "mean_delta_stochastic_minus_smooth": fmean(deltas) if deltas else None,
         "median_delta_stochastic_minus_smooth": median(deltas) if deltas else None,
         "sd_between_seeds": stdev(deltas) if len(deltas) > 1 else None,
+        "t_95pct_ci_for_mean": _t_mean_ci(deltas),
         "bootstrap_95pct_ci_for_mean": _bootstrap_mean_ci(deltas, seed=0) if deltas else None,
         "negative_seed_deltas": sum(delta < 0 for delta in deltas),
         "positive_seed_deltas": sum(delta > 0 for delta in deltas),
@@ -245,6 +255,8 @@ def analyze(screen: dict) -> dict:
         "experimental_unit": "seed",
         "within_seed_aggregation": "unweighted mean over six main cells per intent mode",
         "contrast": "stochastic minus smooth; anchors excluded",
+        "primary_interval": "two-sided Student-t interval over independent seed-level contrasts",
+        "bootstrap_interval": "percentile seed bootstrap is a sensitivity check; coarse and unstable at small n",
         "interaction_contrasts": (
             "per-seed differences-in-differences for phase x layer, phase x subject, and phase x layer x subject"
         ),
