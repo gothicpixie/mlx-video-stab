@@ -3488,8 +3488,16 @@ bytes at 3840x2160 fp32, 11,119,680,000 bytes at 4K with flow downscale 2, and 7
 downscale 4. These are payload calculations, not measured process-memory values and not evidence that the
 selected flow resolution preserves output quality.
 
+The initial 4K execution smoke used a generated 3-frame 3840x2160/30 fps source, one RAFT iteration, no mesh or
+row residuals, `--flow-downscale auto --max-flow-corr-gib 8`, and the full-resolution renderer. Auto resolved to
+4; the report recorded the 706,982,400-byte payload estimate; the encoded output verified as 3 frames at
+3840x2160 and 30 fps with zero fit fallbacks. `/usr/bin/time -l` reported 717,176,832 bytes maximum resident
+set, 4,514,875,456 bytes peak memory footprint and zero swaps. This is a short synthetic execution smoke, not a
+quality comparison, a long-video test or an OOM guarantee on other workloads/devices.
+
 Focused verification: `tests/test_raft.py`, `tests/test_stabilize.py` and `tests/test_bench_runner.py` passed
 **153 tests**. The complete `.claude/verify.sh` passed **1,653 tests in 58.05 s**. CodeGraph sync/affected checks
-are recorded with this implementation. The next gate is to measure peak MLX/process memory on safe reference
-sizes, then run a controlled 4K smoke; evaluate any downscale's stabilization quality separately before
-advertising an automatic 4K preset.
+are recorded with this implementation; its graph heuristic found no linked test files, so the focused tests were
+run directly. The next gate is to measure peak MLX/process memory on additional safe reference sizes, then compare
+flow-downscale quality against full-resolution analysis on known-motion and real windows before advertising an
+automatic 4K preset.
