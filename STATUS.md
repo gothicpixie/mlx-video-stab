@@ -3033,8 +3033,8 @@ separately from its saved output and aligned mask, without another RAFT pass). G
 **0.51805/0.07810 px** RAFT jitter/wobble and **0.54210 px** KLT jitter. Mesh-only (global + mesh, rows
 disabled) measured **0.51648/0.06323 px** and **0.52542 px** KLT jitter. On this window mesh-only is close to
 the combined baseline for jitter but has higher wobble; global-only retains similar RAFT jitter while worsening
-both wobble and KLT jitter. The row-only arm remains pending, so this does not isolate the row contribution or
-the mesh/row interaction, and no visual review of the ablations has been performed yet.
+both wobble and KLT jitter. At this interim checkpoint, the row-only arm and blinded visual review were still
+pending; both were completed later in this entry.
 
 Final numerical arm (2026-10-16): `row-only` also completed with aligned 300-frame CFR output, reliable RAFT
 metrics, 299/299 supported pairs and zero RAFT/KLT fit fallbacks. It measured **0.53613 px RAFT jitter,
@@ -3045,6 +3045,23 @@ px and KLT jitter by 0.01668 px. Relative to mesh-only, adding rows in the combi
 0.00269 px while reducing wobble by 0.00959 px and KLT jitter by 0.00159 px. Row-only has higher RAFT and KLT
 jitter than the combined fit, with slightly lower wobble. These are paired point estimates from one already
 reviewed development window; adjacent frame pairs are not independent samples, and no significance or generality
-claim follows. The visible tree/floaty-motion explanation remains open until the planned blind comparison and
-position reversal are reviewed. Manifests and full-resolution rendered arms remain in the ignored
+claim follows. The blinded comparison is recorded below; causal attribution of the visible tree/floaty-motion
+artifact remains open. Manifests and full-resolution rendered arms remain in the ignored
 `out/bench/stage0_ablation_t060_10s_{global_only,mesh_only,row_only}/` directories.
+
+Blinded visual review (2026-10-17): Gemini 3.8 Flash reviewed each full-window pair at 640x360, then
+reviewed it again with panel positions reversed. Mesh-only and row-only were ties in both presentations.
+Global-only was preferred once, then called a tie after reversal; treat this as an order-sensitive tie, not a
+candidate win. Gemini noted that the low resolution and brief clip made fine trajectory differences hard to
+distinguish. This does not establish perceptual equivalence or localize the reported tree deformation.
+
+Decision: no residual arm has a reliable overall advantage on this window, and no default changes follow from
+this reproduction. The pairwise results are consistent with the conflicting point metrics: mesh-only has the
+lowest RAFT jitter, row-only the lowest wobble, and the combined fit the lowest KLT jitter. DeepSeek Flash via Pi
+reviewed the outcome and agreed this is a null screen, not a causal test: reliable support/fits establish
+measurement coverage, not perceptual validity; the single window cannot establish equivalence or generality.
+If identifying the tree artifact remains necessary, the next useful test is a separately pre-registered,
+position-reversed review using native-resolution, motion-magnified tree-canopy crops. Treat it as exploratory
+because this development window and its ablations have already been inspected; do not use it to select a new
+default. Review JSON and paired clips are under the ignored
+`out/bench/stage0_ablation_t060_10s_review/` directory.
