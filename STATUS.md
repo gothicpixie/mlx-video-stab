@@ -3065,3 +3065,21 @@ position-reversed review using native-resolution, motion-magnified tree-canopy c
 because this development window and its ablations have already been inspected; do not use it to select a new
 default. Review JSON and paired clips are under the ignored
 `out/bench/stage0_ablation_t060_10s_review/` directory.
+
+## Pre-registered S13 fixed-grid composition screen (2026-10-16)
+
+Use the already captured `out/bench/e02_baseline_s13_t032_10s/manifest.json`, `plan_r0.npz` and
+`motion_r0.npz`; do not run RAFT, decode footage, render, or change production behavior. First run
+`bench.real_motion_field_audit` to screen all captured pairs for the maximum absolute fitted image-plane
+rotation. Proceed to composition comparison only if at least one pair exceeds **0.5 degrees**. If not, report
+that this capture does not qualify and stop without interpreting the composition difference as a rotation or
+parallax test.
+
+For a qualifying capture, run `bench.real_composition_audit` with `--every 1 --samples 401`. The predeclared
+primary comparison is production `source_coords` versus `exact_composition`; the two high-pass charts are
+secondary descriptive outputs. Report max and mean point displacement across the four fixed probes and all
+300 output frames. Label a real-window counterexample to fixed-grid accumulation only if the rotation gate
+passes and the primary maximum displacement exceeds **1 px**, or the mean exceeds **0.5 px**. Also report
+probe-line deviation and source-bounds coverage; neither may be replaced by a composite score. This sparse
+probe audit cannot establish a fold elsewhere in the full warp or a perceptual improvement. Results from this
+already reviewed source are diagnostic and do not authorize a default change.
