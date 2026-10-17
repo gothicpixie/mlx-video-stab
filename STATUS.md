@@ -3952,11 +3952,11 @@ coverage above 0.94, and camera-fit RMSE below 1.1 px. In this seed, stochastic-
 rotational intent (gain 0.25–0.33 versus 0.00–0.07 for smooth cases). Its horizontal shake residual was -12.3 dB
 for smooth versus -1.4 dB for stochastic. The metric is `20*log10(output residual RMS / input shake RMS)`, so
 negative values mean attenuation and more-negative values mean stronger rejection. Seed 0 in the screen reversed
-the pilot's horizontal shake result; subsequent seeds continued to vary. Across the first six complete screen
-seeds, stochastic has higher x-intent RMSE in all six (mean +1.63 px; seed-level t interval [1.30, 1.96]). The
+the pilot's horizontal shake result; subsequent seeds continued to vary. Across the first seven complete screen
+seeds, stochastic has higher x-intent RMSE in all seven (mean +1.46 px; seed-level t interval [0.97, 1.95]). The
 other tracked metrics remain uncertain: y-intent and rotation-intent intervals span zero, as do all
-shake-residual intervals. These are descriptive interim results only (6/8 seeds), not population conclusions or a
-model-selection result. Across the 75 successful main cells so far, all far-layer poses are available; visibility
+shake-residual intervals. These are descriptive interim results only (7/8 seeds), not population conclusions or a
+model-selection result. Across the 84 successful main cells so far, all far-layer poses are available; visibility
 ranges 0.446–0.716, input-valid coverage 0.938–0.959 and pose-fit RMSE 0.493–1.805 px. Calibration anchors
 behave distinctly: shake-only removes the injected shake, while intent-only retains the shared drift and
 low-frequency pan.
@@ -3969,5 +3969,5 @@ phase-by-subject and three-way difference-in-differences. Lower intent RMSE is b
 shake residual dB means stronger rejection. DeepSeek code review caught a count-only completeness check that could
 have allowed a duplicate cell to stand in for a missing one; the analyzer now validates the exact designed cell
 set per mode and lists configured seeds with no main cells. A regression test covers duplicate cells. Keep the
-screen frozen and do not tune parameters to interim outcomes. The eight-seed run is active at 93/120 cells with
+screen frozen and do not tune parameters to interim outcomes. The eight-seed run is active at 103/120 cells with
 zero failures.
