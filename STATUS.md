@@ -3095,9 +3095,17 @@ inventory. The anchor itself is already inspected baseline-only data; any follow
 window is exploratory and cannot count as independent or held-out validation.
 
 First run `bench.real_motion_field_audit` on the anchor. Continue to a new 10-second baseline-only capture at
-t048–058 only if it remains reliable and at least one pair's absolute fitted image-plane rotation exceeds
+t048–058 only if the RAFT-derived motion remains reliable and at least one pair's absolute fitted image-plane rotation exceeds
 **0.5 degrees**. If this fails, stop and report that the available saved anchors did not yield a qualifying
 window; do not relax the threshold based on the result. If the 10-second baseline succeeds, freeze its plan and
 motion and run the already specified `--every 1 --samples 401` production-versus-exact-composition audit, with
 the same **>1 px maximum or >0.5 px mean** primary displacement criterion. Do not render a candidate or change
 production behavior.
+
+Screen results (2026-10-16): the full S13 t032–042 baseline has 599 reliable pairs, zero fallbacks, and a
+maximum absolute fitted rotation of **0.1081 degrees**, so it fails the preregistered gate. The selected t048–049
+anchor has 59 RAFT-supported pairs, zero RAFT fit fallbacks, and maximum absolute fitted rotation
+**1.3677 degrees** (2 pairs exceed 0.5 degrees), so it passes the motion gate. Its benchmark RAFT reliability
+flag is true; independent KLT is unavailable because 4 pairs failed. This is acceptable for the geometric
+motion/composition audit only, and cannot support a stabilization-quality claim. The rotation-screen reports
+are ignored under `out/bench/real_motion_field_audit/`; the baseline-only t048–058 capture is in progress.
