@@ -3001,3 +3001,27 @@ window was selected after its metric increase was observed. Any split-based rewe
 event is exploratory mechanism analysis, not a held-out confirmation. Freeze any formula and control windows
 before viewing a new candidate outcome; confirmation requires a new qualifying event selected from baseline-only
 evidence. Do not tune production behavior on either already-inspected window.
+
+## Pre-registered Stage 0 residual ablations on `00176.MTS` t060–070 (2026-10-16)
+
+This is a development reproduction of the previously reported tree deformation / floaty-motion concern, not a
+held-out test: this source window has already been visually reviewed. The fixed baseline is the successful
+`out/bench/current_source_t060_10s_baseline/manifest.json` capture (source SHA-256
+`e4b1f80d54dfa9089741486be297c6fe74d754fe127ec04dfe5a7edcf8d9fbb3`, t060–070, 600 deinterlaced fields,
+300 outputs at 30000/1001 fps, config digest
+`8e0378b967beaed72f14d572ad1dd6d0b480034c1b5a094c2d90c7562258a2fe`). Its baseline output is aligned and
+reliable with zero fit fallbacks, RAFT jitter 0.51917 px and wobble 0.05365 px.
+
+Before inspecting any new ablation output, run the existing `global-only`, `mesh-only` and `row-only` cases on
+the exact same source window, weights and baseline configuration, with `--eval-tracks` and the same output and
+evaluation frame rates. The existing combined baseline is the fourth arm. Each case differs only by disabling
+the named residual channel(s); global motion is refit as defined by the case. Compare masked RAFT and KLT
+jitter/wobble, fit/support failures, full-warp shape and coverage, and a blinded full-window review with panel
+positions reversed. Require exact 300-frame CFR alignment and zero evaluator fit fallbacks before interpreting
+quality metrics. If reliability or alignment fails, label that arm unscored. No parameter or threshold tuning
+is allowed from this window. A single window/reviewer can establish a reproduction or a local explanation only;
+any general quality claim requires a new source/window chosen without candidate outcomes.
+
+Decision: run this matched ablation before further local-support or source_highpass work. Use the residual arms
+to determine whether the reported deformation is present in the combined output and which fitted channel changes
+it; do not select a new default from this diagnostic comparison alone.
