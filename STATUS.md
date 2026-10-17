@@ -3035,3 +3035,16 @@ disabled) measured **0.51648/0.06323 px** and **0.52542 px** KLT jitter. On this
 the combined baseline for jitter but has higher wobble; global-only retains similar RAFT jitter while worsening
 both wobble and KLT jitter. The row-only arm remains pending, so this does not isolate the row contribution or
 the mesh/row interaction, and no visual review of the ablations has been performed yet.
+
+Final numerical arm (2026-10-16): `row-only` also completed with aligned 300-frame CFR output, reliable RAFT
+metrics, 299/299 supported pairs and zero RAFT/KLT fit fallbacks. It measured **0.53613 px RAFT jitter,
+0.05091 px wobble and 0.53842 px KLT jitter**. Across all four reliable fits, `mesh-only` has the lowest RAFT
+jitter (0.51648 px), `row-only` the lowest wobble (0.05091 px), and the combined baseline the lowest KLT
+jitter (0.52383 px). Relative to global-only, mesh-only improves RAFT jitter by 0.00157 px, wobble by 0.01487
+px and KLT jitter by 0.01668 px. Relative to mesh-only, adding rows in the combined fit raises RAFT jitter by
+0.00269 px while reducing wobble by 0.00959 px and KLT jitter by 0.00159 px. Row-only has higher RAFT and KLT
+jitter than the combined fit, with slightly lower wobble. These are paired point estimates from one already
+reviewed development window; adjacent frame pairs are not independent samples, and no significance or generality
+claim follows. The visible tree/floaty-motion explanation remains open until the planned blind comparison and
+position reversal are reviewed. Manifests and full-resolution rendered arms remain in the ignored
+`out/bench/stage0_ablation_t060_10s_{global_only,mesh_only,row_only}/` directories.
