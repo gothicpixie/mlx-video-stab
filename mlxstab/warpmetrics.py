@@ -61,12 +61,25 @@ def tap_weights(kernel, d):
 def _axis_full_support(coord, n, kernel, tol):
     """True where every tap with ``|weight| > tol`` on one axis is inside ``[0, n-1]``."""
     taps = _TAPS[kernel]
-    x0 = np.floor(coord) - (taps // 2 - 1)
+    coord = np.asarray(coord, np.float64)
+    finite = np.isfinite(coord)
+    # Every tap is necessarily inside for finite coordinates farther than the kernel radius from either edge.
+    # Only the narrow border bands need the exact weight test; a full-frame mesh would otherwise repeat up to six
+    # expensive tap-weight calculations for every interior output pixel.
+    margin = taps // 2
+    edge = (~finite) | (coord < margin) | (coord > n - 1 - margin)
     full = np.ones(coord.shape, bool)
+    if not np.any(edge):
+        return full
+    c = coord[edge]
+    x0 = np.floor(c) - (taps // 2 - 1)
+    edge_full = np.ones(c.shape, bool)
     for t in range(taps):
         idx = x0 + t
-        w = tap_weights(kernel, coord - idx)
-        full &= ((idx >= 0) & (idx <= n - 1)) | (np.abs(w) <= tol)
+        with np.errstate(invalid="ignore", over="ignore"):
+            w = tap_weights(kernel, c - idx)
+        edge_full &= ((idx >= 0) & (idx <= n - 1)) | (np.abs(w) <= tol)
+    full[edge] = edge_full
     return full
 
 

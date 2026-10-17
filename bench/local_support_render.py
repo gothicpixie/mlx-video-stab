@@ -514,6 +514,8 @@ def render_local_support(manifest_path, *, source_path=None, output, mask, repor
                                               f"{entry['plan_frame']}: {type(exc).__name__}: {exc}") from exc
             per_frame.append(stats)
             rendered += 1
+            if rendered % 30 == 0 or rendered == out_count:
+                print(f"rendered {rendered}/{out_count} output frames", file=sys.stderr, flush=True)
 
         for i, t in enumerate(indices):
             if lock is not None:

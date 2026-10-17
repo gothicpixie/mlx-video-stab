@@ -25,6 +25,22 @@ def assert_json_safe(obj):
     json.dumps(obj, allow_nan=False)
 
 
+def test_axis_full_support_edge_optimization_matches_all_tap_reference():
+    rng = np.random.default_rng(901)
+    for kernel, taps in WM._TAPS.items():
+        for n in (1, 2, 3, 7, 32):
+            coords = rng.uniform(-8.0, n + 8.0, 500)
+            coords[:3] = [np.nan, np.inf, -np.inf]
+            x0 = np.floor(coords) - (taps // 2 - 1)
+            expected = np.ones(coords.shape, bool)
+            for tap in range(taps):
+                idx = x0 + tap
+                with np.errstate(invalid="ignore", over="ignore"):
+                    weight = WM.tap_weights(kernel, coords - idx)
+                expected &= ((idx >= 0) & (idx <= n - 1)) | (np.abs(weight) <= 1e-6)
+            assert np.array_equal(WM._axis_full_support(coords, n, kernel, 1e-6), expected)
+
+
 # --------------------------------------------------------------------------------------
 # shape: identity, similarity, anisotropy, shear
 # --------------------------------------------------------------------------------------
