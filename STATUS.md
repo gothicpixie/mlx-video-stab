@@ -3682,8 +3682,37 @@ bias, and boundary effects remain possible. Fit-inlier p10 was 1.0 and there wer
 signals again did not expose the scale-4 difference.
 
 This is one seed and one far-only scene, without parallax or a moving subject; neither result generalizes to
-real footage or identifies an acceptable scale. The next experiment is a small static-camera and signed,
-known-pan control with the same flow and renderer settings. Check whether path error is near zero for static
-input and whether pan gain and sign track the intended path. Only then sweep smoother strength to diagnose
-low-frequency suppression. Keep scale selection unchanged and treat scale 4 as an observed quality-risk
-option pending more scenes and replication. Reports and videos remain under ignored `out/bench/`.
+real footage or identifies an acceptable scale. The exact-motion follow-up in `bench/path_smoother_gain_audit.py`
+isolates the planner smoother from optical flow. With exact static and signed constant-pan Fits, `gauss` with
+`sigma=0` preserved the path exactly and static-camera drift was zero. The production L1 settings
+(`budget=0.04`, `fidelity=0.1`) held both +0.5 and -0.5 px/frame ramps stationary across 60 frames, producing
+29.5 px endpoint error despite exact motion inputs. This reproduces the direction and order of magnitude of the
+earlier full-stabilization drift without flow, so the smoother is a direct cause for linear pan suppression in
+that control.
+
+An exact-Fit L1 fidelity screen with a 0.5 px/frame intended pan plus 6 px-std low-frequency camera jitter,
+five noise seeds and both pan directions exposed a tradeoff. Median path gain at fidelity 0.1 was zero in both
+directions; at fidelity 1 it was 0.42 / 0.54, at fidelity 3 it was 0.88 / 0.85, and at fidelity 10 it was
+0.96 / 0.98 (positive / negative pan). Median high-pass velocity error at fidelity 3 was 0.027 / 0.033
+px/frame versus 5.00 px/frame in the raw path; at fidelity 10 it rose to 0.167 / 0.169. This is planner-only
+evidence from five synthetic noise traces, not rendered quality or a default-selection result. The gain is
+directionally symmetric in the medians, but individual seeds vary; path gain alone also cannot rank visual
+quality.
+
+The matched full RAFT scale-2 rerun at fidelity 3 used the same 60-frame global-shutter far-only seed-13 source,
+analysis/evaluation settings and renderer as the existing fidelity-0.1 run; only `Config.fidelity` changed.
+There were zero fit fallbacks in either run. The exact camera-path audit improved total path RMSE from 18.06 to
+3.93 px, and clip x-drift error from -59.84 to -5.14 px. Fixed-evaluator jitter rose from 0.0294 to 0.1977 px
+(6.7x), while raw-input jitter was 6.72 px; both settings reduced jitter substantially relative to raw. Wobble
+was 0.01183 / 0.01271 px. Stabilization time was 49.92 / 49.39 s (fidelity 0.1 / 3), so the path-fidelity
+change had no material runtime cost in this run.
+
+Gemini 3.8 Flash via Vertex reviewed the paired outputs in original and position-reversed order. It returned
+ties in both, explicitly saying the noise-texture scene lacked recognizable structure for visual stabilization
+assessment. Treat that review as inconclusive, not as evidence that the outputs are equivalent. The exact-Fit
+five-seed screen and this rendered run agree that higher fidelity can preserve intended pan while retaining
+strong jitter reduction, but this is still one rendered source and one pan profile. Do not change the production
+fidelity default yet. Next test both pan directions and speeds, sinusoidal intended motion, and independent
+jitter seeds in rendered layered scenes; include a natural real clip before choosing the path objective. Keep
+scale selection unchanged and treat scale 4 as an observed quality-risk option. Reports and videos remain under
+ignored `out/bench/`.
