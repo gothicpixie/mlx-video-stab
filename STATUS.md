@@ -3545,3 +3545,56 @@ differences are small, there is no run variance, the scenes are from one source,
 preset. Next compare scales 2 and 4 on a distinct source and longer real windows; separately validate quality
 on actual 4K footage before setting an acceptance threshold or changing auto-selection behavior. Manifests,
 blinded pairs, Gemini responses and the positional-bias audit remain under ignored `out/bench/`.
+
+### Distinct-source ten-second follow-up on `00177.MTS` (2026-10-17)
+
+The next matched screen used `00177.MTS` at 50–60 s, a separate 10 s low-light dance scene with no observed cut.
+Both runs used native 59.940 fps output, the same baseline configuration except stabilization `flow_downscale`,
+20 stabilization iterations, and a 12-iteration RAFT scale-2 evaluator. Each output had 600 aligned frames and
+599 supported consecutive pairs. The source SHA-256 is
+`8c5d98d15448ad0557537ba9d02a28fc426185b4e32bdf1be3eb4964fdbea714`. Scale 2 took 537.7 s to stabilize;
+scale 4 took 213.6 s (2.52x faster).
+
+| Flow scale | Output RAFT jitter (px) | Output RAFT wobble (px) | Fit fallbacks | Mean / max invalid-mask fraction |
+| ---: | ---: | ---: | ---: | ---: |
+| 2 | 0.15611 | 0.05096 | 0 / 599 | 0.00637 / 0.03033 |
+| 4 | 0.89237 | 0.07570 | 0 / 599 | 0.02293 / 0.09388 |
+
+The input measured 0.26891 px jitter and 0.05352 px wobble. On this window, scale 2 reduced jitter by 42%; scale
+4's jitter was 3.32x the raw input and 5.72x the scale-2 output. Scale 4 wobble was 41% above the raw input and
+49% above scale 2. The independent KLT metric was unavailable: two input pairs and two scale-2 / three scale-4
+output pairs failed track support, so it cannot validate the RAFT direction here.
+
+To localize the difference without changing metric definitions, `bench/flow_scale_localization.py` re-evaluated
+the two saved outputs with the same fixed RAFT evaluator. It first checked manifest provenance, then confirmed
+whole-window jitter, wobble and fallback counts against the original metrics (jitter absolute error below
+4e-16 px; wobble identical; fallback counts identical). The 599 fitted pairs were split into ten contiguous
+approximately one-second blocks **after** applying the existing 15-frame high-pass across the full clip; there
+was no per-block refit or edge-specific smoothing. Scale-4 jitter exceeded scale 2 in all ten blocks:
+
+| Window (s) | Scale 2 jitter (px) | Scale 4 jitter (px) | Scale 2 wobble (px) | Scale 4 wobble (px) | Scale 2 / 4 FB-valid fraction |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| 0–1 | 0.201 | 1.957 | 0.074 | 0.121 | 0.871 / 0.827 |
+| 1–2 | 0.318 | 2.228 | 0.081 | 0.155 | 0.893 / 0.832 |
+| 2–3 | 0.120 | 0.501 | 0.032 | 0.042 | 0.960 / 0.941 |
+| 3–4 | 0.084 | 0.530 | 0.031 | 0.036 | 0.964 / 0.942 |
+| 4–5 | 0.085 | 0.526 | 0.031 | 0.033 | 0.970 / 0.962 |
+| 5–6 | 0.093 | 0.436 | 0.034 | 0.037 | 0.958 / 0.960 |
+| 6–7 | 0.108 | 0.762 | 0.039 | 0.049 | 0.948 / 0.938 |
+| 7–8 | 0.187 | 0.884 | 0.063 | 0.109 | 0.908 / 0.901 |
+| 8–9 | 0.224 | 0.603 | 0.077 | 0.095 | 0.952 / 0.932 |
+| 9–10 | 0.141 | 0.514 | 0.048 | 0.081 | 0.961 / 0.947 |
+
+This is a clip-wide regression with a particularly large first two seconds, not a single isolated failure. Both
+scales had zero fit fallbacks throughout, so fallback count would not detect it. The lower scale-4
+forward/backward-valid fraction in most blocks is diagnostic context only, not a calibrated error measure. Gemini
+3.8 Flash's original-order judgment was a tie and the position-reversed judgment preferred scale 2; one complete
+pair is insufficient to claim a visual preference, so the visual review remains inconclusive. This single
+window localizes a failure but does not establish its prevalence across recordings. The machine-readable blocks,
+replay verification and video artifacts are retained under ignored `out/bench/downscale_quality_00177_t050_`*.
+
+Decision: treat scale 4 as a runtime/memory option with an observed quality risk, not as a generally acceptable
+quality/runtime tradeoff. Do not implement a gate based on fallback count. Before choosing a gate, test a
+candidate independent signal (such as flow consistency or scale-2/scale-4 disagreement) on additional scenes
+and measure whether it flags actual output regressions without rejecting stable scale-4 windows. Keep the auto
+resolver's current opt-in behavior and do not claim 4K quality parity.
