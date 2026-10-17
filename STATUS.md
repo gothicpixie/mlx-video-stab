@@ -3080,9 +3080,11 @@ primary comparison is production `source_coords` versus `exact_composition`; the
 secondary descriptive outputs. Report max and mean point displacement across the four fixed probes and all
 300 output frames. Label a real-window counterexample to fixed-grid accumulation only if the rotation gate
 passes and the primary maximum displacement exceeds **1 px**, or the mean exceeds **0.5 px**. Also report
-probe-line deviation and source-bounds coverage; neither may be replaced by a composite score. This sparse
-probe audit cannot establish a fold elsewhere in the full warp or a perceptual improvement. Results from this
-already reviewed source are diagnostic and do not authorize a default change.
+probe-line deviation and source-bounds coverage; neither may be replaced by a composite score. Crossing the
+displacement threshold is a real-window non-equivalence screen only; attribute it to fixed-grid residual
+placement only after matching the temporal filtering. This sparse probe audit cannot establish a fold elsewhere
+in the full warp or a perceptual improvement. Results from this already reviewed source are diagnostic and do
+not authorize a default change.
 
 ## Baseline-only rotation-window selection (2026-10-16)
 
@@ -3095,8 +3097,8 @@ inventory. The anchor itself is already inspected baseline-only data; any follow
 window is exploratory and cannot count as independent or held-out validation.
 
 First run `bench.real_motion_field_audit` on the anchor. Continue to a new 10-second baseline-only capture at
-t048–058 only if the RAFT-derived motion remains reliable and at least one pair's absolute fitted image-plane rotation exceeds
-**0.5 degrees**. If this fails, stop and report that the available saved anchors did not yield a qualifying
+t048–058 only if the RAFT-derived motion remains reliable and at least one pair's absolute fitted image-plane
+rotation exceeds **0.5 degrees**. If this fails, stop and report that the available saved anchors did not yield a qualifying
 window; do not relax the threshold based on the result. If the 10-second baseline succeeds, freeze its plan and
 motion and run the already specified `--every 1 --samples 401` production-versus-exact-composition audit, with
 the same **>1 px maximum or >0.5 px mean** primary displacement criterion. Do not render a candidate or change
@@ -3117,5 +3119,31 @@ wobble was **0.496 -> 0.451 px**. The full-window motion audit also passes the *
 599 fits, zero fallbacks, maximum absolute fitted rotation **1.3677 degrees**, with 2 pairs above the threshold.
 KLT path metrics are unavailable (4 input and 5 output failed pairs), as anticipated from the one-second anchor;
 this window is used only for the fitted-map geometry check. Its saved plan and motion are under
-`out/bench/stage0_composition_t048_10s_baseline/`. The full-frame composition audit is running; no composition
-result or production change is yet recorded.
+`out/bench/stage0_composition_t048_10s_baseline/`.
+
+Composition screen result: `bench.real_composition_audit` ran with `--every 1 --samples 401`, so the report
+contains all 600 deinterlaced-field plan indices. The output-rate subset (even plan indices 0–598, 300 frames)
+also crosses the predeclared map-difference screen. Production versus unfiltered exact composition has **276.27
+px maximum / 63.10 px mean** point displacement across the four probes on that subset; exact composition has
+**153.30 px maximum / 49.08 px mean** mapped-line deviation and **86.53% minimum** probe coverage. The
+source-highpass candidate differs from production by **177.55 / 13.77 px** maximum / mean displacement, with
+**57.60 px maximum** line deviation; the reference-highpass candidate differs by **184.02 / 13.79 px**, with
+**60.37 px maximum** line deviation. All four probes stayed finite, but no dense fold audit was run.
+
+Interpretation boundary: this is a large real-window map discrepancy, not yet an isolated proof that fixed-grid
+placement is the cause or that exact composition is better. The base `Plan.G` is shared, but the current exact
+mode composes raw residuals while production uses separately time-smoothed cumulative mesh and row fields;
+their filtering and sampling charts differ. KLT is unavailable and sparse line probes do not evaluate visual
+quality. The 600-field sweep exceeds the 300 encoded-frame scope originally stated; the output-rate summary above
+uses even indices, while the all-field report remains exploratory. No default or production change follows.
+
+Exploratory same-base smoothing ablation (pre-registered before its result): using the same saved t048–058
+Plan.G and captured motion, form raw cumulative mesh/row fields with no temporal smoother and compare
+`source_coords` against `candidate_source_coords(..., highpass=False)` at identical four probes for the 300
+output-rate frames (even indices 0–598). This removes the production-vs-candidate temporal-filter mismatch
+while retaining the same virtual path. Reuse the **>1 px maximum or >0.5 px mean** displacement screen only as
+a local geometry criterion: a mismatch then shows that identity smoothing does not eliminate the difference
+between fixed-grid accumulation and source-space composition on these fitted maps; a match indicates that
+filtering likely explains the prior screen. Either result is exploratory on an already inspected window and
+cannot select a default or establish perceptual quality. The audit report is under
+`out/bench/real_composition_audit/s13_t048_10s.json`.
