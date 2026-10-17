@@ -3933,7 +3933,24 @@ minimum and raises the shake-band boundary to keep it disjoint from intent harmo
 values are plumbing checks only, not evidence for selecting or tuning stabilization. A smaller, frame-relative
 near anchor also restored the full-suite no-fallback flow fixture while keeping near-layer visibility.
 
-Next build a sequential, resumable 2x2x3 factorial runner with at least eight paired seeds, calibration anchors,
-frozen configuration, and explicit failure rows. Increase the truth-map sampling density enough for thin layers;
-run one resolution/frame-length sensitivity check. Keep path retention, shake rejection, layer distortion, crop,
-and failure rate separate. The 96-frame smoke and Gemini border judgment do not substitute for this factorial.
+The next experiment is the predeclared sequential 2x2x3 screen with at least eight paired seeds, calibration
+anchors, frozen configuration, and explicit failure rows. Keep path retention, shake rejection, layer distortion,
+crop, and failure rate separate. Include a small resolution/frame-length sensitivity check after the main screen.
+The 96-frame smoke and Gemini border judgment do not substitute for the factorial.
+
+### Factorial execution harness (2026-10-17)
+
+`bench.synth_intent_factorial` now builds the fixed 12-cell intent x layer-motion x subject design plus per-seed
+intent-only, shake-only and neither anchors. It pairs scene, intent and shake seeds across cells, freezes baseline
+stabilizer/evaluator settings, hashes relevant source files into the experiment identity, and runs cells
+sequentially. Each cell writes a standard manifest, production plan, truth sidecar, and separate truth-aware metric
+report. Atomic `screen.json` checkpoints retain failed rows and resume only matching successful provenance; an
+interrupted metrics step reuses the already successful run. The dry-run resolved 15 cells per seed / 120 runs for
+the default eight seeds. The one-seed pilot (`out/bench/synth_intent_pilot_seed17/`) completed all 15 cells with
+zero failures, all 96 frames available for every layer, far-layer visibility about 0.63–0.69, input-valid
+coverage above 0.94, and camera-fit RMSE below 1.1 px. In this seed, stochastic-path cases retained more injected
+rotational intent (gain 0.25–0.33 versus 0.00–0.07 for smooth cases), while smooth cases attenuated horizontal
+shake more strongly (-12 dB versus about -1.5 dB). This is a provisional single-seed signal only, not a result
+for selecting a model. Calibration anchors behave distinctly: shake-only removes the injected shake, while
+intent-only retains the shared drift and low-frequency pan. The full eight-seed screen is now the next step; do
+not tune parameters to this pilot.
