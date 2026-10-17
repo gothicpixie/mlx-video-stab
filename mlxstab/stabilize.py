@@ -174,12 +174,13 @@ class Motion:
     n_frames: int = 0          # frames seen
 
 
-def analyze(frames, flow_fn, cfg, W, H, fps, log=None, masks=None, on_step=None, stride=1, threads=True):
+def analyze(frames, flow_fn, cfg, W, H, fps, log=None, masks=None, on_step=None, stride=1, threads=True,
+            flow_sample_callback=None):
     """Pass 1: motion fit for each consecutive analysed pair (every `stride`-th frame). `frames` yields uint8 [H,W,3];
     flow_fn(a, b, key) -> [H,W,2] mx, or flow_fn.bidir(a, b) -> (forward, backward). While the GPU computes the next flow, a worker
     thread fits the previous pair on the CPU."""
     from concurrent.futures import ThreadPoolExecutor
-    mot = Motion(W, H, fps, stride=stride); prev = None; rng = np.random.default_rng(cfg.seed)
+    mot = Motion(W, H, fps, stride=stride); prev = None; prev_i = None; rng = np.random.default_rng(cfg.seed)
     gc, gr = cfg.mesh
     pool = ThreadPoolExecutor(1) if threads else None; pend = []
     fit = lambda obs: MO.fit_motion(obs, (max(gc, 1), max(gr, 1)), cfg.rs_rows, rng=rng, model=cfg.model)
@@ -192,13 +193,27 @@ def analyze(frames, flow_fn, cfg, W, H, fps, log=None, masks=None, on_step=None,
         if prev is not None:
             if hasattr(flow_fn, "bidir"): Ff, Bf = flow_fn.bidir(prev, fr)
             else: Ff = flow_fn(prev, fr, "f"); Bf = flow_fn(fr, prev, "b")
+            raw_grid = None
+            if flow_sample_callback is not None:
+                ys = np.arange(cfg.step // 2, H, cfg.step)
+                xs = np.arange(cfg.step // 2, W, cfg.step)
+                iy, ix = mx.array(ys), mx.array(xs)
+                forward_grid = Ff[iy][:, ix]
+                backward_grid = Bf[iy][:, ix]
+                mx.eval(forward_grid, backward_grid)
+                raw_grid = (xs, ys, np.asarray(forward_grid, dtype=np.float32),
+                            np.asarray(backward_grid, dtype=np.float32))
             obs = MO.observe(Ff, Bf, cfg.step)
             if cm is not None or pm is not None: MO.exclude_masked(obs, pm, cm)
+            if flow_sample_callback is not None:
+                xs, ys, forward_grid, backward_grid = raw_grid
+                flow_sample_callback(prev_i, i, xs, ys, forward_grid, backward_grid,
+                                     obs.valid.copy(), obs.fb_err.copy(), obs.fb_tol.copy(), obs.fb_inside.copy())
             if pool: pend.append(pool.submit(fit, obs))
             else: mot.fits.append(fit(obs))
             while len(pend) > 2: mot.fits.append(pend.pop(0).result())
             if log and i % 20 == 0: log(f"flow {i}")
-        prev = fr; pm = cm
+        prev = fr; prev_i = i; pm = cm
     for f in pend: mot.fits.append(f.result())
     if pool: pool.shutdown()
     return mot
@@ -227,6 +242,39 @@ MOTION_SCHEMA_V1 = "mlxstab.motion/1"   # legacy layout (no support-mass / cycle
 MOTION_SCHEMAS = (MOTION_SCHEMA_V1, MOTION_SCHEMA_V2, MOTION_SCHEMA_V3, MOTION_SCHEMA)
 MOTION_SCHEMAS_WITH_SUPPORT = (MOTION_SCHEMA_V2, MOTION_SCHEMA_V3, MOTION_SCHEMA)   # /1 predates support mass
 MOTION_SCHEMAS_WITH_CYCLE = (MOTION_SCHEMA_V3, MOTION_SCHEMA)                        # /1 and /2 predate cycle maps
+FLOW_SAMPLES_SCHEMA = "mlxstab.flow_samples/1"
+
+
+def save_flow_samples_npz(samples, path, W, H, fps, stride, step, n_frames):
+    """Save raw restored RAFT vectors on the exact grid consumed by ``motion.observe``.
+
+    Forward and backward vectors are sampled at grid-cell centres in source-frame pixels, before cycle
+    validation, masking, robust fitting or planning. The companion validity fields record cycle results and
+    any source/destination mask rejection immediately before robust fitting. This bounded diagnostic is much
+    smaller than retaining both full-resolution fields while preserving every vector that enters the fit.
+    """
+    if not samples:
+        raise ValueError("cannot save an empty flow-sample capture")
+    pair_indices = np.asarray([[s[0], s[1]] for s in samples], np.int32)
+    xs, ys = np.asarray(samples[0][2], np.int32), np.asarray(samples[0][3], np.int32)
+    forward = np.stack([s[4] for s in samples]).astype(np.float32, copy=False)
+    backward = np.stack([s[5] for s in samples]).astype(np.float32, copy=False)
+    grid_shape = (len(samples), len(ys), len(xs))
+    valid = np.stack([s[6] for s in samples]).reshape(grid_shape).astype(bool, copy=False)
+    fb_err = np.stack([s[7] for s in samples]).reshape(grid_shape).astype(np.float32, copy=False)
+    fb_tol = np.stack([s[8] for s in samples]).reshape(grid_shape).astype(np.float32, copy=False)
+    fb_inside = np.stack([s[9] for s in samples]).reshape(grid_shape).astype(bool, copy=False)
+    expected = (len(samples), len(ys), len(xs), 2)
+    if forward.shape != expected or backward.shape != expected:
+        raise ValueError(f"flow sample shape mismatch: expected {expected}, got {forward.shape}, {backward.shape}")
+    if any(not np.array_equal(np.asarray(s[2]), xs) or not np.array_equal(np.asarray(s[3]), ys) for s in samples):
+        raise ValueError("flow sample grid changed during capture")
+    np.savez_compressed(
+        path, schema=np.asarray(FLOW_SAMPLES_SCHEMA), width=np.int32(W), height=np.int32(H),
+        n_frames=np.int32(n_frames), fps=np.float64(fps), stride=np.int32(stride), step=np.int32(step),
+        pair_indices=pair_indices, x=xs, y=ys, forward=forward, backward=backward,
+        forward_finite=np.isfinite(forward).all(axis=-1), backward_finite=np.isfinite(backward).all(axis=-1),
+        fit_candidate_valid=valid, fb_err=fb_err, fb_tol=fb_tol, fb_inside=fb_inside)
 
 
 def _support_mass_or_zeros(mass, shape):
@@ -823,7 +871,7 @@ def _distortion(Gm, W, H):
 
 def stabilize(src, out, mask=None, weights=None, cfg=None, roll=None, start=None, duration=None, fps_out=None,
               flow_fn=None, log=print, report=None, on_step=None, dump_motion=None, dump_motion_npz=None,
-              dump_plan=None, diag_every=0, diag_callback=None):
+              dump_plan=None, diag_every=0, diag_callback=None, dump_flow_samples_npz=None):
     cfg = cfg or Config()
     if cfg.warp_diag and diag_callback is not None and diag_every:
         raise ValueError("choose all-frame warp_diag or sampled diagnostics, not both")
@@ -833,7 +881,18 @@ def stabilize(src, out, mask=None, weights=None, cfg=None, roll=None, start=None
     frames, fps, (W, H) = media.decode(src, info, start, duration); frames = media.prefetch(frames)
     if info["interlaced"]: log(f"interlaced ({info['field_order']}): bwdif send_field -> {fps:.3f} fps")
     import time; t0 = time.perf_counter()
-    mot = analyze(frames, flow_fn, cfg, W, H, fps, log, on_step=on_step, stride=cfg.analysis_stride); t1 = time.perf_counter()
+    flow_samples = [] if dump_flow_samples_npz else None
+
+    def capture_flow_sample(i0, i1, xs, ys, forward, backward, valid, fb_err, fb_tol, fb_inside):
+        flow_samples.append((i0, i1, xs.copy(), ys.copy(), forward, backward,
+                             valid, fb_err, fb_tol, fb_inside))
+
+    mot = analyze(frames, flow_fn, cfg, W, H, fps, log, on_step=on_step, stride=cfg.analysis_stride,
+                  flow_sample_callback=capture_flow_sample if flow_samples is not None else None)
+    if flow_samples is not None:
+        save_flow_samples_npz(flow_samples, dump_flow_samples_npz, W, H, fps, cfg.analysis_stride,
+                              cfg.step, mot.n_frames)
+    t1 = time.perf_counter()
     if dump_motion:
         import pickle; Path(dump_motion).write_bytes(pickle.dumps(mot))
     if dump_motion_npz:

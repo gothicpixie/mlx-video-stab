@@ -57,6 +57,7 @@ class RunOptions:
     diag_every: int = 0
     dump_plan: bool = False            # capture the retained repeat's Plan as a compressed, non-pickle NPZ
     dump_motion: bool = False          # capture the retained repeat's fitted Motion as a compressed, non-pickle NPZ
+    dump_flow_samples: bool = False    # capture restored flow vectors on the exact fitting grid (repeat 0 only)
     lock: str = "auto"                 # auto | on | off
     lock_chunk: int = 0
     lock_pause_s: float = 0.0
@@ -244,7 +245,7 @@ def _empty_manifest(opts, run_dir):
         "metrics": {"definitions_version": None, "input": None, "output": None,
                     "cadence": None, "reliability": None},
         "diagnostics": None,
-        "outputs": {"video": None, "mask": None, "report": None, "plan": None, "motion": None,
+        "outputs": {"video": None, "mask": None, "report": None, "plan": None, "motion": None, "flow_samples": None,
                     "retained_repeat": 0, "manifest": None,
                     "encoded_frames": None, "encoded_pts": None, "mask_pts": None},
         "repeats": [],
@@ -272,7 +273,7 @@ def _checkpoint(man, path, stage, required=False):
 # --------------------------------------------------------------------------------------
 
 def _experiment_identity(opts, cfg_kwargs, source_hashes, weights_sha, code, eval_cfg, output_fps, eval_vf, diag_every,
-                         dump_plan=False, dump_motion=False):
+                         dump_plan=False, dump_motion=False, dump_flow_samples=False):
     return {
         "source": {"sha256": source_hashes.get("sha256"), "window": source_hashes.get("window"),
                    "preprocessing": source_hashes.get("preprocessing"),
@@ -284,7 +285,8 @@ def _experiment_identity(opts, cfg_kwargs, source_hashes, weights_sha, code, eva
         "evaluation": eval_cfg,
         "seed_policy": {"config_seed": cfg_kwargs.get("seed"), "synthetic_seed": opts.seed},
         "diagnostics": {"every": int(diag_every)},
-        "capture": {"dump_plan": bool(dump_plan), "dump_motion": bool(dump_motion)},
+        "capture": {"dump_plan": bool(dump_plan), "dump_motion": bool(dump_motion),
+                    "dump_flow_samples": bool(dump_flow_samples)},
         "code": {"revision": (code or {}).get("revision"), "files": (code or {}).get("files"),
                  "dirty_relevant": (code or {}).get("dirty_relevant")},
     }
@@ -295,12 +297,15 @@ def run_case(opts: RunOptions) -> dict:
     man_path = run_dir / "manifest.json"
     plan_path = run_dir / "plan_r0.npz" if opts.dump_plan else None
     motion_path = run_dir / "motion_r0.npz" if opts.dump_motion else None
+    flow_samples_path = run_dir / "flow_samples_r0.npz" if opts.dump_flow_samples else None
     if not opts.overwrite and man_path.exists():
         raise FileExistsError(f"refusing to overwrite existing evidence {man_path}; pass --overwrite to reuse it")
     if plan_path is not None and not opts.overwrite and plan_path.exists():
         raise FileExistsError(f"refusing to overwrite existing plan dump {plan_path}; pass --overwrite to reuse it")
     if motion_path is not None and not opts.overwrite and motion_path.exists():
         raise FileExistsError(f"refusing to overwrite existing motion dump {motion_path}; pass --overwrite to reuse it")
+    if flow_samples_path is not None and not opts.overwrite and flow_samples_path.exists():
+        raise FileExistsError(f"refusing to overwrite existing flow-sample dump {flow_samples_path}; pass --overwrite to reuse it")
     run_dir.mkdir(parents=True, exist_ok=True)
     man = _empty_manifest(opts, run_dir)
     man["outputs"]["manifest"] = str(man_path)
@@ -390,7 +395,7 @@ def run_case(opts: RunOptions) -> dict:
 
         identity = _experiment_identity(opts, cfg_kwargs, man["source"], man["weights"]["sha256"], man["code"],
                                         man["evaluation"], output_fps, eval_vf, opts.diag_every, opts.dump_plan,
-                                        opts.dump_motion)
+                                        opts.dump_motion, opts.dump_flow_samples)
         identity["flow_backend"]["weights_sha256"] = man["flow_backend"]["weights_sha256"]
         identity["flow_backend"]["canonical_weights_sha256"] = (
             man["flow_backend"].get("weight_equivalence", {}).get("canonical_sha256"))
@@ -446,6 +451,7 @@ def run_case(opts: RunOptions) -> dict:
                             start=opts.start, duration=opts.duration, fps_out=output_fps,
                             report=str(rep_path), on_step=gate, diag_every=opts.diag_every if cb else 0,
                             diag_callback=cb, dump_motion_npz=rep_dump_motion, dump_plan=rep_dump_plan,
+                            dump_flow_samples_npz=str(flow_samples_path) if (flow_samples_path is not None and r == 0) else None,
                             log=(lambda m: opts.log(f"[{case.name}] {m}")) if opts.log else (lambda m: None))
             wall = time.perf_counter() - t0
             repeat_walls.append(wall)
@@ -467,6 +473,8 @@ def run_case(opts: RunOptions) -> dict:
                     man["outputs"]["plan"] = str(plan_path)
                 if motion_path is not None:
                     man["outputs"]["motion"] = str(motion_path)
+                if flow_samples_path is not None:
+                    man["outputs"]["flow_samples"] = str(flow_samples_path)
                 man["outputs"]["retained_repeat"] = 0
             _checkpoint(man, man_path, f"stabilize_r{r}")
         man["runtime_s"]["stabilize_wall"] = sum(repeat_walls)

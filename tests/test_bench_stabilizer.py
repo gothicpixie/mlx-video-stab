@@ -52,6 +52,11 @@ def test_manifest_command_replays_single_backend_runner(tmp_path):
     assert "--eval-tracks" in command
     assert "--dump-motion" in command
 
+    command = BS._runner_command("input.mp4", tmp_path / "torch-mps", "torch-mps",
+                                 "mlx.safetensors", "torch.pth", 1.5, 2.0,
+                                 12, 2, 12, 2, 3, 7, True, "30000/1001", "off", True, True)
+    assert "--dump-flow-samples" in command
+
 
 def test_failed_backend_writes_failure_json_without_comparison_table(tmp_path, monkeypatch):
     root = tmp_path / "comparison"
@@ -79,11 +84,11 @@ def test_compare_honors_torch_first_order(tmp_path, monkeypatch):
     monkeypatch.setattr(BS.runner, "make_synthetic", make_source)
     calls = []
     def fail_first(opts):
-        calls.append((opts.backend, opts.dump_motion))
+        calls.append((opts.backend, opts.dump_motion, opts.dump_flow_samples))
         return {"status": "failure", "flow_backend": {"name": opts.backend},
                 "error": {"stage": "model_construct", "message": "stop after first backend"}}
     monkeypatch.setattr(BS.runner, "run_case", fail_first)
     result = BS.compare(out_dir=str(root), synth_frames=2, synth_w=32, synth_h=32,
-                        warm_repeats=1, backend_order="torch-first", dump_motion=True)
-    assert calls == [("torch-mps", True)]
+                        warm_repeats=1, backend_order="torch-first", dump_motion=True, dump_flow_samples=True)
+    assert calls == [("torch-mps", True, True)]
     assert result["failed_backend"] == "torch-mps"

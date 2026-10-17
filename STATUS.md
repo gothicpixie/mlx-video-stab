@@ -3265,14 +3265,22 @@ Verification after that harness change: `.claude/verify.sh` passed **1591 tests 
 
 ## Exploratory fitted-motion localization (2026-10-17)
 
-The challenge-panel runs saved plans but not fitted-motion NPZs. The paired CLI now has an opt-in
-`--dump-motion` capture and records that setting in its comparison JSON and replayable run commands. The
-focused follow-up will rerun four already-reported windows in a separate output directory: S13 t048, S24 t571,
-S25 t025 and S37 t081. These were selected because the prior fixed-panel results showed high-motion plan
-divergence or RAFT/KLT disagreement; this is exploratory and selected after those results. Keep the same source,
-weights, config, and shared planner; use one timed warm repeat and alternate backend order. Inspect fitted
-homography, mesh, row, support and cycle fields alongside the existing plans. The NPZ stores fitted per-pair
-motion, not raw dense RAFT fields, so the diagnostic may locate divergence before versus after planning but
-cannot attribute it to raw flow prediction alone. No quality claim, gate, or prior result changes.
+The challenge-panel runs saved plans but not fitted-motion NPZs. The paired CLI gained an opt-in `--dump-motion`
+capture and records that setting in its comparison JSON and replayable run commands. The exploratory rerun of
+four already-reported windows (S13 t048, S24 t571, S25 t025 and S37 t081) captured fitted transforms and
+showed backend differences, especially in the tails for S13/S24. It also confirmed exact frozen-plan replay.
+These windows were selected after the fixed-panel results because of high-motion plan divergence or RAFT/KLT
+disagreement; no quality claim, gate, or prior result changes. The fitted-motion NPZ cannot attribute those
+differences to raw flow prediction alone.
+
+To close that gap, `--dump-flow-samples` now saves each backend's restored forward and backward vectors at the
+exact grid-cell centres consumed by `motion.observe()`, plus frame-index pairs, cycle diagnostics and the
+candidate-valid mask after any source/destination mask rejection. The numeric-only `mlxstab.flow_samples/1`
+NPZ is a compact observation-boundary capture before robust fitting, not full-resolution dense flow and not
+ground truth. Its option is part of experiment identity and the paired command. DeepSeek Flash via Pi reviewed
+the capture boundary and specifically recommended retaining the validity mask; it is included. The next
+exploratory step is to rerun those four windows with identical configs, compare raw sampled vectors and mask
+agreement alongside fitted-motion/plan differences, and report whether the backend split begins in predicted
+flow or in filtering/fitting. No production behavior changes when capture is off.
 
 Verification after adding the opt-in capture: `.claude/verify.sh` passed **1591 tests in 56.71 s**.

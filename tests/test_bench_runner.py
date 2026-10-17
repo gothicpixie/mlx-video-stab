@@ -178,13 +178,17 @@ def test_experiment_identity_records_plan_capture():
     opts = runner.RunOptions()
     off = runner._experiment_identity(opts, {"seed": 0}, src, "w", {}, {}, None, None, 0, False)
     on = runner._experiment_identity(opts, {"seed": 0}, src, "w", {}, {}, None, None, 0, True)
-    assert off["capture"] == {"dump_plan": False, "dump_motion": False}
+    assert off["capture"] == {"dump_plan": False, "dump_motion": False, "dump_flow_samples": False}
     assert off["flow_backend"] == {"name": "mlx"}
-    assert on["capture"] == {"dump_plan": True, "dump_motion": False}
+    assert on["capture"] == {"dump_plan": True, "dump_motion": False, "dump_flow_samples": False}
     assert MF.content_key(off) != MF.content_key(on)
     motion = runner._experiment_identity(opts, {"seed": 0}, src, "w", {}, {}, None, None, 0, False, True)
-    assert motion["capture"] == {"dump_plan": False, "dump_motion": True}
+    assert motion["capture"] == {"dump_plan": False, "dump_motion": True, "dump_flow_samples": False}
     assert MF.content_key(off) != MF.content_key(motion)
+    raw = runner._experiment_identity(opts, {"seed": 0}, src, "w", {}, {}, None, None, 0,
+                                      False, False, True)
+    assert raw["capture"] == {"dump_plan": False, "dump_motion": False, "dump_flow_samples": True}
+    assert MF.content_key(off) != MF.content_key(raw)
 
 
 def test_experiment_identity_changes_with_flow_backend():
@@ -784,6 +788,21 @@ def test_cli_forwards_dump_motion_option(tmp_path, monkeypatch, capsys):
     assert captured["opts"].dump_motion is False
 
 
+def test_cli_forwards_dump_flow_samples_option(tmp_path, monkeypatch, capsys):
+    from bench import run_case as cli
+    captured = {}
+
+    def fake_run_case(opts):
+        captured["opts"] = opts
+        return {"status": "success", "case": {"name": opts.case}, "outputs": {"manifest": "m"}, "error": None}
+    monkeypatch.setattr(cli.runner, "run_case", fake_run_case)
+    assert cli.main(["--dump-flow-samples", "--source", "synthetic", "--lock", "off",
+                     "--out-dir", str(tmp_path / "dfs")]) == 0
+    assert captured["opts"].dump_flow_samples is True
+    assert cli.main(["--source", "synthetic", "--lock", "off", "--out-dir", str(tmp_path / "dfs2")]) == 0
+    assert captured["opts"].dump_flow_samples is False
+
+
 def test_cli_list_cases_and_dry_run_parity(capsys):
     from bench import run_case as cli
     assert cli.main(["--list-cases"]) == 0
@@ -909,7 +928,8 @@ def test_run_case_dump_plan_captures_only_retained_repeat(tmp_path, monkeypatch)
     assert seen == [str(run_dir / "plan_r0.npz"), None, None]           # warm repeats never capture the plan
     assert man["outputs"]["plan"] == str(run_dir / "plan_r0.npz")
     assert man["outputs"]["retained_repeat"] == 0
-    assert man["experiment_identity"]["capture"] == {"dump_plan": True, "dump_motion": False}
+    assert man["experiment_identity"]["capture"] == {"dump_plan": True, "dump_motion": False,
+                                                       "dump_flow_samples": False}
     assert (run_dir / "plan_r0.npz").read_bytes() == b"npz"
 
 
@@ -932,7 +952,8 @@ def test_run_case_without_dump_plan_records_no_plan(tmp_path, monkeypatch):
     assert man["status"] == "success", man.get("error")
     assert captured["dump_plan"] is None and man["outputs"]["plan"] is None
     assert not (run_dir / "plan_r0.npz").exists()
-    assert man["experiment_identity"]["capture"] == {"dump_plan": False, "dump_motion": False}
+    assert man["experiment_identity"]["capture"] == {"dump_plan": False, "dump_motion": False,
+                                                       "dump_flow_samples": False}
 
 
 def test_run_case_dump_motion_captures_only_retained_repeat(tmp_path, monkeypatch):
@@ -961,8 +982,37 @@ def test_run_case_dump_motion_captures_only_retained_repeat(tmp_path, monkeypatc
     assert man["outputs"]["motion"] == str(run_dir / "motion_r0.npz")
     assert man["outputs"]["plan"] is None
     assert man["outputs"]["retained_repeat"] == 0
-    assert man["experiment_identity"]["capture"] == {"dump_plan": False, "dump_motion": True}
+    assert man["experiment_identity"]["capture"] == {"dump_plan": False, "dump_motion": True,
+                                                       "dump_flow_samples": False}
     assert (run_dir / "motion_r0.npz").read_bytes() == b"npz"
+
+
+def test_run_case_dump_flow_samples_captures_only_retained_repeat(tmp_path, monkeypatch):
+    _patch_provenance(monkeypatch); _patch_media(monkeypatch)
+    src = tmp_path / "in.mp4"; src.write_bytes(b"x")
+    w = tmp_path / "w.safetensors"; w.write_bytes(b"w")
+    monkeypatch.setattr(runner, "RaftFlow", _FakeFlow)
+    seen = []
+
+    def fake_stabilize(*a, **k):
+        seen.append(k.get("dump_flow_samples_npz"))
+        if k.get("dump_flow_samples_npz"):
+            Path(k["dump_flow_samples_npz"]).write_bytes(b"npz")
+        return {"frames": 3, "decoded_frames": 3, "rendered_frames": 3,
+                "timing_s": {"analysis": 1.0, "plan": 0.1, "render": 0.2},
+                "fps": 30.0, "fallback_frames": 0, "diagnostics_total_s": 0.0, "observed_nondiag_render_s": 0.2}
+    monkeypatch.setattr(runner, "stabilize", fake_stabilize)
+
+    run_dir = tmp_path / "dump_flow_samples"
+    man = runner.run_case(runner.RunOptions(case="baseline", source=str(src), weights=str(w),
+                                            out_dir=str(run_dir), lock="off", repeats=3,
+                                            dump_flow_samples=True, command=["run_case"]))
+    assert man["status"] == "success", man.get("error")
+    path = str(run_dir / "flow_samples_r0.npz")
+    assert seen == [path, None, None]
+    assert man["outputs"]["flow_samples"] == path
+    assert man["experiment_identity"]["capture"]["dump_flow_samples"] is True
+    assert (run_dir / "flow_samples_r0.npz").read_bytes() == b"npz"
 
 
 def test_run_case_without_dump_motion_records_no_motion(tmp_path, monkeypatch):
@@ -984,7 +1034,8 @@ def test_run_case_without_dump_motion_records_no_motion(tmp_path, monkeypatch):
     assert man["status"] == "success", man.get("error")
     assert captured["dump_motion_npz"] is None and man["outputs"]["motion"] is None
     assert not (run_dir / "motion_r0.npz").exists()
-    assert man["experiment_identity"]["capture"] == {"dump_plan": False, "dump_motion": False}
+    assert man["experiment_identity"]["capture"] == {"dump_plan": False, "dump_motion": False,
+                                                       "dump_flow_samples": False}
 
 
 def test_run_case_refuses_to_overwrite_existing_motion_dump(tmp_path, monkeypatch):
@@ -1019,7 +1070,8 @@ def test_run_case_dump_plan_without_dump_motion_keeps_plan_only_contract(tmp_pat
     assert man["status"] == "success", man.get("error")
     assert seen == [(str(run_dir / "plan_r0.npz"), None)]
     assert man["outputs"]["plan"] == str(run_dir / "plan_r0.npz") and man["outputs"]["motion"] is None
-    assert man["experiment_identity"]["capture"] == {"dump_plan": True, "dump_motion": False}
+    assert man["experiment_identity"]["capture"] == {"dump_plan": True, "dump_motion": False,
+                                                       "dump_flow_samples": False}
 
 
 def test_run_case_refuses_to_overwrite_existing_plan_dump(tmp_path, monkeypatch):

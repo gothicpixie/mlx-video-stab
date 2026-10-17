@@ -122,6 +122,16 @@ Useful options:
   `out/`. Only the retained repeat is captured, an existing dump is protected unless `--overwrite` is passed,
   and the option is recorded in `experiment_identity.capture` so toggling it changes the `content_key`. Plan
   and motion capture are independent; `--dump-plan` alone keeps the plan-only comparison contract.
+- `--dump-flow-samples` – write the retained repeat's restored forward and backward RAFT vectors to
+  `<out-dir>/flow_samples_r0.npz`, sampled at the exact grid-cell centres consumed by `motion.observe()`.
+  The schema (`mlxstab.flow_samples/1`) stores source-frame pixel coordinates, analyzed frame-index pairs,
+  both raw direction fields, finite-value flags, forward-backward error/tolerance/in-bounds diagnostics and
+  the final candidate-valid mask after any source/destination mask rejection. This is the observation boundary
+  before RANSAC, mover rejection and mesh/row fitting; it is not dense full-resolution flow or ground truth.
+  The sample grid keeps 59 full-HD pairs compact while retaining every vector used by the fit. The NPZ is
+  numeric-only and loads with `allow_pickle=False`; treat it as private motion data in ignored `out/`. Only
+  repeat 0 is captured, existing artifacts are protected unless `--overwrite` is passed, and the flag is
+  included in `experiment_identity.capture` and the replayable backend-comparison command.
 - `--lock {auto,on,off}`, `--lock-chunk N`, `--lock-pause S` – shared heavy lock. `auto` uses the lock for
   file sources and not for synthetic. A `chunk` releases the lock, yields for `--lock-pause` seconds (the
   shared-project etiquette is ~30 frames with a ~12 s gap) and re-acquires; acquisition wait and pause are
@@ -268,8 +278,8 @@ tracked docs. No credentials or arbitrary environment variables are recorded; on
 
 ## Captured artifacts and the real-motion composition audit
 
-`--dump-plan` and `--dump-motion` let a run capture the actual plan and fitted motion for offline geometry
-audits without re-running the stabilizer. `bench/plan_shape_audit.py` probes production `source_coords` on
+`--dump-plan`, `--dump-motion` and `--dump-flow-samples` let a run capture the actual plan, fitted motion and
+pre-fit flow observations for offline geometry audits without re-running the stabilizer. `bench/plan_shape_audit.py` probes production `source_coords` on
 captured plans alone; `bench/real_composition_audit.py` additionally loads the captured motion and compares
 production against the Stage 1 composed candidate in three modes (exact composition and both temporal
 high-pass charts) on the same four sparse line probes and frame selection. Both audits validate their NPZ

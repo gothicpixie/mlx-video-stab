@@ -148,8 +148,8 @@ def test_stabilize_dumps_plan_npz_without_pickle(tmp_path, monkeypatch):
         assert all(z[k].dtype.kind in "fiuUb" for k in z.files)        # numeric/boolean/unicode only, no object arrays
 
 
-def test_stabilize_dumps_motion_npz_without_pickle(tmp_path, monkeypatch):
-    """``dump_motion_npz`` writes the fitted Motion as a compressed, non-pickle NPZ through stabilize."""
+def test_stabilize_dumps_motion_and_raw_flow_samples_without_pickle(tmp_path, monkeypatch):
+    """Optional motion and pre-fit flow captures are compressed numeric NPZs written through stabilize."""
     from mlxstab import media
     vid, _ = synth.render(T=8, W=96, H=64, jitter=3.0)
     H, W = 64, 96
@@ -166,8 +166,9 @@ def test_stabilize_dumps_motion_npz_without_pickle(tmp_path, monkeypatch):
     monkeypatch.setattr(media, "Encoder", FakeEncoder)
     cfg = S.Config(mesh=(4, 3), rs_rows=4, budget=0.06)
     out = tmp_path / "motion.npz"
+    flow_out = tmp_path / "flow_samples.npz"
     S.stabilize("in.mp4", "out.mp4", None, None, cfg, flow_fn=farneback, log=lambda m: None,
-                dump_motion_npz=str(out))
+                dump_motion_npz=str(out), dump_flow_samples_npz=str(flow_out))
 
     assert out.exists() and out.stat().st_size > 0
     with np.load(out, allow_pickle=False) as z:                        # loads without unpickling any object
@@ -203,6 +204,47 @@ def test_stabilize_dumps_motion_npz_without_pickle(tmp_path, monkeypatch):
         assert z["cycle_sample_mass"].shape == (n, 4, 5) and np.all(z["cycle_sample_mass"] >= 0)
         assert z["cycle_map_available"].shape == (n,) and z["cycle_map_available"].all()
         assert all(z[k].dtype.kind in "fiuUb" for k in z.files)       # numeric/boolean/unicode only, no objects
+    with np.load(flow_out, allow_pickle=False) as z:
+        assert str(z["schema"]) == S.FLOW_SAMPLES_SCHEMA
+        assert z["pair_indices"].shape == (len(vid) - 1, 2)
+        assert z["forward"].shape == z["backward"].shape == (len(vid) - 1, H // cfg.step, W // cfg.step, 2)
+        assert z["fit_candidate_valid"].shape == (len(vid) - 1, H // cfg.step, W // cfg.step)
+        assert z["fb_err"].shape == z["fb_tol"].shape == z["fb_inside"].shape == z["fit_candidate_valid"].shape
+        assert all(z[k].dtype.kind in "fiuUb" for k in z.files)
+
+
+def test_flow_sample_capture_records_raw_vectors_on_fit_grid(tmp_path):
+    """Capture both restored directions before observe() applies cycle checks or fitting filters."""
+    H, W, step = 16, 24, 8
+    forward = mx.ones((H, W, 2), dtype=mx.float32)
+    backward = -forward
+
+    class FakeFlow:
+        def bidir(self, a, b):
+            return forward, backward
+
+    frames = [np.zeros((H, W, 3), np.uint8) for _ in range(3)]
+    cfg = S.Config(step=step, mesh=(2, 2), rs_rows=2)
+    samples = []
+    S.analyze(iter(frames), FakeFlow(), cfg, W, H, 30.0, threads=False,
+              flow_sample_callback=lambda *item: samples.append(item))
+    assert len(samples) == 2
+    assert [tuple(s[:2]) for s in samples] == [(0, 1), (1, 2)]
+    assert samples[0][2].tolist() == [4, 12, 20] and samples[0][3].tolist() == [4, 12]
+    np.testing.assert_array_equal(samples[0][4], np.ones((2, 3, 2), np.float32))
+    np.testing.assert_array_equal(samples[0][5], -np.ones((2, 3, 2), np.float32))
+
+    out = tmp_path / "flow_samples.npz"
+    S.save_flow_samples_npz(samples, out, W, H, 30.0, 1, step, len(frames))
+    with np.load(out, allow_pickle=False) as z:
+        assert str(z["schema"]) == "mlxstab.flow_samples/1"
+        assert z["pair_indices"].tolist() == [[0, 1], [1, 2]]
+        assert z["forward"].shape == (2, 2, 3, 2)
+        assert z["backward"].shape == (2, 2, 3, 2)
+        assert z["fit_candidate_valid"].shape == (2, 2, 3) and z["fit_candidate_valid"].all()
+        assert z["fb_err"].shape == z["fb_tol"].shape == z["fb_inside"].shape == (2, 2, 3)
+        assert z["forward_finite"].all() and z["backward_finite"].all()
+        assert all(z[k].dtype.kind in "fiuUb" for k in z.files)
 
 
 def test_stabilize_rejects_ambiguous_diagnostic_scope_before_loading_media():

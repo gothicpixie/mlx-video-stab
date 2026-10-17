@@ -88,6 +88,8 @@ def build_parser():
                    help="write the retained repeat-0 Plan to <out-dir>/plan_r0.npz (compressed, non-pickle; private motion data)")
     p.add_argument("--dump-motion", action="store_true",
                    help="write the retained repeat-0 fitted Motion to <out-dir>/motion_r0.npz (compressed, non-pickle; private motion data)")
+    p.add_argument("--dump-flow-samples", action="store_true",
+                   help="write repeat-0 raw forward/backward flow vectors on the fitting grid to <out-dir>/flow_samples_r0.npz")
     p.add_argument("--lock", choices=["auto", "on", "off"], default="auto",
                    help="shared heavy lock: auto=on for file sources, off for synthetic")
     p.add_argument("--lock-chunk", type=int, default=0, help="release/re-acquire the lock every N on_step calls")
@@ -143,7 +145,8 @@ def main(argv=None):
         overwrite=a.overwrite, seed=a.seed, repeats=a.repeats, eval_iters=a.eval_iters, eval_downscale=a.eval_downscale,
         eval_flow_dtype=a.eval_flow_dtype, eval_corr_dtype=a.eval_corr_dtype, eval_vf=a.eval_vf, output_fps=a.output_fps,
         eval_tracks=a.eval_tracks,
-        diag_every=a.diag_every, dump_plan=a.dump_plan, dump_motion=a.dump_motion, lock=a.lock,
+        diag_every=a.diag_every, dump_plan=a.dump_plan, dump_motion=a.dump_motion,
+        dump_flow_samples=a.dump_flow_samples, lock=a.lock,
         lock_chunk=a.lock_chunk, lock_pause_s=a.lock_pause,
         synth_frames=a.synth_frames, synth_w=a.synth_w, synth_h=a.synth_h, synth_fps=a.synth_fps,
         selection_note=a.selection_note, overrides=overrides, command=[sys.executable, *sys.argv], log=log)
