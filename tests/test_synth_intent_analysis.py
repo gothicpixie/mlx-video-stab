@@ -29,6 +29,8 @@ def test_analyze_uses_seed_as_unit_and_excludes_calibration_anchors():
         for index in range(6):
             runs.append(_run(seed, "smooth", index, intent_rmse=smooth, shake_db=-10))
             runs.append(_run(seed, "stochastic", index, intent_rmse=stochastic, shake_db=-15))
+    cell = next(run for run in runs if run["seed"] == 4 and run["cell_id"] == "stochastic__far_only__absent")
+    cell["far_camera_metrics"]["intent_retention"]["translation_x_px"]["rmse"] += 3.0
     runs.append({"seed": 4, "kind": "anchor", "cell_id": "shake_only", "status": "success"})
 
     report = analyze({"runs": runs})
@@ -36,13 +38,15 @@ def test_analyze_uses_seed_as_unit_and_excludes_calibration_anchors():
     assert report["experimental_unit"] == "seed"
     assert report["complete_seeds"] == [4, 8]
     assert result["n_seeds"] == 2
-    assert [row["delta_stochastic_minus_smooth"] for row in result["per_seed"]] == [-1.0, 3.0]
-    assert result["mean_delta_stochastic_minus_smooth"] == 1.0
+    assert [row["delta_stochastic_minus_smooth"] for row in result["per_seed"]] == [-0.5, 3.0]
+    assert result["mean_delta_stochastic_minus_smooth"] == 1.25
     assert result["negative_seed_deltas"] == 1
     assert result["positive_seed_deltas"] == 1
     assert result["stratified"]["by_layer"]["far_only"]["n_seeds"] == 2
     assert result["stratified"]["by_subject"]["moving"]["n_seeds"] == 2
     assert result["stratified"]["by_cell"]["far_only__absent"]["n_seeds"] == 2
+    layer_interaction = result["factorial_interactions"]["phase_by_layer"]
+    assert [row["delta_stochastic_minus_smooth"] for row in layer_interaction["per_seed"]] == [-1.0, 0.0]
     shake = report["summaries"]["shake_x_residual_db"]
     assert [row["delta_stochastic_minus_smooth"] for row in shake["per_seed"]] == [-5.0, -5.0]
     assert "negative values mean attenuation" in report["interpretation"]["shake_residual_db"]

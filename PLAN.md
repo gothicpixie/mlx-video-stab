@@ -376,8 +376,9 @@ coverage for both camera-induced and independent subject motion. The truth-aware
 transform tests are implemented; the existing full-frame flow metrics remain supplementary only. The
 `bench.synth_intent_factorial` harness now checkpoints and resumes the 120-run default design, including three
 calibration anchors per seed. The one-seed pilot is complete and the eight-seed screen is running. Analyze seed
-as the experimental unit with `bench.synth_intent_analysis`, then finish with the separate resolution/frame-length
-sensitivity check before drawing conclusions.
+as the experimental unit with `bench.synth_intent_analysis`, including phase-by-layer, phase-by-subject and
+three-way interaction contrasts, then finish with the separate resolution/frame-length sensitivity check before
+drawing conclusions.
 The 96-frame smoke's Gemini review preferred raw in all four panel-order judgments because the stabilized
 comparison showed blank edge gaps. Include crop/border coverage as an explicit decision axis and diagnose
 whether a matched crop policy changes that judgment before interpreting stabilization quality.

@@ -3953,15 +3953,16 @@ rotational intent (gain 0.25–0.33 versus 0.00–0.07 for smooth cases). Its ho
 for smooth versus -1.4 dB for stochastic. The metric is `20*log10(output residual RMS / input shake RMS)`, so
 negative values mean attenuation and more-negative values mean stronger rejection. Seed 0 in the running screen
 reversed the horizontal result (-13.5 dB smooth versus -18.7 dB stochastic); seed 1 so far is -9.0 versus -5.6
-dB. This seed dependence rules out treating the pilot as a model-selection result. Across the two complete
-screen seeds, stochastic has higher mean x-intent RMSE (+1.72 px) and rotation-intent RMSE (+0.14 deg), while
-x-shake residual direction changes by seed and y-shake residual is higher for stochastic in both. These are
-interim descriptive contrasts only (2/8 seeds), not population conclusions. Calibration anchors behave
+dB. Across the first three complete screen seeds, stochastic has higher mean x-intent RMSE (+1.64 px),
+rotation-intent RMSE (+0.09 deg), x-shake residual (+2.69 dB) and y-shake residual (+1.54 dB). The x-shake
+contrast changed direction as seeds accumulated, demonstrating why the pilot cannot select a model. These are
+interim descriptive contrasts only (3/8 seeds), not population conclusions. Calibration anchors behave
 distinctly: shake-only removes the injected shake, while intent-only retains the shared drift and low-frequency
 pan.
 
 `bench.synth_intent_analysis` treats seed as the experimental unit, averages the six main cells per intent mode,
 and summarizes paired stochastic-minus-smooth contrasts with seed-level bootstrap intervals and per-seed signs.
-It excludes calibration anchors and also reports layer/subject strata and individual cells. Lower intent RMSE is
-better; lower (more negative) shake residual dB means stronger rejection. Keep the screen frozen and do not tune
-parameters to interim outcomes. The eight-seed run is active at 34/120 cells with zero failures.
+It excludes calibration anchors and reports layer/subject strata, each cell's phase contrast, and phase-by-layer,
+phase-by-subject and three-way difference-in-differences. Lower intent RMSE is better; lower (more negative)
+shake residual dB means stronger rejection. Keep the screen frozen and do not tune parameters to interim
+outcomes. The eight-seed run is active at 45/120 cells with zero failures.

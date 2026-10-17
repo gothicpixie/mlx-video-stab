@@ -158,12 +158,69 @@ def analyze(screen: dict) -> dict:
             facet: {level: _summarize(level_rows) for level, level_rows in levels.items()}
             for facet, levels in strata_per_seed[name].items()
         }
+        cell_rows = strata_per_seed[name]["by_cell"]
+        by_seed = {}
+        for suffix, cell_values in cell_rows.items():
+            layer, subject = suffix.split("__", 1)
+            for row in cell_values:
+                by_seed.setdefault(row["seed"], {}).setdefault((layer, subject),
+                    row["delta_stochastic_minus_smooth"])
+
+        def mean_cell_delta(seed: int, layer: str, subjects: tuple[str, ...]) -> float:
+            cells = by_seed[seed]
+            return fmean(cells[(layer, subject)] for subject in subjects)
+
+        layers = ("far_only", "parallax")
+        subjects = ("absent", "static", "moving")
+        interaction_rows = {
+            "phase_by_layer": [],
+            "phase_by_subject_static_vs_absent": [],
+            "phase_by_subject_moving_vs_absent": [],
+            "phase_by_layer_by_subject_static_vs_absent": [],
+            "phase_by_layer_by_subject_moving_vs_absent": [],
+        }
+        required_cells = {(layer, subject) for layer in layers for subject in subjects}
+        for seed, cells in sorted(by_seed.items()):
+            if not required_cells.issubset(cells):
+                continue
+            layer_effect = {
+                layer: mean_cell_delta(seed, layer, subjects) for layer in layers
+            }
+            subject_effect = {
+                subject: fmean(cells[(layer, subject)] for layer in layers) for subject in subjects
+            }
+            layer_subject_effect = {
+                subject: cells[("parallax", subject)] - cells[("far_only", subject)]
+                for subject in subjects
+            }
+            estimates = {
+                "phase_by_layer": layer_effect["parallax"] - layer_effect["far_only"],
+                "phase_by_subject_static_vs_absent": subject_effect["static"] - subject_effect["absent"],
+                "phase_by_subject_moving_vs_absent": subject_effect["moving"] - subject_effect["absent"],
+                "phase_by_layer_by_subject_static_vs_absent": (
+                    layer_subject_effect["static"] - layer_subject_effect["absent"]
+                ),
+                "phase_by_layer_by_subject_moving_vs_absent": (
+                    layer_subject_effect["moving"] - layer_subject_effect["absent"]
+                ),
+            }
+            for contrast, estimate in estimates.items():
+                interaction_rows[contrast].append({
+                    "seed": seed, "delta_stochastic_minus_smooth": estimate,
+                })
+        summaries[name]["factorial_interactions"] = {
+            contrast: _summarize(contrast_rows)
+            for contrast, contrast_rows in interaction_rows.items()
+        }
 
     return {
         "schema": "synth-intent-factorial-analysis-v1",
         "experimental_unit": "seed",
         "within_seed_aggregation": "unweighted mean over six main cells per intent mode",
         "contrast": "stochastic minus smooth; anchors excluded",
+        "interaction_contrasts": (
+            "per-seed differences-in-differences for phase x layer, phase x subject, and phase x layer x subject"
+        ),
         "interpretation": {
             "intent_rmse": "negative delta means lower intent-band error for stochastic",
             "shake_residual_db": "20*log10(output residual / input shake); negative values mean attenuation; negative delta means stronger rejection for stochastic",
