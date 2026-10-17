@@ -3229,3 +3229,36 @@ PyTorch stabilizer comparison.
 
 The benchmark CLI now records and honors the selected `--backend-order`; the multi-window run alternates it
 across anchors. Verification after this harness change: `.claude/verify.sh` passed **1591 tests in 57.70 s**.
+
+Challenge-panel result (2026-10-17): all eight pairs succeeded with exact equality across 154 converted
+checkpoint tensors, matching config and encoded cadence, reliable RAFT metrics, and zero planner fallbacks.
+Each warm runtime is the median of three repeats. Ratios below are MLX / PyTorch MPS; KLT is absent where
+contiguous-path metrics could not be formed.
+
+| Frozen window | Backend order | Warm median seconds (MLX / MPS) | RAFT output jitter ratio | KLT output jitter ratio |
+|---|---|---:|---:|---:|
+| S13 t048 | MLX first | 50.79 / 66.66 | 0.979 | — |
+| S16 t120 | MPS first | 54.44 / 66.34 | 1.074 | 1.000 |
+| S17 t021 | MLX first | 53.88 / 69.22 | 0.968 | 1.031 |
+| S23 t004 | MPS first | 55.39 / 67.93 | 0.921 | 0.996 |
+| S24 t571 | MLX first | 53.88 / 69.81 | 1.147 | 0.948 |
+| S25 t025 | MPS first | 55.04 / 67.99 | 1.080 | 1.011 |
+| S30 t087 | MLX first | 54.10 / 69.17 | 1.060 | 1.004 |
+| S37 t081 | MPS first | 54.73 / 67.63 | 1.037 | — |
+
+The paired warm-runtime ratio mean was **0.7936**, with one-sided 95% upper bound **0.8087** (df=7), passing
+the predeclared faster-on-this-panel criterion. RAFT jitter's paired geometric mean ratio was **1.0310**;
+its upper bound **1.0813** exceeds the **1.05** non-inferiority limit, so the quality gate failed. Both backends
+had higher RAFT jitter than their input on S25 t025 and S37 t081. KLT path metrics were available on six
+anchors only: the available-case geometric mean ratio was **0.9979**, upper bound **1.0210** (df=5), but the
+predeclared all-eight KLT gate is incomplete. KLT path metrics were unavailable because four input/output fits
+failed on S13 t048 and two failed on S37 t081. Do not use the available-case estimate as a full-panel pass.
+
+Gemini reviewed 16 blinded clips (eight original pairs and eight position reversals). Every non-tie judgment
+selected screen side B; in all five pairs with non-tie judgments in both orders, the mapped preference changed
+with panel position and none agreed on a method. The visual endpoint is invalid for comparing these backends.
+The machine-readable per-anchor analysis is `out/bench/backend_panel8_20261017/panel_analysis.json`; raw paired
+manifests, blind review clips and audit are in the same ignored output directory. Conclusion is limited to this
+fixed, previously inspected challenge panel: MLX passed the runtime criterion, RAFT jitter non-inferiority did
+not pass, KLT coverage is incomplete, and Gemini supplied no usable method preference. No overall quality
+winner or production default follows.
