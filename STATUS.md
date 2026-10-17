@@ -3174,3 +3174,25 @@ that the full shared pipeline comparison runs and provide one scoped runtime res
 perceptual superiority. Next, run the paired backends on real clips with KLT enabled and blinded visual review
 before making a stabilizer-quality claim. No production default changed. Verification: `.claude/verify.sh` passed
 **1589 tests in 57.60 s**.
+
+## Real camcorder backend comparison (2026-10-17)
+
+Both backends ran on the same decoded one-second window of `00176.MTS` at t800–801 (source SHA-256
+`e4b1f80d…d9fbb3`), with the historical baseline flow settings, matched config digest, 30 encoded frames at
+30000/1001 fps, and exact equality across all 154 normalized checkpoint tensors. The interlaced input was
+deinterlaced to 60 fields for analysis. There were no planner fallbacks. MLX's one cached warm repeat took
+**50.645 s** versus **66.456 s** for PyTorch MPS; these are single-run timings on this machine, not a general
+performance estimate. RAFT jitter was **0.04580 / 0.04606 px** and wobble **0.02944 / 0.03000 px** (MLX / MPS).
+Independent KLT jitter was **0.11875 / 0.11952 px**; both evaluators agreed that each output improved over the
+input. The per-frame fitted plans were close, with maximum deltas of **0.0150** in global homographies,
+**0.0726 px** in mesh correction and **0.0105 px** in row correction. Full results are in
+`out/bench/stabilizer_backend_00176_t800_20261017/comparison.json`.
+
+Gemini 3.8 Flash reviewed a blinded backend A/B clip and its position-reversed control. It selected the
+PyTorch candidate in the original, then selected the MLX baseline after reversal; it chose screen side B both
+times. The position-bias audit therefore flags that the preference followed screen position as the method
+mapping changed. Treat Gemini's visual result as inconclusive. This is one previously used development window,
+one warm repeat, and one short low-resolution visual review. It does not establish a quality winner or broad
+speed result, and no production default changed. Next evidence should come from multiple separately selected
+real windows, with repeated timing and counterbalanced blind reviews; keep the shared planner, renderer and
+evaluator fixed.
