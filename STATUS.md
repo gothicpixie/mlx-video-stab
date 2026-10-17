@@ -3949,8 +3949,19 @@ interrupted metrics step reuses the already successful run. The dry-run resolved
 the default eight seeds. The one-seed pilot (`out/bench/synth_intent_pilot_seed17/`) completed all 15 cells with
 zero failures, all 96 frames available for every layer, far-layer visibility about 0.63–0.69, input-valid
 coverage above 0.94, and camera-fit RMSE below 1.1 px. In this seed, stochastic-path cases retained more injected
-rotational intent (gain 0.25–0.33 versus 0.00–0.07 for smooth cases), while smooth cases attenuated horizontal
-shake more strongly (-12 dB versus about -1.5 dB). This is a provisional single-seed signal only, not a result
-for selecting a model. Calibration anchors behave distinctly: shake-only removes the injected shake, while
-intent-only retains the shared drift and low-frequency pan. The full eight-seed screen is now the next step; do
-not tune parameters to this pilot.
+rotational intent (gain 0.25–0.33 versus 0.00–0.07 for smooth cases). Its horizontal shake residual was -12.3 dB
+for smooth versus -1.4 dB for stochastic. The metric is `20*log10(output residual RMS / input shake RMS)`, so
+negative values mean attenuation and more-negative values mean stronger rejection. Seed 0 in the running screen
+reversed the horizontal result (-13.5 dB smooth versus -18.7 dB stochastic); seed 1 so far is -9.0 versus -5.6
+dB. This seed dependence rules out treating the pilot as a model-selection result. Across the two complete
+screen seeds, stochastic has higher mean x-intent RMSE (+1.72 px) and rotation-intent RMSE (+0.14 deg), while
+x-shake residual direction changes by seed and y-shake residual is higher for stochastic in both. These are
+interim descriptive contrasts only (2/8 seeds), not population conclusions. Calibration anchors behave
+distinctly: shake-only removes the injected shake, while intent-only retains the shared drift and low-frequency
+pan.
+
+`bench.synth_intent_analysis` treats seed as the experimental unit, averages the six main cells per intent mode,
+and summarizes paired stochastic-minus-smooth contrasts with seed-level bootstrap intervals and per-seed signs.
+It excludes calibration anchors and also reports layer/subject strata and individual cells. Lower intent RMSE is
+better; lower (more negative) shake residual dB means stronger rejection. Keep the screen frozen and do not tune
+parameters to interim outcomes. The eight-seed run is active at 34/120 cells with zero failures.
