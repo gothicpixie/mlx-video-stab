@@ -3629,3 +3629,35 @@ camera motion and varied texture/blur, plus additional held-out real windows if 
 Compare the fit signal to known-truth stabilization error while stratifying by input difficulty; report the full
 series and do not tune a threshold on these three windows. Diagnostic artifacts remain under ignored
 `out/bench/*fit_diagnostics.json`.
+
+### Known-translation scale-4 flow sweep (2026-10-17)
+
+Following DeepSeek's recommendation, `bench/flow_scale_synthetic_screen.py` tested a paired flow-estimation
+screen before attempting full stabilization. It generated 1080p static textured scenes with exact horizontal
+translation, then evaluated RAFT at scales 2 and 4 on the same sequences. Factors were three texture seeds,
+four appearances (sharp, 1.5 px blur, 4 px blur, and low contrast), and shifts of 4, 8, 16, and 32 source pixels
+per pair. Each condition had 30 frames and 29 fitted pairs. The primary endpoint was dense-flow endpoint error
+against the exact translation, excluding a 64 px image border.
+
+| Shift (px/pair) | Median scale-2 EPE (px) | Median scale-4 EPE (px) | Median scale-4 minus scale-2 EPE (px) | Scale-4 inlier p10 range |
+| ---: | ---: | ---: | ---: | ---: |
+| 4 | 0.091 | 0.211 | +0.118 | 1.000–1.000 |
+| 8 | 0.070 | 0.244 | +0.156 | 1.000–1.000 |
+| 16 | 0.083 | 0.183 | +0.098 | 1.000–1.000 |
+| 32 | 0.068 | 0.151 | +0.085 | 1.000–1.000 |
+
+Scale 4 had higher mean EPE than scale 2 in all 48 condition/seed/displacement cells. However, scale-4 inlier
+p10 was exactly 1.0 in all cells, and forward/backward validity stayed approximately 0.996. The inlier statistic
+therefore cannot flag even the measured scale-4 flow error under these known-translation conditions. A
+texture-seed-clustered fixed-effect fit estimated the scale-4-minus-scale-2 EPE change at -0.00204 px per extra
+pixel of displacement (cluster bootstrap interval -0.00249 to -0.00161). This is descriptive for this synthetic
+generator only; the lower relative penalty at larger shifts is not a real-scene claim. No p-value or threshold
+was used. The original single-shift screen and full 48-cell result are retained under ignored `out/bench/`.
+
+Decision: drop inlier-fraction p10 as a scale-selection gate candidate. Its association with the two worst real
+seconds did not replicate in the controlled flow screen, and the signal had no dynamic range. This does not
+invalidate the original real-footage quality result: scale 4 still had higher flow error in every synthetic
+cell. The flow-only experiment cannot establish whether that error becomes visible as accumulated stabilized
+path error. Next run matched full stabilization on the existing layered synthetic scene (parallax, rolling
+shutter, moving subject), compare scales 2 and 4 to the intended camera path, and retain the fit statistic only
+as a diagnostic. Do not change auto selection or claim a calibrated confidence measure.
