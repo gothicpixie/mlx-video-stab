@@ -3196,3 +3196,32 @@ one warm repeat, and one short low-resolution visual review. It does not establi
 speed result, and no production default changed. Next evidence should come from multiple separately selected
 real windows, with repeated timing and counterbalanced blind reviews; keep the shared planner, renderer and
 evaluator fixed.
+
+## Preregistered multi-stream backend challenge panel (2026-10-17)
+
+Before paired backend outputs are generated, freeze these eight existing reliable one-second baseline anchors,
+one from each raw stream: `STREAM_00013.MTS` t048; `STREAM_00016.MTS` t120; `STREAM_00017.MTS` t021;
+`STREAM_00023.MTS` t004; `STREAM_00024.MTS` t571; `STREAM_00025.MTS` t025; `STREAM_00030.MTS` t087;
+`STREAM_00037.MTS` t081. The panel was chosen from existing baseline-only anchors to span motion levels;
+the baseline input-motion values range from 0.129 to 29.574 px/frame, with the S13 t048 window an extreme
+stress point. These clips were previously inspected for baseline reliability, so this is a fixed challenge
+panel, not a random or held-out sample of the full camcorder corpus. The eight exact source hashes are recorded
+in the benchmark output manifests.
+
+Run every window through the shared planner, renderer and evaluator at the same historical settings
+(20 flow iterations, half-resolution flow, 12 evaluation iterations at 2× downscale, three timed warm repeats,
+KLT enabled, seed 0). Require exact equality of all converted checkpoint tensors and matched source/config,
+frame count, and encoded cadence. Keep all eight windows in the primary result, including any weak or failed
+quality measurements. The anchor is the unit of analysis; frames, tracks and warm repeats are not independent
+samples. Compare paired per-anchor MLX/MPS warm-median runtime ratios, and paired log ratios for each output
+jitter metric. Use a one-sided paired t confidence bound (df=7); call MLX faster on this panel only if the upper
+95% bound for runtime ratio is below 1.0, and non-inferior on RAFT and KLT jitter only if each upper bound is
+below the predeclared 1.05 relative margin. Report all per-anchor values and a sensitivity summary without
+S13 t048, while keeping the all-eight result primary.
+
+Create blinded baseline/candidate review pairs for all eight windows and include each position-reversed control.
+Treat visual judgments as usable only if the per-window position audit shows method agreement after reversal;
+otherwise record them as position-following/inconclusive. The previous Gemini call followed screen side and is
+not evidence. No algorithm or production defaults change from this challenge-panel experiment. Even a positive
+result supports only this fixed panel and backend swap, not corpus-wide performance or a full independent
+PyTorch stabilizer comparison.
