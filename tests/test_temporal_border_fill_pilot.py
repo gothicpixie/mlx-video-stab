@@ -135,6 +135,34 @@ def test_symmetric_tie_averages_previous_and_next():
     assert (invalid, filled, unresolved) == (1, 1, 0)
 
 
+def test_bilateral_agreement_gate_fills_only_when_two_donors_agree():
+    frames, masks = _blank_window(3)
+    masks[1, 0, 0] = True
+    frames[0, 0, 0] = [10, 20, 30]
+    frames[2, 0, 0] = [12, 23, 28]
+    out, invalid, filled, unresolved = P.fill_center(frames, masks, 1, 1, max_bilateral_delta=5)
+    assert out[0, 0].tolist() == [11, 21, 29]
+    assert (invalid, filled, unresolved) == (1, 1, 0)
+
+    frames[2, 0, 0] = [60, 23, 28]
+    frames[1, 0, 0] = [1, 2, 3]
+    out, invalid, filled, unresolved = P.fill_center(frames, masks, 1, 1, max_bilateral_delta=5)
+    assert out[0, 0].tolist() == [1, 2, 3]
+    assert (invalid, filled, unresolved) == (1, 0, 1)
+
+
+def test_bilateral_gate_does_not_fall_back_after_nearest_disagreement():
+    frames, masks = _blank_window(5)
+    masks[2, 0, 0] = True
+    frames[1, 0, 0] = [0, 0, 0]
+    frames[3, 0, 0] = [100, 100, 100]  # nearest bilateral pair disagrees
+    frames[0, 0, 0] = [10, 10, 10]
+    frames[4, 0, 0] = [11, 11, 11]    # farther agreement is deliberately not used
+    out, invalid, filled, unresolved = P.fill_center(frames, masks, 2, 2, max_bilateral_delta=5)
+    assert out[0, 0].tolist() == [0, 0, 0]
+    assert (invalid, filled, unresolved) == (1, 0, 1)
+
+
 def test_no_donor_leaves_the_pixel_unchanged_and_unresolved():
     frames, masks = _blank_window(5)
     masks[2, 0, 0] = True
@@ -209,6 +237,19 @@ def test_build_writes_candidate_and_adjacent_json(tmp_path, monkeypatch):
     assert on_disk["candidate"]["sha256"] == MF.sha256_file(out_video)
 
 
+def test_build_records_and_applies_bilateral_threshold(tmp_path, monkeypatch):
+    video = [np.full((4, 4, 3), value, np.uint8) for value in (10, 20, 30)]
+    mask = [np.zeros((4, 4, 3), np.uint8) for _ in range(3)]
+    mask[1][0, 0] = 255
+    manifest_path, _, _ = _setup(monkeypatch, tmp_path, video=video, mask=mask)
+    report = P.build(manifest_path, out_video=tmp_path / "gated.mp4", radius=1, max_bilateral_delta=5)
+    assert report["max_bilateral_delta"] == 5
+    assert "bilateral_only" in report["policy"]
+    assert report["fill"]["totals"]["filled"] == 0
+    assert report["fill"]["totals"]["unresolved"] == 1
+    assert FakeEncoder.instances[-1].frames[1][0, 0].tolist() == [20, 20, 20]
+
+
 def test_build_requires_a_successful_run_case_manifest(tmp_path, monkeypatch):
     manifest_path, _, _ = _setup(monkeypatch, tmp_path)
     doc = json.loads(manifest_path.read_text())
@@ -223,6 +264,13 @@ def test_build_rejects_non_positive_or_unbounded_radius(tmp_path, monkeypatch, r
     manifest_path, _, _ = _setup(monkeypatch, tmp_path)
     with pytest.raises(P.TemporalFillError, match="radius"):
         P.build(manifest_path, radius=radius)
+
+
+@pytest.mark.parametrize("threshold", [-1, 256, float("nan"), float("inf"), True])
+def test_build_rejects_invalid_bilateral_threshold(tmp_path, monkeypatch, threshold):
+    manifest_path, _, _ = _setup(monkeypatch, tmp_path)
+    with pytest.raises(P.TemporalFillError, match="max_bilateral_delta"):
+        P.build(manifest_path, radius=1, max_bilateral_delta=threshold)
 
 
 def test_build_rejects_decoded_frame_count_mismatch(tmp_path, monkeypatch):

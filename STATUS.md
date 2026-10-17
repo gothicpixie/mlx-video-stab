@@ -3441,3 +3441,12 @@ distinguish a static background from a moving object or disocclusion. Before pro
 prototype donor alignment/confidence using temporal motion correspondences, reject uncertain or occluded donors,
 and compare against this baseline on new source windows. Preserve the target frame's valid pixels and original
 coordinate provenance, and report filled/unresolved area and motion/ghosting separately.
+
+Research implementation. The pilot now has an opt-in max-bilateral-delta gate. It accepts a fill only when
+both equidistant temporal donors are valid and their maximum per-channel RGB difference is within the supplied
+threshold; a disagreeing nearest bilateral pair remains unresolved instead of falling back to a more distant
+donor. The default policy is unchanged. On this same development window, radius 3 with thresholds 16 and 64
+filled only **122 (0.010%)** and **496 (0.040%)** of invalid pixels, versus **36.0%** for the ungated pilot.
+Those gated candidates were not sent for visual review because their filled area is negligible. This color
+consistency test is not motion alignment and is not a selected setting; it shows that simple symmetric RGB
+agreement is too conservative here to preserve much coverage.

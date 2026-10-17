@@ -1667,3 +1667,9 @@ cancellation reporting, overwrite protection, run-dir uniqueness, cadence/timeli
 support flags, rendered-vs-encoded counts, diagnostics sampling policy and the CLI failure paths, all with
 cheap model/media fakes. `tests/test_media_cadence.py` adds real (CPU-only) ffmpeg regressions and a fake-flow
 end-to-end 60-render/30-encode case that needs no RAFT.
+
+The temporal border-fill pilot also accepts the opt-in experimental flag `--max-bilateral-delta N`. It fills
+only when both equidistant neighbors have valid pixels and their maximum per-channel RGB difference is at most
+N; a disagreeing nearest pair is left unresolved rather than replaced by a farther donor. This is a color
+consistency heuristic, not motion alignment: it may reject static content under exposure/noise changes and can
+still accept similarly colored moving objects. The default pilot policy is unchanged.

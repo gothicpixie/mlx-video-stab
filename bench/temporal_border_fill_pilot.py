@@ -79,6 +79,8 @@ FILL_POLICY = (
 LIMITATIONS = (
     "diagnostic heuristic only: copying a border pixel from another time can ghost moving content, and the "
     "fill cannot tell a static background gap from a moving foreground edge; not a production default",
+    "the optional bilateral RGB-consistency gate is not motion alignment: a moving object with similar colors "
+    "can still pass, while exposure changes or sensor noise can reject a static background donor",
     "one candidate clip per run; no stabilization, motion model, mask or default is changed",
     "counts and fractions only: no quality score, no winner and no threshold is selected",
     "the offline report is intended for a later local visual review; this tool makes no network call",
@@ -93,7 +95,7 @@ class TemporalFillError(ValueError):
 # pure fill core (unit-testable, no I/O)
 # --------------------------------------------------------------------------------------
 
-def fill_center(frames, masks, center, radius):
+def fill_center(frames, masks, center, radius, max_bilateral_delta=None):
     """Fill one frame's invalid pixels from its temporal neighbors.
 
     ``frames`` is a sequence of original ``[H, W, 3]`` uint8 frames and ``masks`` a matching sequence of
@@ -106,6 +108,7 @@ def fill_center(frames, masks, center, radius):
     radius = int(radius)
     if radius < 1:
         raise TemporalFillError("radius must be a positive integer")
+    max_bilateral_delta = _validate_max_bilateral_delta(max_bilateral_delta)
     frames = [np.asarray(f) for f in frames]
     masks = [np.asarray(m).astype(bool) for m in masks]
     n = len(frames)
@@ -124,24 +127,40 @@ def fill_center(frames, masks, center, radius):
     out = frames[center].copy()
     remaining = masks[center].copy()
     filled_any = np.zeros_like(remaining)
+    blocked = np.zeros_like(remaining)
     for d in range(1, radius + 1):
-        if not remaining.any():
+        active = remaining & ~blocked
+        if not active.any():
             break
         p, nx = center - d, center + d
         prev_ok = ~masks[p] if p >= 0 else np.zeros_like(remaining)
         next_ok = ~masks[nx] if nx < n else np.zeros_like(remaining)
-        both = remaining & prev_ok & next_ok
-        only_prev = remaining & prev_ok & ~next_ok
-        only_next = remaining & next_ok & ~prev_ok
+        both = active & prev_ok & next_ok
+        only_prev = active & prev_ok & ~next_ok
+        only_next = active & next_ok & ~prev_ok
         if both.any():
             prev = frames[p][both].astype(np.uint16)
             nxt = frames[nx][both].astype(np.uint16)
-            out[both] = ((prev + nxt) // 2).astype(np.uint8)
-        if only_prev.any():
+            if max_bilateral_delta is None:
+                out[both] = ((prev + nxt) // 2).astype(np.uint8)
+                accepted = both
+            else:
+                agree = np.max(np.abs(prev.astype(np.int16) - nxt.astype(np.int16)), axis=1) <= max_bilateral_delta
+                both_indices = np.flatnonzero(both)
+                accepted = np.zeros_like(remaining)
+                accepted.flat[both_indices[agree]] = True
+                rejected = np.zeros_like(remaining)
+                rejected.flat[both_indices[~agree]] = True
+                if accepted.any():
+                    out[accepted] = ((prev[agree] + nxt[agree]) // 2).astype(np.uint8)
+                blocked |= rejected
+        else:
+            accepted = np.zeros_like(remaining)
+        if only_prev.any() and max_bilateral_delta is None:
             out[only_prev] = frames[p][only_prev]
-        if only_next.any():
+        if only_next.any() and max_bilateral_delta is None:
             out[only_next] = frames[nx][only_next]
-        newly = both | only_prev | only_next
+        newly = accepted | (only_prev | only_next if max_bilateral_delta is None else False)
         filled_any |= newly
         remaining &= ~newly
 
@@ -161,7 +180,7 @@ def _as_mask_bool(mask):
     return mask > 127
 
 
-def stream_fill(pairs, count, radius, on_frame, window_probe=None):
+def stream_fill(pairs, count, radius, on_frame, window_probe=None, max_bilateral_delta=None):
     """Fill ``count`` frames from a ``(frame, mask)`` iterator with a bounded sliding window.
 
     ``pairs`` yields decoded ``(frame, mask)`` pairs. At most ``2*radius + 1`` pairs are ever buffered: frame
@@ -209,7 +228,8 @@ def stream_fill(pairs, count, radius, on_frame, window_probe=None):
 
         frames = [entry[1] for entry in buf]
         masks = [entry[2] for entry in buf]
-        out, invalid, filled, unresolved = fill_center(frames, masks, t - buf[0][0], radius)
+        out, invalid, filled, unresolved = fill_center(
+            frames, masks, t - buf[0][0], radius, max_bilateral_delta=max_bilateral_delta)
         record = {
             "index": int(t),
             "invalid": invalid,
@@ -355,6 +375,21 @@ def _validate_radius(radius):
     return int(radius)
 
 
+def _validate_max_bilateral_delta(value):
+    """Validate an optional per-channel RGB agreement threshold in [0, 255]."""
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise TemporalFillError("max_bilateral_delta must be finite and in [0, 255]")
+    try:
+        threshold = float(value)
+    except (TypeError, ValueError) as exc:
+        raise TemporalFillError("max_bilateral_delta must be finite and in [0, 255]") from exc
+    if not np.isfinite(threshold) or not (0.0 <= threshold <= 255.0):
+        raise TemporalFillError("max_bilateral_delta must be finite and in [0, 255]")
+    return threshold
+
+
 def _resolve_outputs(manifest_path, out_video, out_json, radius):
     run_dir = manifest_path.parent
     video_path = Path(out_video).resolve() if out_video else (run_dir / f"temporal_fill_r{radius}.mp4").resolve()
@@ -369,9 +404,10 @@ def _resolve_outputs(manifest_path, out_video, out_json, radius):
 
 
 def build(manifest_path, *, out_video=None, out_json=None, radius=DEFAULT_RADIUS,
-          crf=DEFAULT_CRF, preset=DEFAULT_PRESET, log=print) -> dict:
+          crf=DEFAULT_CRF, preset=DEFAULT_PRESET, max_bilateral_delta=None, log=print) -> dict:
     """Validate the run, fill the border pixels and write the candidate MP4 + adjacent atomic JSON."""
     radius = _validate_radius(radius)
+    max_bilateral_delta = _validate_max_bilateral_delta(max_bilateral_delta)
     manifest, manifest_path, video_path, mask_path = load_and_validate_manifest(manifest_path)
     evidence = validate_evidence(manifest, video_path, mask_path)
     out_video, out_json = _resolve_outputs(manifest_path, out_video, out_json, radius)
@@ -404,7 +440,8 @@ def build(manifest_path, *, out_video=None, out_json=None, radius=DEFAULT_RADIUS
         def on_frame(frame, _record):
             encoder.write(frame)
 
-        records, totals = stream_fill(pairs, evidence["count"], radius, on_frame)
+        records, totals = stream_fill(pairs, evidence["count"], radius, on_frame,
+                                      max_bilateral_delta=max_bilateral_delta)
         encoder.close()
         encoder = None
 
@@ -429,7 +466,10 @@ def build(manifest_path, *, out_video=None, out_json=None, radius=DEFAULT_RADIUS
             "created": MF.now_iso(),
             "updated": MF.now_iso(),
             "radius": radius,
-            "policy": FILL_POLICY,
+            "max_bilateral_delta": max_bilateral_delta,
+            "policy": (FILL_POLICY if max_bilateral_delta is None else
+                       FILL_POLICY + "; bilateral_only; nearest bilateral donor rejected when max per-channel "
+                       f"RGB difference exceeds {max_bilateral_delta:g}; no farther fallback after rejection"),
             "max_window_frames": 2 * radius + 1,
             "source": {
                 "manifest": {"path": str(manifest_path), "sha256": MF.sha256_file(manifest_path)},
@@ -486,6 +526,9 @@ def build_parser():
     p.add_argument("manifest", help="successful bench/run_case manifest.json")
     p.add_argument("--radius", type=int, default=DEFAULT_RADIUS,
                    help=f"maximum temporal donor distance in frames (default: %(default)s, max: {MAX_RADIUS})")
+    p.add_argument("--max-bilateral-delta", type=float, default=None,
+                   help="experimental: require valid neighbors on both sides and max RGB channel difference "
+                        "<= this threshold (0..255); disagreements stay unresolved; default keeps the baseline policy")
     p.add_argument("--out-video", default=None,
                    help="candidate MP4 (default: <manifest-dir>/temporal_fill_r<radius>.mp4)")
     p.add_argument("--out-json", default=None, help="report JSON (default: <out-video stem>.json)")
@@ -497,7 +540,7 @@ def build_parser():
 def run(opts, log=print) -> dict:
     """Validate the options, run the pilot and write the artifacts. Returns the report dict."""
     return build(opts.manifest, out_video=opts.out_video, out_json=opts.out_json, radius=opts.radius,
-                 crf=opts.crf, preset=opts.preset, log=log)
+                 crf=opts.crf, preset=opts.preset, max_bilateral_delta=opts.max_bilateral_delta, log=log)
 
 
 def main(argv=None) -> int:
