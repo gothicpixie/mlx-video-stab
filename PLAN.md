@@ -348,25 +348,28 @@ outlier response separately, then hold out real windows for validation. Do not c
 ## Synthetic intent controls
 
 The generator now has additive, tested controls for predictable versus stochastic camera intent and subject speed;
-the legacy smooth scene remains the default. The runner now threads these controls through CLI options and manifest
+the legacy smooth scene remains the default. The runner threads these controls through CLI options and manifest
 provenance, including exact intended/actual camera paths; review tooling accepts hash-verified generated sources.
-This is fixture plumbing, not evidence of better stabilization. A 24-frame paired-seed smoke is documented in
-`STATUS.md`; next run the predeclared multi-seed factorial at useful resolution and duration, keep far-layer motion
-at 1.0. First make path predictability a controlled spectral factor with matched RMS velocity and acceleration;
-keep shake in a predeclared band and use independent random streams for scene, intent, shake, subject and noise.
-The main screen is path regime (smooth/stochastic) x layers (far-only/far+mid-near parallax) x subject
-(absent/world-static/world-moving), with each seed's shake trace held fixed across all 12 cells. Use at least
-8 seeds (12 preferred), at least 64 frames and 320x192; add calibration anchors for intent-only, shake-only,
-both and neither, plus a small resolution/length sensitivity check. Keep the far layer rigid/camera-locked as
-camera-path reference and use the same intent realization for layer/subject comparisons within each path regime.
+This is fixture plumbing, not evidence of better stabilization. The 24-frame paired-seed smoke and completed
+eight-seed factorial are documented in `STATUS.md`. The screen varied path regime (smooth/stochastic) x layers
+(far-only/far+mid-near parallax) x subject (absent/world-static/world-moving), with each seed's shake trace held
+fixed across all 12 cells and three calibration anchors. It completed 120/120 runs. Stochastic motion had higher
+x-intent RMSE by 1.066 px on average (7/8 seeds), but the interval is close to zero and the screen has no
+multiplicity adjustment; other intent, shake and interaction intervals cross zero. Treat this as a synthetic
+screening signal, not a model-selection result. Next run the planned small resolution/frame-length sensitivity
+check and validate on real footage before considering an intent-aware model.
 
 `bench.synth_intent_metrics` now composes the saved output-to-input plan with the known row-time camera-to-world
 transform, fits output camera pose on far-visible ground-truth pixels, and reports band-limited retention, shake
 attenuation, per-layer support/map-fit residual, crop and unavailable frames. The runner saves hash-verified
-visible-layer maps. A 24-frame integration smoke validated the path and is explicitly marked below the 64-frame
-screen minimum. Next add the resumable factorial harness, calibration anchors, full failure accounting, and
-identity/freeze baselines. Freeze estimator configuration and predeclare contrasts. The 96-frame raw-versus-
-stabilized Gemini picks reflect border visibility and cannot select a camera-intent model.
+visible-layer maps. The 24-frame smoke validated plumbing only; the 96-frame, 120-run factorial now passes all
+cells with complete truth support. The exact result and caveats are in `STATUS.md`. The 96-frame raw-versus-
+stabilized Gemini picks reflect border visibility and cannot select a camera-intent model. Next use the existing
+10-second t060/t800 baselines on `00176.MTS` for paired raw/stabilized analysis of x/y residual motion, drift,
+jerk, crop and repeat variability, with blinded Gemini judgments on separate motion dimensions. These two windows
+are exploratory proxies, not independent clips or ground truth. Real-footage validation and the planned
+resolution/length sensitivity check remain open; do not implement intent-aware behavior until a useful effect
+replicates there.
 
 The generator now offers an opt-in matched-spectrum phase-coherence pair and a static-intent calibration mode;
 legacy smooth generation remains unchanged. Phase randomization preserves second-order statistics, so this is a

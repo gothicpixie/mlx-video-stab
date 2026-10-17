@@ -3951,15 +3951,18 @@ zero failures, all 96 frames available for every layer, far-layer visibility abo
 coverage above 0.94, and camera-fit RMSE below 1.1 px. In this seed, stochastic-path cases retained more injected
 rotational intent (gain 0.25–0.33 versus 0.00–0.07 for smooth cases). Its horizontal shake residual was -12.3 dB
 for smooth versus -1.4 dB for stochastic. The metric is `20*log10(output residual RMS / input shake RMS)`, so
-negative values mean attenuation and more-negative values mean stronger rejection. Seed 0 in the screen reversed
-the pilot's horizontal shake result; subsequent seeds continued to vary. Across the first seven complete screen
-seeds, stochastic has higher x-intent RMSE in all seven (mean +1.46 px; seed-level t interval [0.97, 1.95]). The
-other tracked metrics remain uncertain: y-intent and rotation-intent intervals span zero, as do all
-shake-residual intervals. These are descriptive interim results only (7/8 seeds), not population conclusions or a
-model-selection result. Across the 84 successful main cells so far, all far-layer poses are available; visibility
-ranges 0.446–0.716, input-valid coverage 0.938–0.959 and pose-fit RMSE 0.493–1.805 px. Calibration anchors
-behave distinctly: shake-only removes the injected shake, while intent-only retains the shared drift and
-low-frequency pan.
+negative values mean attenuation and more-negative values mean stronger rejection. The full screen completed:
+120/120 cells succeeded across seeds 0–7, with no missing or duplicate main cells and no failed runs. The
+stochastic-minus-smooth x-intent RMSE contrast is +1.066 px (7/8 seeds positive; seed-level t interval
+[0.048, 2.085], percentile-bootstrap interval [0.205, 1.715]). This is a modest synthetic screening signal; the
+t interval is close to zero, and no multiplicity adjustment was predeclared, so do not call it confirmatory.
+Y-intent RMSE is +0.184 px [-0.148, 0.517] and rotation-intent RMSE is +0.016 deg [-0.088, 0.121]. Shake
+residual dB is +3.915 x [-3.771, 11.602], +1.128 y [-2.947, 5.203], and +0.373 rotation [-2.201, 2.947];
+lower values mean stronger rejection. All shake intervals cross zero. The tested phase-by-layer, phase-by-subject
+and three-way interaction intervals also cross zero. Across 96 main cells, all far-layer poses are available;
+visibility ranges 0.446–0.716, input-valid coverage 0.938–0.959 and pose-fit RMSE 0.493–1.805 px. The analysis
+JSON is `out/bench/synth_intent_factorial_8seed/analysis.json`. Calibration anchors behave distinctly:
+shake-only removes the injected shake, while intent-only retains the shared drift and low-frequency pan.
 
 `bench.synth_intent_analysis` treats seed as the experimental unit, averages the six main cells per intent mode,
 and summarizes paired stochastic-minus-smooth contrasts with per-seed signs and a seed-level Student-t interval;
@@ -3968,6 +3971,13 @@ It excludes calibration anchors and reports layer/subject strata, each cell's ph
 phase-by-subject and three-way difference-in-differences. Lower intent RMSE is better; lower (more negative)
 shake residual dB means stronger rejection. DeepSeek code review caught a count-only completeness check that could
 have allowed a duplicate cell to stand in for a missing one; the analyzer now validates the exact designed cell
-set per mode and lists configured seeds with no main cells. A regression test covers duplicate cells. Keep the
-screen frozen and do not tune parameters to interim outcomes. The eight-seed run is active at 103/120 cells with
-zero failures.
+set per mode and lists configured seeds with no main cells. A regression test covers duplicate cells. The
+synthetic screen does not justify an intent-aware model change yet. DeepSeek recommends real footage next. Reuse
+the established 10-second, fidelity-0.1 baseline on `00176.MTS` at t060 and t800 as two paired raw/stabilized
+windows. Measure horizontal and vertical residual flow, drift, peak displacement, jerk, crop/frame retention,
+and repeat/encode variability separately. Blind and randomize raw-versus-stabilized pairs for Gemini, with
+separate judgments of horizontal drift, vertical drift, shake and artifacts; treat these two windows from one
+source as exploratory proxy evidence, not independent clips or camera ground truth. Continue only if any
+x-specific effect exceeds repeat variability, is visible in both windows and is not explained by crop/encoding.
+Do not change the model from the synthetic result alone. The small resolution/frame-length sensitivity check
+also remains open.
