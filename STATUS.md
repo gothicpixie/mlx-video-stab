@@ -3083,3 +3083,21 @@ passes and the primary maximum displacement exceeds **1 px**, or the mean exceed
 probe-line deviation and source-bounds coverage; neither may be replaced by a composite score. This sparse
 probe audit cannot establish a fold elsewhere in the full warp or a perceptual improvement. Results from this
 already reviewed source are diagnostic and do not authorize a default change.
+
+## Baseline-only rotation-window selection (2026-10-16)
+
+The S13 t032–042 capture failed the preceding rotation gate (maximum absolute rotation 0.108 degrees), so its
+composition output will not be interpreted as a rotation/parallax test. For a follow-up stress-window screen,
+select the strongest existing reliable one-second baseline anchor at a window without a candidate render:
+`STREAM_00013.MTS` t048–049, anchor `out/bench/e02_anchor_s13_t048_1s/`. It has 29/29 supported pairs, zero
+fallbacks and 29.574 px/frame input motion, the highest input-motion value in the available reliable anchor
+inventory. The anchor itself is already inspected baseline-only data; any follow-up on its nested t048–058
+window is exploratory and cannot count as independent or held-out validation.
+
+First run `bench.real_motion_field_audit` on the anchor. Continue to a new 10-second baseline-only capture at
+t048–058 only if it remains reliable and at least one pair's absolute fitted image-plane rotation exceeds
+**0.5 degrees**. If this fails, stop and report that the available saved anchors did not yield a qualifying
+window; do not relax the threshold based on the result. If the 10-second baseline succeeds, freeze its plan and
+motion and run the already specified `--every 1 --samples 401` production-versus-exact-composition audit, with
+the same **>1 px maximum or >0.5 px mean** primary displacement criterion. Do not render a candidate or change
+production behavior.
