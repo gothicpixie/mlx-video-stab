@@ -3598,3 +3598,34 @@ quality/runtime tradeoff. Do not implement a gate based on fallback count. Befor
 candidate independent signal (such as flow consistency or scale-2/scale-4 disagreement) on additional scenes
 and measure whether it flags actual output regressions without rejecting stable scale-4 windows. Keep the auto
 resolver's current opt-in behavior and do not claim 4K quality parity.
+
+### Input-side scale-4 fit-confidence screen (2026-10-17)
+
+To check whether a signal already available during scale-4 analysis might flag the observed regression, an
+offline replay captured per-pair fit and forward/backward diagnostics on the raw inputs. The new
+`bench/flow_scale_fit_diagnostics.py` reports one-second RANSAC inlier-fraction quantiles, fallback events,
+valid sample counts, mover fraction, and cycle-consistency summaries. It does not change stabilization or define
+a threshold. The source frame decode, RAFT settings, config and source hash come from the matched manifests;
+downstream quality deltas are recorded from the existing fixed scale-2 evaluator results.
+
+| Window | Inlier fraction p10 | Minimum inlier fraction | Mean FB-valid fraction | Fallback pairs | Output Δ jitter (px) | Output Δ wobble (px) |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| 00176 t060, 1 s | 0.950 | 0.933 | 0.991 | 0 | +0.0265 | +0.0140 |
+| 00176 t800, 1 s | 1.000 | 1.000 | 0.999 | 0 | +0.0275 | +0.0186 |
+
+On `00177.MTS` t050–060, scale-4 inlier-fraction p10 was 0.831 and 0.915 in the first two seconds, where
+the scale-4-minus-scale-2 output jitter differences were +1.756 and +1.910 px. Later blocks had p10 at or above
+0.967 and smaller jitter differences of +0.343 to +0.698 px. Minimum inlier fraction also dipped in some later
+blocks, so the minimum alone was not a clean separator. All 10 blocks had zero fallback pairs. The two
+`00176.MTS` windows had much higher inlier fractions and smaller penalties. The FB-valid fraction was also much
+lower throughout the `00177` window (0.806–0.913) than in the `00176` windows, so inlier p10 has not been
+separated from general texture, occlusion, or motion difficulty. Ten adjacent blocks are correlated and are one
+clip, not 10 independent validations.
+
+Decision: retain inlier fraction p10 as an exploratory covariate, not a quality gate. The evidence says it may
+identify the two worst seconds in this clip, but does not show that it uniquely predicts scale-4 harm or that
+any cutoff generalizes. The next useful check is a controlled synthetic scale-2/scale-4 comparison with known
+camera motion and varied texture/blur, plus additional held-out real windows if new footage becomes available.
+Compare the fit signal to known-truth stabilization error while stratifying by input difficulty; report the full
+series and do not tune a threshold on these three windows. Diagnostic artifacts remain under ignored
+`out/bench/*fit_diagnostics.json`.
