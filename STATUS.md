@@ -3376,12 +3376,13 @@ the units of analysis, not pixels or frames:
 | S30 t087 | 1.803 → 1.680 | 1.378 → 1.308 | 81,996 / 5,000 | 1.015 | 0.995 |
 | S37 t081 | 0.778 → 0.639 | 0.168 → 0.093 | 90,222 / 3,500 | 0.915 | unavailable |
 
-Kernel-support invalid fraction decreased on all eight streams. The paired RAFT jitter geometric-mean ratio was
+Kernel-support invalid fraction decreased on all eight streams. All eight candidate RAFT measurements had zero fallback. The paired RAFT jitter geometric-mean ratio was
 **1.0168** (candidate / baseline), with a one-sided 95% upper bound of **1.0608** (df=7). This exceeds the
 **1.05 reference margin** used in the earlier backend challenge; that margin was not registered specifically for
 this local-support test, so treat the comparison as exploratory rather than a formal gate. KLT path metrics were
 available on six streams only: geometric-mean ratio **1.0278**, one-sided 95% upper bound **1.0669** (df=5),
-with S17 at **1.121**. KLT is incomplete and the adverse stream result is retained. The candidate's complete
+with S17 at **1.121**. KLT was unavailable on S13 (4 baseline / 6 candidate failed pairs) and S37 (2 / 2).
+KLT is incomplete and the adverse stream result is retained. The candidate's complete
 machine-readable per-stream metrics are in ignored `out/bench/local_support_panel8_20261017/panel_eval.json`.
 
 Gemini reviewed 16 blinded baseline/candidate clips, each with a position-reversed control. It returned six
