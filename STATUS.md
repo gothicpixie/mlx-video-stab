@@ -3278,9 +3278,57 @@ exact grid-cell centres consumed by `motion.observe()`, plus frame-index pairs, 
 candidate-valid mask after any source/destination mask rejection. The numeric-only `mlxstab.flow_samples/1`
 NPZ is a compact observation-boundary capture before robust fitting, not full-resolution dense flow and not
 ground truth. Its option is part of experiment identity and the paired command. DeepSeek Flash via Pi reviewed
-the capture boundary and specifically recommended retaining the validity mask; it is included. The next
-exploratory step is to rerun those four windows with identical configs, compare raw sampled vectors and mask
-agreement alongside fitted-motion/plan differences, and report whether the backend split begins in predicted
-flow or in filtering/fitting. No production behavior changes when capture is off.
+the capture boundary and specifically recommended retaining the validity mask; it is included.
+
+The four exploratory windows were rerun with the original config and alternating backend order. All paired
+manifests passed source hash, resolved-config, cadence and exact checkpoint tensor checks; each saved 59 pairs
+on the common 135×240 fit grid. Among samples accepted by both backends, forward/backward EPE and fit/validity
+results were:
+
+| Window | Forward median / p95 EPE (px) | Backward median / p95 EPE (px) | Candidate-mask agreement | Median / max fitted-H corner delta (px) |
+|---|---:|---:|---:|---:|
+| S13 t048 | 0.0217 / 0.329 | 0.0221 / 0.396 | 96.99% | 0.033 / 26.77 |
+| S24 t571 | 0.0058 / 0.050 | 0.0060 / 0.056 | 99.39% | 0.001 / 11.07 |
+| S25 t025 | 0.0048 / 0.035 | 0.0047 / 0.033 | 99.68% | 0.003 / 2.31 |
+| S37 t081 | 0.0026 / 0.032 | 0.0029 / 0.039 | 99.52% | 0.002 / 0.07 |
+
+Per-pair common-valid flow EPE and fitted-H corner transfer differences were positively rank-correlated in every
+window (Spearman rho 0.39–0.83). Most samples agree closely, with the practical differences concentrated in
+tails and a few fitted pairs. An offline replay from the saved forward vectors, candidate-valid masks and
+cycle diagnostics exactly reproduced `H`, mesh, rows and fallback decisions for all 472 backend/pair fits.
+Therefore the observed split enters at the flow/validity boundary and the shared fit can amplify it on a few
+pairs; this does not establish which flow is more accurate or explain perceived quality. The windows were
+selected after the earlier challenge, the common-valid subset is selected by both estimated flows, and there
+is no ground truth. Machine-readable results and captures are in ignored
+`out/bench/backend_panel8_flow_samples_20261017/`.
+
+Follow-up diagnostics on S13 t048 narrowed the numerical question, but did not identify a winning backend or
+production fix. With `warm_start=false`, cross-backend sampled-flow EPE and candidate-mask disagreement fell
+relative to the warm-start run (forward median/mean EPE 0.0325/0.4387 to 0.0197/0.1396 px; backward
+0.0338/0.3755 to 0.0202/0.1645 px; mask agreement 96.99% to 98.98%), while output jitter stayed essentially
+unchanged: MLX 21.265 to 21.607 px and Torch MPS 21.725 to 21.490 px. This shows warm state contributes to
+backend divergence, but disabling it did not improve stabilization on this clip.
+
+A teacher-forced initialization replay over the first 28 pairs reduced some of the self-warm divergence but
+did not erase it: common-sample forward median/mean EPE was 0.0304/0.228 px from zero init, 0.0417/0.691
+with self-warm, and 0.0370/0.471 with the previous pair's zero-init state; backward EPE was
+0.0318/0.257, 0.0436/0.435, and 0.0391/0.470 px. Preprocessing was ruled out for this sample: all 60
+normalized, padded network input tensors were bitwise identical across implementations. In an easy and a hard
+pair replay, framework boundary differences and update-block numerical differences were similar in scale; the
+hard pair's first-update discrepancy was about 0.05–0.06 source pixels. The hard pair's cross-backend EPE
+started around 0.06 px after one update and its p95 grew through later recurrent updates. These are diagnostic
+observations on selected pairs, not evidence that either flow is more accurate.
+
+An 8/12/20-iteration paired sweep also failed to support lowering the default on this clip. Input jitter was
+27.397 px throughout. At 20 iterations, output jitter was 21.265 px (MLX) and 21.725 px (Torch MPS); at 12,
+21.704 and 21.602 px; at 8, 21.851 and 21.970 px. The backend ordering changes with iteration count, and the
+shorter runs did not beat the 20-iteration result consistently. Wobble also moved in different directions.
+There is no ground truth here, so these output metrics cannot establish stabilization accuracy.
+
+The next decision-relevant step is a blinded, multi-clip quality evaluation with independently annotated
+static landmarks or trusted camera-motion references, reporting stability, crop/warp artifacts and valid
+coverage alongside runtime. Until that evaluation exists, keep the current defaults: these experiments explain
+where backend differences can arise, but they do not establish a quality improvement. Captures and detailed
+JSON analyses remain under ignored `out/bench/`.
 
 Verification after adding the opt-in capture: `.claude/verify.sh` passed **1591 tests in 56.71 s**.
