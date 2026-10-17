@@ -3421,3 +3421,23 @@ same single window, the crop is substantial, and KLT/RAFT and Gemini do not give
 Do not tune on the reserved S16/S25 windows. To pursue borders, prioritize preserved-framing fill against
 source-coordinate maps on new source windows; revisit adaptive cropping only after a crop-area cap and a
 development/held-out split are declared.
+
+## Same-coordinate temporal fill screen (2026-10-17)
+
+The existing `bench.temporal_border_fill_pilot` was run at radius 3 on the matched baseline output for the same
+development-only t0613 window. Its bounded donor search filled **441,453 / 1,226,609 invalid pixels (36.0%)**,
+equal to **0.71% of all output pixels**; 785,156 invalid pixels remained unresolved. The candidate kept the
+baseline 1920x1080, 30-frame, 30000/1001 cadence. The implementation changes only invalid pixels and reads only
+original neighboring frames/masks, as covered by its focused unit tests.
+
+Gemini 3.8 Flash via Vertex preferred the filled candidate in the original blind pair, then returned a tie in
+the position reversal. The audit therefore found no two-order method agreement. This is inconclusive one-model,
+one-second visual evidence; it does not establish improved stabilization. Most border pixels remain unfilled at
+this short radius, and a larger radius can increase temporal ghosting. Keep the pilot opt-in and research-only;
+do not wire it into the production default.
+
+Implementation direction: the nearest-valid same-output-coordinate rule is a useful baseline but cannot
+distinguish a static background from a moving object or disocclusion. Before promoting temporal completion,
+prototype donor alignment/confidence using temporal motion correspondences, reject uncertain or occluded donors,
+and compare against this baseline on new source windows. Preserve the target frame's valid pixels and original
+coordinate provenance, and report filled/unresolved area and motion/ghosting separately.
