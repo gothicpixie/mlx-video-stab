@@ -3731,3 +3731,34 @@ tests for multiple pan speeds and sinusoidal intentional motion. Evaluate path r
 wobble, crop, and distortion; use frame-block bootstrap intervals and blind visual review as secondary evidence.
 Keep scale selection unchanged and treat scale 4 as an observed quality-risk option. Reports, comparisons and
 Gemini responses remain under ignored `out/bench/`.
+
+### Path-retention follow-up: sinusoidal intent and Gaussian smoothing (2026-10-17)
+
+The exact-motion audit now includes known sinusoidal camera paths. It fits output amplitude and phase at the
+injected frequency after trimming boundary transients; phase is marked unidentifiable when the output
+amplitude is effectively zero. This avoids treating arbitrary phase from a fully suppressed signal as
+evidence. Across 480-frame controls with a 20 px sinusoid and 6 px smooth path jitter, L1 fidelity 0.1
+suppressed the tested 60-, 120-, and 240-frame components (gain 0). Fidelity 3 retained gains of 0.87,
+0.98, and 0.91 respectively, but had already performed poorly on natural KLT-supported jitter metrics in
+the prior tests. Thus the same scalar knob does not resolve the conflict between suppressing wobble and
+preserving deliberate movement.
+
+The existing Gaussian path smoother was screened as an alternative. On exact controls, sigma 10 retained
+about 0.59 / 0.91 / 0.93 amplitude at periods 60 / 120 / 240 frames, with high-frequency path error lower
+than narrow kernels. On the two matched 1-second KLT-supported windows from `00176.MTS` (t060 and t800),
+sigma 10 remained between the default L1 fidelity 0.1 and the less-stable L1 fidelity 2–3 candidates on
+measured jitter, but was substantially worse than the default: RAFT jitter was 0.0638 / 0.1641 px versus
+0.0203 / 0.0274 px for L1 0.1. Wobble was 0.0621 / 0.0277 px versus 0.0244 / 0.0197 px. KLT jitter was
+0.0718 / 0.1889 px versus 0.0458 / 0.0692 px. All runs had complete KLT support. These short windows do
+not provide ground truth for which low-frequency motion should be preserved.
+
+Gemini 3.8 Flash via Vertex reviewed each Gaussian/default pair in both panel orders. For both windows it
+preferred the Gaussian candidate in the original order, then preferred the default when panel positions
+were reversed. That is a clear position-order inconsistency, so the visual review is inconclusive despite
+describing less high-frequency jitter in each original-order call. It does not override the fixed metrics.
+Do not change the default or promote Gaussian sigma 10. Keep it as a measured comparison point. The next
+useful experiment is a frequency-aware path objective (separate intentional low-frequency motion from
+high-frequency disturbance), first against exact multiscale motion profiles and then on disjoint natural
+windows with reliable independent tracking. Compare at matched high-frequency suppression and report path
+retention, jitter, wobble, crop, distortion, and uncertainty together; do not select a smoother from a single
+aggregate score.

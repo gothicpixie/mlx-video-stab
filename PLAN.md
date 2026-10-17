@@ -313,3 +313,15 @@ Then run multiscale and fractality experiments, advance depth and scene tracking
 A release is ready when the selected preset passes held-out quality and reliability gates, the full media path preserves its documented properties, and every shipped model and kernel has reproducible provenance. Publish per-scene results, failures, hardware, precision, memory, latency and quality tradeoffs. Preserve the simpler baseline as a fallback.
 
 The first release can succeed with shape-preserving 2D stabilization, prediction and a reliable runtime. Depth, 3D, fractal priors and Rust each earn inclusion through evidence. The combined system should be easier to trust because it knows which observations support its correction, when those observations fail, and how much of the requested camera move the available footage can actually support.
+
+## Updated path-smoother decision (2026-10-17)
+
+The latest sinusoidal exact-motion screen and Gaussian comparison are recorded in [STATUS.md](STATUS.md).
+Keep L1 fidelity 0.1 as the unchanged provisional default; do not promote higher scalar fidelity or Gaussian
+sigma 10. Fidelity 0.1 suppresses tested deliberate sinusoids, while higher fidelity worsens real-window
+jitter, and Gaussian sigma 10 is only an intermediate tradeoff that still trails the default on the two
+measured natural windows. Gemini's original/reversed-order calls flipped preference on both windows, so the
+visual result is inconclusive. Next, test a frequency-aware objective on exact multi-frequency motion and
+then on disjoint natural windows with reliable independent tracking. Gate any candidate on path retention,
+jitter, wobble, crop, distortion, and uncertainty jointly; leave the production default unchanged until a
+repeatable Pareto improvement is demonstrated.
