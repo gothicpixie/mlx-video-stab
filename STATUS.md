@@ -3864,3 +3864,23 @@ source windows and truth arrays are recorded in their manifests under ignored
 clips were built and submitted. This tiny pair checks plumbing only: it is not a multi-seed factorial, does not
 compare stabilization methods, and cannot establish whether visual content cues improve stabilization. Record
 Gemini's per-clip judgments when returned, but keep objective metrics and known camera truth primary.
+
+DeepSeek's design review flags the current `smooth`/`stochastic` label as insufficient: intent regimes need
+matched RMS velocity/acceleration and predeclared frequency bands, otherwise the stochastic arm may simply be
+more shake-like or energetic. It recommends a 2x2x3 paired-seed screen: path regime (smooth/stochastic), scene
+layers (far-only/far+mid-near parallax), and subject (absent/world-static/world-moving). Hold a distinct shake
+trace fixed across all cells for each seed; use identical intent realizations for layer/subject comparisons,
+but matched energy rather than an identical path across intent regimes. Keep the far layer rigid and camera-locked
+as ground-truth camera reference. Use 8 seeds as a screening floor (12 preferred), at least 64 frames and
+320x192, with a separate small resolution/length sensitivity check. Add clean and hard calibration anchors for
+intent-only, shake-only/static-camera, both, and neither.
+
+Measure intended-path gain/correlation/RMSE and endpoint drift in the intent band; shake RMS/PSD attenuation in
+the shake band; per-layer/subject distortion, non-rigidity, fold-over and common-valid-mask crop; and predeclared
+failure events with all-run as well as complete-case reporting. Plot retention and rejection jointly and include
+identity/freeze reference baselines rather than collapsing results into one score. Freeze estimator config before
+the factorial. This screen is not yet implemented. The Gemini API report is partial (two of four panel-order
+judgments); the next request stalled beyond two minutes and was interrupted, leaving the resumable partial JSON
+under ignored `out/bench/synth_intent_factorial_seed17/gemini_review.json`. Both predictable-scene judgments
+were ties, citing no clearly discernible motion/difference at this resolution and duration. Treat those as
+evidence that the smoke stimuli are too weak for visual adjudication, not evidence that stabilization has no effect.

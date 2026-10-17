@@ -352,6 +352,17 @@ the legacy smooth scene remains the default. The runner now threads these contro
 provenance, including exact intended/actual camera paths; review tooling accepts hash-verified generated sources.
 This is fixture plumbing, not evidence of better stabilization. A 24-frame paired-seed smoke is documented in
 `STATUS.md`; next run the predeclared multi-seed factorial at useful resolution and duration, keep far-layer motion
-at 1.0, and vary mid/near factors, predictability and subject absent/static/moving while reusing identical shake per
-seed. Evaluate path retention, shake rejection, subject distortion, crop and failure rates separately. Do not use
-the initial smoke or Gemini judgments to select a model or smoother.
+at 1.0. First make path predictability a controlled spectral factor with matched RMS velocity and acceleration;
+keep shake in a predeclared band and use independent random streams for scene, intent, shake, subject and noise.
+The main screen is path regime (smooth/stochastic) x layers (far-only/far+mid-near parallax) x subject
+(absent/world-static/world-moving), with each seed's shake trace held fixed across all 12 cells. Use at least
+8 seeds (12 preferred), at least 64 frames and 320x192; add calibration anchors for intent-only, shake-only,
+both and neither, plus a small resolution/length sensitivity check. Keep the far layer rigid/camera-locked as
+camera-path reference and use the same intent realization for layer/subject comparisons within each path regime.
+
+Before running the full screen, add per-layer truth-based measures for intent retention (band-limited gain,
+correlation, RMSE and endpoint drift), shake rejection (RMS and PSD attenuation), scene/subject distortion,
+common-valid-mask crop and rule-based failure events. Report identity and freeze baselines; show retention versus
+rejection jointly with distortion and failures, not as one composite score. Freeze estimator configuration and
+predeclare contrasts. Current smoke and partial Gemini ties only show that the synthetic review video was too
+short/low-resolution to judge; they cannot select a model or smoother.
