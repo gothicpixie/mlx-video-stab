@@ -3332,3 +3332,39 @@ where backend differences can arise, but they do not establish a quality improve
 JSON analyses remain under ignored `out/bench/`.
 
 Verification after adding the opt-in capture: `.claude/verify.sh` passed **1591 tests in 56.71 s**.
+
+## Localized border-support candidate: rendered checks (2026-10-17)
+
+The existing research-only candidate (`bench.local_support_render`, fixed `radius_px=8`, `temporal_radius=2`) was
+rendered against three captured baselines without rerunning RAFT: `00176.MTS` at 60–70 s and 800–810 s, and the
+distinct `00177.MTS` source at 90–100 s. Each render preserved the original 300-frame output cadence. Across all
+three, full-kernel invalid support decreased, but that geometric proxy did not predict all motion metrics:
+
+| Window | Kernel-support invalid fraction, baseline → candidate | Repaired / regressed pixels | Encoded center-invalid fraction, baseline → candidate | RAFT output jitter, baseline → candidate | KLT output jitter |
+|---|---:|---:|---:|---:|---:|
+| 00176 t060–070 | 2.640% → 2.350% | 1,828,570 / 20,709 | 2.237% → 1.993% | Not rerun | 0.52383 → 0.52454 px |
+| 00176 t800–810 | 1.951% → 1.862% | 558,533 / 4,904 | 1.555% → 1.493% | 0.06321 → 0.06272 px | 0.18540 → 0.18347 px |
+| 00177 t090–100 | 1.625% → 1.257% | 2,321,433 / 28,427 | 1.155% → 0.865% | 2.50279 → 3.07907 px | unavailable for both |
+
+For the known t060 lower-edge frame (output 44, plan frame 88), the candidate recovered 1,664 center-valid pixels
+with no newly invalid pixels. On t060, KLT had no failed pairs in either render; on t800 it also had full path
+support. On the distinct 00177 window, KLT path metrics were unavailable on both renders (43 baseline and 48
+candidate failed pairs). The paired RAFT evaluation on 00177 also had incomplete reliability: baseline/candidate
+output fallback counts were 5/4, so the jitter increase cannot be treated as a clean quality estimate. Still,
+this is an adverse guardrail result, not a pass. Gemini 3.8 Flash via the Vertex API reviewed blinded baseline vs
+candidate clips at 640×360 with the panel positions reversed; all three windows were ties in both orientations.
+This is no evidence of a visible improvement.
+
+Interpretation: keep the candidate research-only. It improves measured sampler support on these windows, but
+visual benefit is unresolved, one independent source has a large RAFT jitter increase with missing KLT path
+metrics, and the candidate has not been evaluated across a broad held-out set. Do not integrate it into the
+production warp or change defaults.
+
+Next test, fixed before measurement: apply the unchanged 8 px / 2-frame candidate to all eight previously frozen
+`backend_panel8_20261017` one-second anchors (one stream each). Use each MLX manifest's captured plan and original
+video as baseline. Report per-stream full-kernel support, encoded center-mask changes, RAFT jitter and fallback
+counts, and KLT path availability; streams are the units, not pixels or frames. Reuse the baseline metrics only
+after confirming the manifests have the same evaluator, cadence and config; otherwise rerun baseline and candidate
+with the same evaluator. Keep Gemini judgments secondary and position-audited. This is a multi-stream challenge
+panel assembled for backend work, not a newly sampled held-out corpus, so even a pass would justify only another
+validation stage, not a production change.
