@@ -4347,3 +4347,37 @@ is no repeatable visible win, and border loss is slightly higher with depth in b
 experimental and default-off; do not add a bundled estimator, CLI option, or extra inference cost on this evidence.
 Revisit only under E25's longer parallax-heavy footage and independent-tracking gate. Render pairs, Gemini judgments,
 and provenance stay in ignored `out/bench/depth_mesh_real_*/` artifacts.
+
+E25 follow-up (2026-10-18): longer real-window gate on `00176.MTS` t060–070
+
+To test whether the two-second screen had missed a real parallax benefit, rebuilt a fresh ten-second cache from the
+current `00176.MTS` (SHA-256
+`e4b1f80d54dfa9089741486be297c6fe74d754fe127ec04dfe5a7edcf8d9fbb3`), inferred Depth Anything V2 Base maps on
+MPS every four frames (150 maps), and ran the default and depth-gated production paths over the same 600 decoded
+frames. Both arms used RAFT-things, 24 iterations, downscale 2, half-rate analysis (300 pairs), and rendered
+600 frames at 60000/1001 fps. `mesh_depth_strength=1.0` was the only candidate change. The matched 7% interior
+edge mask and deterministic seed were used for all independent KLT sequences.
+
+| measure | baseline | depth-gated |
+|---|---:|---:|
+| analysis / planning / rendering (s) | 281.03 / 30.40 / 22.00 | 291.51 / 28.59 / 19.13 |
+| total throughput (frames/s) | 1.799 | 1.769 |
+| fit fallbacks | 0 | 0 |
+| mean / worst border loss | 2.2385% / 5.7360% | 2.3002% / 5.7754% |
+| independent KLT jitter (px) | 0.262393 | 0.262348 |
+| independent KLT frame motion (px) | 0.612270 | 0.613012 |
+| KLT failed pairs | 0/599 | 0/599 |
+
+The raw-input KLT jitter was 0.664856 px; both outputs reduced it by about 60.5%. The candidate's output/input
+jitter ratio was 0.394593 versus 0.394661 for baseline, a negligible difference; its frame-motion proxy was
+slightly worse. This is evidence of no practical KLT gain, not equivalence or ground truth. Gemini 3.8 Flash gave
+a medium-confidence tie in the original panel order and a medium-confidence baseline preference in the reversal;
+the pair has no repeatable non-tie method preference. In the reversal it noted dynamic bottom-edge deformation
+on candidate panel A, a single-model observation without repeat confirmation. Border loss also increased slightly,
+and this one timing run measured about 1.7% lower total throughput with depth.
+
+E25's improvement gate is **not met**. Keep the default-off API as a research hook for now, stop tuning this
+strength, and do not add a bundled depth estimator or inference/runtime cost. The results, full-resolution outputs,
+KLT report, Gemini judgments and reversal audit remain in ignored
+`out/bench/depth_mesh_real_00176_t60_10s/`. Continue the plan at the Rust compatibility spike (E20) rather than
+extend this depth branch without a new evidence-backed target.
