@@ -4557,3 +4557,14 @@ Rust baseline, latency fell from **0.707 s to 0.490 s** (31% faster) and process
 to 91 MB**. These are short measurements from one host; RSS is not accelerator memory. The update block
 remains uncompiled, so this result does not justify replacing the Python backend. The next experiment is
 compiling or fusing the recurrent update path, then repeating the same three-backend benchmark.
+
+### E20 follow-up (2026-10-18): rejected GRU gate-convolution fusion
+
+Tested merging each separable GRU step's update (`z`) and reset (`r`) convolutions, which share the same input,
+by concatenating their checkpoint output channels and splitting the result before sigmoid. The combined
+checkpoint tensors were bit-identical to the concatenated source weights, direct output error versus the
+original two-convolution path was below `1e-6`, and the full 1/24-iteration fixtures passed. However, the
+matched Rust release median regressed from **0.490 s to 0.567 s** on 360x640 (seven calls), roughly 16% slower.
+The implementation was removed; no code from this experiment remains in the runtime. This rejects that fusion
+for the current MLX convolution backend. The next optimization should reduce recurrent graph or kernel overhead
+without increasing convolution cost, then be accepted only after parity and benchmark gates.
