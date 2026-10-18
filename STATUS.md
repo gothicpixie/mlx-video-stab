@@ -3178,9 +3178,14 @@ baseline/candidate comparison and its panel reversal, preferring the baseline at
 orders; it cited rubber-sheet warping and curved border distortion in the candidate. The position-bias audit
 confirmed that the preference followed the baseline across physical sides. The candidate is rejected for this
 window; the result does not show that all composed residuals fail, but unfiltered exact composition is not a
-production improvement here. The render, paired review and judgments are under
-`out/bench/stage0_composition_t048_10s_baseline/`. Candidate motion metrics are still pending. No production
-change follows.
+production improvement here. A matched evaluator replay used the same raw source window, automatic bwdif
+deinterlacing, `fps=30000/1001`, RAFT 12 iterations at downscale 2, and no output mask for either arm. Baseline
+versus candidate RAFT jitter was **5.827 → 5.624 px** (3.5% lower) and wobble **0.485 → 0.418 px** (13.8%
+lower), with zero RAFT fit fallbacks in both. However, KLT path metrics were unavailable: the raw input had 4
+failed pairs and each output had 5, so the evaluator cannot establish an independent motion improvement. The
+small RAFT gain does not outweigh the repeatable medium-confidence Gemini baseline preference and the
+candidate's 6.392% mean invalid support. No production change follows. The render, paired review, judgments and
+unmasked evaluator reports are under `out/bench/stage0_composition_t048_10s_baseline/`.
 
 ## Shared-pipeline MLX versus PyTorch MPS flow comparison (2026-10-17)
 
