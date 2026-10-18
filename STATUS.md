@@ -4032,3 +4032,15 @@ source-hash-verified raw/stabilized pair and its position reversal and review bo
 protocol. Treat agreement as descriptive only. This screen tests whether the measured tradeoff recurs on a new
 segment; it cannot identify intended camera motion or validate content-aware intent. Do not change the model or
 defaults from it.
+
+Outcome (2026-10-17): the frozen `00177.MTS` t022–032 s run completed at
+`out/bench/intent_real_00177_t022_baseline/`. Source hash, config digest, 300-frame CFR output and mask
+alignment all matched the preregistration. It is **unscorable**: the RAFT evaluator fell back on 3 input and 2
+output fits, and the independent KLT input had 11 failed fits with no jitter estimate. The manifest sets
+`metrics.reliability.reliable=false` and `evaluator_agreement.reliable=false`. Its flow-based point estimates
+are not quality evidence. Following the frozen gate, no Gemini pair was built or submitted for this segment.
+Stabilization took 1,385 s; evaluation took 693 s; total wall time was 2,083 s, including 672 s of configured
+shared-lock pauses. DeepSeek Flash via Pi confirmed that the failure invalidates the sequential visual-review
+step; do not rehabilitate it with subjective comments. This is a retained failure row, not proof that the
+stabilizer worsens quality. The planned real-footage intent gate remains open pending a different source with
+reliable independent tracking or camera-path ground truth.
