@@ -4511,3 +4511,25 @@ This verifies the integrated fp32 loop at **1 and 24 iterations** only, on the c
 measurement. Warm starts, fp16 network/correlation paths, other iteration counts, full checkpoint-schema
 validation, exact version pairing, compiled updates, cancellation/recovery and sustained memory behavior
 remain untested; the production-migration decision stays open.
+
+### E20 follow-up (2026-10-18): matched end-to-end baseline
+
+Added a matched benchmark input generator and Rust release harness. All three paths use byte-identical seeded
+RGB inputs, the same checkpoint, a 24-iteration bidirectional call, one warmup and repeated timed calls. The
+Rust harness materializes all four outputs inside each timed call; model loading and construction are excluded.
+At 360x640 (45x80 feature grid), seven measured calls produced these medians:
+
+| backend | median per pair | process peak RSS |
+|---|---:|---:|
+| Rust release / MLX 0.32.2 | 0.707 s | 235 MB |
+| Python MLX 0.32.3 | 0.431 s | 177 MB |
+| PyTorch MPS | 0.531 s | 491 MB |
+
+On this host and workload, Rust is **1.64x slower than Python MLX and 1.33x slower than PyTorch MPS**. Its
+process peak RSS is 58.9 MB above MLX and 255 MB below PyTorch. This is a single-host, short-run baseline;
+process RSS includes interpreter/runtime and model overhead and does not report accelerator allocations.
+The current paths also differ slightly: the PyTorch reference computes the upsampling mask each iteration,
+while Rust and Python MLX compute it only for the final iteration. The most obvious optimization target is
+Rust's host-side correlation lookup, which materializes correlation data and loops on the CPU at every lookup.
+This measurement is evidence to optimize and remeasure, not evidence that the Rust path is faster or ready
+to replace either existing backend.

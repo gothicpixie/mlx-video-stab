@@ -105,6 +105,84 @@ RAFT parameter schema, comparison at iteration counts beyond 1 and 24,
 cancellation and error-recovery tests, and repeated end-to-end runtime and
 memory measurements before any migration decision.
 
+## Matched runtime harness
+
+`examples/bench_flow_bidir.rs` measures the current Rust bidirectional RAFT
+path against the existing Python MLX and PyTorch MPS runs. It reads the two raw
+float32 images produced by `bench/make_raft_bench_images.py`, loads the same
+converted checkpoint outside the timing region, performs one warmup pass, then
+runs repeated 24-iteration `Raft::flow_bidir` calls. Each timed call evaluates
+all four returned arrays inside the clock. The Rust output is one compact JSON
+line containing run metadata and per-repeat wall times; it does not infer speed
+or memory.
+
+The shared pair is exactly the one `bench/bench_raft.py` constructs with
+`np.random.default_rng(0)` and `np.roll(a, (3, -5), (0, 1))`. At 256x320 the
+feature grid is 32x40 and the production correlation configuration
+(4 levels, radius 4, fp32) is exercised. Run from the repository root,
+sequentially, one backend per process:
+
+```sh
+# 1. Write byte-identical inputs for all three backends.
+.venv/bin/python -I bench/make_raft_bench_images.py \
+    --height 256 --width 320 --out-dir out/raft-bench/pair-256x320
+
+# 2. Build the Rust release example once.
+cargo build --release --manifest-path rust/raft-compat/Cargo.toml \
+    --example bench_flow_bidir
+
+# 3. Rust/MLX. /usr/bin/time -l reports process lifetime peak RSS on stderr.
+/usr/bin/time -l rust/raft-compat/target/release/examples/bench_flow_bidir \
+    --first out/raft-bench/pair-256x320/first.f32 \
+    --second out/raft-bench/pair-256x320/second.f32 \
+    --checkpoint vendor/weights/conv/raft-things.safetensors \
+    --height 256 --width 320 --iters 24 --reps 5 --warmup 1 \
+    > out/raft-bench/rust.json 2> out/raft-bench/rust.time.txt
+
+# 4. Python MLX, same H/W/iters/reps. bench_raft.py performs one warmup run
+#    before its measured repeats, matching --warmup 1 above.
+/usr/bin/time -l .venv/bin/python -I bench/bench_raft.py mlx 256 320 24 5 bidir \
+    > out/raft-bench/mlx.json 2> out/raft-bench/mlx.time.txt
+
+# 5. PyTorch MPS, same H/W/iters/reps.
+/usr/bin/time -l .venv/bin/python -I bench/bench_raft.py mps 256 320 24 5 bidir \
+    > out/raft-bench/mps.json 2> out/raft-bench/mps.time.txt
+```
+
+`bench_raft.py` creates and loads its model before the warmup and repeats, so
+model loading is excluded there as well. The Rust `timing_scope` field records
+that file I/O, checkpoint loading, model construction and warmup are outside
+the measured calls. Peak RSS from `/usr/bin/time -l` is the lifetime peak for
+each whole process (interpreter, model load and run); compare it only with the
+same metric from the other commands. Extract it after the runs with:
+
+```sh
+grep 'maximum resident set size' out/raft-bench/*.time.txt
+```
+
+The Rust path here is the current compatibility prototype (host-side
+correlation lookup, uncompiled update block), not a production runtime. The
+PyTorch reference computes the upsampling mask on every iteration while the
+MLX paths compute it once; the harness therefore measures each implementation
+as it currently exists, not an identical graph. Keep the generated inputs and
+outputs under the ignored `out/` directory.
+
+An initial matched run at 360x640 (feature grid 45x80), fp32 and 24 iterations
+used one warmup and seven measured calls:
+
+| backend | median per pair | process peak RSS |
+|---|---:|---:|
+| Rust release / MLX 0.32.2 | 0.707 s | 235 MB |
+| Python MLX 0.32.3 | 0.431 s | 177 MB |
+| PyTorch MPS | 0.531 s | 491 MB |
+
+Rust measured 1.64x slower than Python MLX and 1.33x slower than PyTorch MPS.
+Its process peak RSS was 58.9 MB above MLX and 255 MB below PyTorch. These are
+short-run results on one host, not a broad performance claim. RSS does not
+capture accelerator allocations. The concrete cost visible in the current Rust
+path is host-side materialization of every correlation level on every lookup;
+that is the first optimization target.
+
 Run on Apple Silicon with Rust and Xcode installed:
 
 ```sh
