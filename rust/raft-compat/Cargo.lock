@@ -459,6 +459,7 @@ name = "mlxstab-raft-compat"
 version = "0.1.0"
 dependencies = [
  "mlx-rs",
+ "mlx-sys",
  "serde_json",
  "sha2",
 ]

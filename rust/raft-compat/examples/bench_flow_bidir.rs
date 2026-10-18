@@ -241,7 +241,7 @@ fn run() -> Result<(), String> {
         },
         "compile": {
             "update_block_compiled": false,
-            "correlation_lookup": "host-side Rust loop",
+            "correlation_lookup": "cached MLX Metal kernel",
         },
         "timing_scope": (
             "wall time around one Raft::flow_bidir call plus one eval of all four \

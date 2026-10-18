@@ -81,12 +81,11 @@ Regenerate them with:
 .venv/bin/python rust/raft-compat/tools/generate_flow_bidir_reference.py
 ```
 
-The lookup is deliberately a host-side correctness reference: it materializes
-MLX inputs into contiguous f32 slices and builds a new MLX output array.
-`CorrBlock` construction and pooling use ordinary MLX operations on-device.
-The bidirectional loop is also uncompiled, so it does not demonstrate Rust
-runtime, memory, or copy behavior. The crate is a parity spike, not a
-production inference path:
+Correlation lookup runs through a cached MLX Metal kernel, with a narrow
+`mlx-sys` FFI wrapper; correlation and coordinates stay on-device. `CorrBlock`
+construction and pooling use ordinary MLX operations. The bidirectional loop
+and update block are still uncompiled, so this remains a parity spike rather
+than a production inference path:
 
 - The fixture covers 1 and 24 shared iterations in fp32; 24 matches the
   production Python stabilization path. The loop accepts any iteration count,
@@ -95,8 +94,8 @@ production inference path:
 - Initial flow (`init_f`/`init_b` in Python) is not exposed; both directions
   start from zero flow.
 - fp16 encoder/correlation variants and the Python compile path are not ported.
-- Lookup, synchronization, cancellation, error recovery, and sustained-memory
-  behavior still require measurements. Exact MLX version pairing remains open:
+- Synchronization, cancellation, error recovery, and sustained-memory behavior
+  still need measurement. Exact MLX version pairing remains open:
   `mlx-rs` 0.32.0 targets MLX 0.32.2 while this checkout's Python environment
   has MLX 0.32.3.
 
@@ -160,14 +159,14 @@ same metric from the other commands. Extract it after the runs with:
 grep 'maximum resident set size' out/raft-bench/*.time.txt
 ```
 
-The Rust path here is the current compatibility prototype (host-side
+The Rust path here is the current compatibility prototype (device-side
 correlation lookup, uncompiled update block), not a production runtime. The
 PyTorch reference computes the upsampling mask on every iteration while the
 MLX paths compute it once; the harness therefore measures each implementation
 as it currently exists, not an identical graph. Keep the generated inputs and
 outputs under the ignored `out/` directory.
 
-An initial matched run at 360x640 (feature grid 45x80), fp32 and 24 iterations
+The pre-kernel baseline at 360x640 (feature grid 45x80), fp32 and 24 iterations
 used one warmup and seven measured calls:
 
 | backend | median per pair | process peak RSS |
@@ -179,9 +178,26 @@ used one warmup and seven measured calls:
 Rust measured 1.64x slower than Python MLX and 1.33x slower than PyTorch MPS.
 Its process peak RSS was 58.9 MB above MLX and 255 MB below PyTorch. These are
 short-run results on one host, not a broad performance claim. RSS does not
-capture accelerator allocations. The concrete cost visible in the current Rust
-path is host-side materialization of every correlation level on every lookup;
-that is the first optimization target.
+capture accelerator allocations. This baseline exposed host-side correlation
+materialization as the first optimization target; the follow-up result below
+measures the device-kernel change.
+
+After moving correlation lookup to the cached MLX Metal kernel, all three
+backends were rerun on the same 360x640 pair, with one warmup and seven measured
+calls per backend:
+
+| backend | median per pair | process peak RSS |
+|---|---:|---:|
+| Rust release / MLX 0.32.2 | 0.490 s | 91 MB |
+| Python MLX 0.32.3 | 0.453 s | 176 MB |
+| PyTorch MPS | 0.574 s | 422 MB |
+
+Rust is 8% slower than Python MLX and 15% faster than PyTorch MPS in this run.
+Compared with its pre-kernel 0.707 s baseline, Rust is 31% faster and uses
+144 MB less process peak RSS. These short measurements support the targeted
+optimization, but do not establish a general speed or memory win; the
+uncompiled update block remains in the critical path, and process RSS does not
+report accelerator allocations.
 
 Run on Apple Silicon with Rust and Xcode installed:
 

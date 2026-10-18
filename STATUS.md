@@ -4533,3 +4533,27 @@ while Rust and Python MLX compute it only for the final iteration. The most obvi
 Rust's host-side correlation lookup, which materializes correlation data and loops on the CPU at every lookup.
 This measurement is evidence to optimize and remeasure, not evidence that the Rust path is faster or ready
 to replace either existing backend.
+
+### E20 follow-up (2026-10-18): device-side correlation lookup
+
+Replaced repeated host copies and the Rust sampling loop with a cached MLX Metal kernel ported from Python
+`_LOOK_SRC`. Correlation and coordinate arrays stay on-device. The kernel preserves the tested XY offset order,
+bilinear interpolation, zero padding, float32 output, float16/float32 correlation storage, and non-contiguous
+input behavior. Its opaque handle is cached per thread alongside MLX's thread-local stream, avoiding unsafe
+`Send` or `Sync` assumptions. The small correlation fixture and integrated flow fixture at 1 and 24 iterations
+still pass; all **17 Rust tests pass**, and formatting, strict clippy, and `git diff --check` pass. CodeGraph
+was synced; its affected-file query found no linked test files, so Rust tests were run directly.
+
+The three backends were rerun on the same 360x640 pair with one warmup and seven timed 24-iteration calls:
+
+| backend | median per pair | process peak RSS |
+|---|---:|---:|
+| Rust release / MLX 0.32.2 | 0.490 s | 91 MB |
+| Python MLX 0.32.3 | 0.453 s | 176 MB |
+| PyTorch MPS | 0.574 s | 422 MB |
+
+In this run Rust is **8% slower than Python MLX and 15% faster than PyTorch MPS**. Against the pre-kernel
+Rust baseline, latency fell from **0.707 s to 0.490 s** (31% faster) and process peak RSS fell from **235 MB
+to 91 MB**. These are short measurements from one host; RSS is not accelerator memory. The update block
+remains uncompiled, so this result does not justify replacing the Python backend. The next experiment is
+compiling or fusing the recurrent update path, then repeating the same three-backend benchmark.

@@ -2,23 +2,199 @@
 //!
 //! The crate now covers the checkpoint-backed encoders, correlation pyramid,
 //! update block, and a bidirectional flow loop. It remains a correctness
-//! prototype: correlation lookup materializes MLX inputs on the host and loops
-//! in Rust, and the update block is not compiled. The API and numerical behavior
-//! mirror Python's `RAFT.frame_features` / `RAFT.flow_bidir` so outputs can be
-//! compared directly; compilation and performance work are still outstanding.
+//! prototype: correlation lookup runs as a cached MLX Metal kernel on-device,
+//! and the update block is not compiled. The API and numerical behavior mirror
+//! Python's `RAFT.frame_features` / `RAFT.flow_bidir` so outputs can be compared
+//! directly; compilation and performance work are still outstanding.
+
+use std::cell::RefCell;
+use std::ffi::{CString, c_char};
+use std::sync::Once;
 
 use mlx_rs::module::Module;
 use mlx_rs::nn::{BatchNorm, Conv2d, relu, sigmoid};
 use mlx_rs::ops::indexing::IndexOp;
 use mlx_rs::ops::{concatenate, einsum, pad, softmax_axis, stack, tanh};
-use mlx_rs::{Array, Dtype};
+use mlx_rs::{Array, Dtype, Stream};
+use mlx_sys as sys;
+
+/// Verbatim port of Python `mlxstab.raft.model._LOOK_SRC`.
+const LOOK_SOURCE: &str = r#"
+    uint gid = thread_position_in_grid.x;
+    const int D = 2 * R + 1, K = D * D;
+    int n = gid / K, k = gid % K;
+    if (n >= (int)coords_shape[0]) return;
+    int a = k / D, b = k % D;                                   // a offsets x, b offsets y (reference quirk, see CorrBlock)
+    const float sc = metal::exp2(-(float)LV);
+    float px = coords[n * 2] * sc + (float)(a - R), py = coords[n * 2 + 1] * sc + (float)(b - R);
+    int H = corr_shape[1], W = corr_shape[2];
+    float fx = metal::floor(px), fy = metal::floor(py);
+    int x0 = (int)fx, y0 = (int)fy; float tx = px - fx, ty = py - fy;
+    size_t base = (size_t)n * H * W;
+    float acc = 0.0f;
+    for (int j = 0; j < 2; j++) {
+        int yy = y0 + j; if (yy < 0 || yy >= H) continue;
+        float wy = j ? ty : 1.0f - ty;
+        for (int i = 0; i < 2; i++) {
+            int xx = x0 + i; if (xx < 0 || xx >= W) continue;
+            acc += (i ? tx : 1.0f - tx) * wy * (float)corr[base + (size_t)yy * W + xx];
+        }
+    }
+    out[(size_t)n * K + k] = acc;
+"#;
+
+const MLX_SUCCESS: i32 = 0;
+
+fn check_status(status: i32, operation: &str) -> Result<(), String> {
+    if status == MLX_SUCCESS {
+        Ok(())
+    } else {
+        Err(format!("{operation} failed with MLX status {status}"))
+    }
+}
+
+/// Ensure `mlx-rs` has installed its non-exiting process-wide error handler.
+///
+/// The raw FFI calls below do not go through `mlx-rs`'s guarded operation path.
+/// Without this initialization, an MLX kernel error would reach mlx-c's default
+/// handler, which terminates the process.
+fn ensure_mlx_error_handler() {
+    static INIT: Once = Once::new();
+    INIT.call_once(|| {
+        let _ = mlx_rs::ops::zeros_dtype(&[1], Dtype::Float32);
+    });
+}
+
+/// A compiled MLX Metal kernel. The handle is immutable after construction and
+/// can be reused for every lookup, matching Python's module-level `_look_kernel`.
+struct LookKernel {
+    raw: sys::mlx_fast_metal_kernel,
+}
+
+impl LookKernel {
+    fn compile() -> Result<Self, String> {
+        let input_names = RawVectorString::new(&["corr", "coords"])?;
+        let output_names = RawVectorString::new(&["out"])?;
+        let source = CString::new(LOOK_SOURCE).map_err(|e| e.to_string())?;
+        let raw = unsafe {
+            sys::mlx_fast_metal_kernel_new(
+                c"mlxstab_corr_lookup".as_ptr(),
+                input_names.0,
+                output_names.0,
+                source.as_ptr(),
+                c"".as_ptr(),
+                true,
+                false,
+            )
+        };
+        if raw.ctx.is_null() {
+            return Err("MLX failed to create the correlation lookup kernel".into());
+        }
+        Ok(Self { raw })
+    }
+}
+
+impl Drop for LookKernel {
+    fn drop(&mut self) {
+        unsafe { sys::mlx_fast_metal_kernel_free(self.raw) };
+    }
+}
+
+thread_local! {
+    // MLX streams are thread-local. Keep the cached kernel on the same thread
+    // too, so its opaque C handle never needs an unsafe Send/Sync assertion.
+    static LOOK_KERNEL: RefCell<Option<LookKernel>> = const { RefCell::new(None) };
+}
+
+fn with_look_kernel<T>(run: impl FnOnce(&LookKernel) -> Result<T, String>) -> Result<T, String> {
+    ensure_mlx_error_handler();
+    LOOK_KERNEL.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(LookKernel::compile()?);
+        }
+        run(slot.as_ref().expect("kernel initialized above"))
+    })
+}
+
+struct RawVectorString(sys::mlx_vector_string);
+
+impl RawVectorString {
+    fn new(names: &[&str]) -> Result<Self, String> {
+        let names: Vec<CString> = names
+            .iter()
+            .map(|name| CString::new(*name).map_err(|e| e.to_string()))
+            .collect::<Result<_, _>>()?;
+        let mut pointers: Vec<*const c_char> = names.iter().map(|name| name.as_ptr()).collect();
+        let raw = unsafe { sys::mlx_vector_string_new_data(pointers.as_mut_ptr(), pointers.len()) };
+        if raw.ctx.is_null() {
+            return Err("MLX failed to allocate a string vector".into());
+        }
+        Ok(Self(raw))
+    }
+}
+
+impl Drop for RawVectorString {
+    fn drop(&mut self) {
+        unsafe { sys::mlx_vector_string_free(self.0) };
+    }
+}
+
+struct RawVectorArray(sys::mlx_vector_array);
+
+impl RawVectorArray {
+    fn from_arrays(arrays: &[&Array]) -> Result<Self, String> {
+        let handles: Vec<sys::mlx_array> = arrays.iter().map(|array| array.as_ptr()).collect();
+        let raw = unsafe { sys::mlx_vector_array_new_data(handles.as_ptr(), handles.len()) };
+        if raw.ctx.is_null() {
+            return Err("MLX failed to allocate an array vector".into());
+        }
+        Ok(Self(raw))
+    }
+
+    fn empty() -> Result<Self, String> {
+        let raw = unsafe { sys::mlx_vector_array_new() };
+        if raw.ctx.is_null() {
+            return Err("MLX failed to allocate an output array vector".into());
+        }
+        Ok(Self(raw))
+    }
+}
+
+impl Drop for RawVectorArray {
+    fn drop(&mut self) {
+        unsafe { sys::mlx_vector_array_free(self.0) };
+    }
+}
+
+struct RawConfig(sys::mlx_fast_metal_kernel_config);
+
+impl RawConfig {
+    fn new() -> Result<Self, String> {
+        let raw = unsafe { sys::mlx_fast_metal_kernel_config_new() };
+        if raw.ctx.is_null() {
+            return Err("MLX failed to allocate a Metal kernel config".into());
+        }
+        Ok(Self(raw))
+    }
+}
+
+impl Drop for RawConfig {
+    fn drop(&mut self) {
+        unsafe { sys::mlx_fast_metal_kernel_config_free(self.0) };
+    }
+}
 
 /// Bilinearly sample one RAFT correlation-pyramid level.
 ///
-/// `corr` is NHWC `[N,H,W,1]`, and `coords` is `[N,2]` in level-zero `(x,y)`
-/// coordinates. Neighborhood index `a` offsets x and `b` offsets y, matching
-/// the reference implementation's meshgrid ordering. Out-of-bounds taps are
-/// zero, and output has shape `[N,(2*radius+1)^2]` and dtype float32.
+/// `corr` is NHWC `[N,H,W,1]` in float16 or float32, and `coords` is `[N,2]` in
+/// level-zero `(x,y)` coordinates. Neighborhood index `a` offsets x and `b`
+/// offsets y, matching the reference implementation's meshgrid ordering.
+/// Out-of-bounds taps are zero, and output has shape `[N,(2*radius+1)^2]` and
+/// dtype float32.
+///
+/// The lookup runs in a cached MLX Metal kernel, so `corr` and `coords` are
+/// consumed on-device instead of being materialized into host slices.
 pub fn lookup_level(
     corr: &Array,
     coords: &Array,
@@ -38,12 +214,25 @@ pub fn lookup_level(
     if cs.iter().any(|&d| d <= 0) {
         return Err(format!("corr dimensions must be positive, got {cs:?}"));
     }
+    if !matches!(corr.dtype(), Dtype::Float16 | Dtype::Float32) {
+        return Err(format!(
+            "corr dtype must be float16 or float32, got {:?}",
+            corr.dtype()
+        ));
+    }
+    if !matches!(coords.dtype(), Dtype::Float16 | Dtype::Float32) {
+        return Err(format!(
+            "coords dtype must be float16 or float32, got {:?}",
+            coords.dtype()
+        ));
+    }
     if level > i32::MAX as usize {
         return Err("pyramid level exceeds supported range".into());
     }
+    if radius > i32::MAX as usize {
+        return Err("radius exceeds supported range".into());
+    }
     let n = cs[0] as usize;
-    let h = cs[1] as usize;
-    let w = cs[2] as usize;
     let diameter = radius
         .checked_mul(2)
         .and_then(|x| x.checked_add(1))
@@ -54,61 +243,83 @@ pub fn lookup_level(
     let out_len = n
         .checked_mul(k)
         .ok_or_else(|| "output is too large".to_string())?;
-    if n > i32::MAX as usize || k > i32::MAX as usize {
+    if out_len > i32::MAX as usize {
         return Err("output dimensions exceed MLX limits".into());
     }
 
-    // Explicit materialization handles fp16 input and non-contiguous views. It
-    // also makes this prototype's synchronization/copy cost visible.
-    let corr_f32 = corr
-        .as_dtype(Dtype::Float32)
-        .map_err(|e| e.to_string())?
-        .contiguous()
-        .map_err(|e| e.to_string())?;
-    let coords_f32 = coords
-        .as_dtype(Dtype::Float32)
-        .map_err(|e| e.to_string())?
-        .contiguous()
-        .map_err(|e| e.to_string())?;
-    let cv = corr_f32.as_slice::<f32>();
-    let xy = coords_f32.as_slice::<f32>();
-    let mut out = vec![0.0f32; out_len];
-    let scale = 2.0f32.powi(-(level as i32));
-    let r = radius as isize;
+    with_look_kernel(|kernel| {
+        let stream = Stream::thread_local_or_default();
+        let inputs = RawVectorArray::from_arrays(&[corr, coords])?;
+        let mut outputs = RawVectorArray::empty()?;
+        let config = RawConfig::new()?;
+        let output_shape = [n as i32, k as i32];
 
-    for batch in 0..n {
-        let px = xy[batch * 2] * scale;
-        let py = xy[batch * 2 + 1] * scale;
-        for a in 0..diameter {
-            for b in 0..diameter {
-                let x = px + a as f32 - r as f32;
-                let y = py + b as f32 - r as f32;
-                let x0 = x.floor() as isize;
-                let y0 = y.floor() as isize;
-                let tx = x - x.floor();
-                let ty = y - y.floor();
-                let mut sum = 0.0f32;
-                for j in 0..2 {
-                    let yy = y0 + j;
-                    if yy < 0 || yy >= h as isize {
-                        continue;
-                    }
-                    let wy = if j == 0 { 1.0 - ty } else { ty };
-                    for i in 0..2 {
-                        let xx = x0 + i;
-                        if xx < 0 || xx >= w as isize {
-                            continue;
-                        }
-                        let wx = if i == 0 { 1.0 - tx } else { tx };
-                        let index = ((batch * h + yy as usize) * w) + xx as usize;
-                        sum += wx * wy * cv[index];
-                    }
-                }
-                out[batch * k + a * diameter + b] = sum;
-            }
+        check_status(
+            unsafe {
+                sys::mlx_fast_metal_kernel_config_add_output_arg(
+                    config.0,
+                    output_shape.as_ptr(),
+                    output_shape.len(),
+                    sys::mlx_dtype__MLX_FLOAT32,
+                )
+            },
+            "configuring the correlation lookup output",
+        )?;
+        check_status(
+            unsafe { sys::mlx_fast_metal_kernel_config_set_grid(config.0, out_len as i32, 1, 1) },
+            "configuring the correlation lookup grid",
+        )?;
+        check_status(
+            unsafe { sys::mlx_fast_metal_kernel_config_set_thread_group(config.0, 256, 1, 1) },
+            "configuring the correlation lookup thread group",
+        )?;
+        check_status(
+            unsafe {
+                sys::mlx_fast_metal_kernel_config_add_template_arg_int(
+                    config.0,
+                    c"R".as_ptr(),
+                    radius as i32,
+                )
+            },
+            "configuring the correlation lookup radius",
+        )?;
+        check_status(
+            unsafe {
+                sys::mlx_fast_metal_kernel_config_add_template_arg_int(
+                    config.0,
+                    c"LV".as_ptr(),
+                    level as i32,
+                )
+            },
+            "configuring the correlation lookup level",
+        )?;
+
+        check_status(
+            unsafe {
+                sys::mlx_fast_metal_kernel_apply(
+                    &mut outputs.0,
+                    kernel.raw,
+                    inputs.0,
+                    config.0,
+                    stream.as_ptr(),
+                )
+            },
+            "running the correlation lookup kernel",
+        )?;
+
+        let mut output = unsafe { sys::mlx_array_new() };
+        let status = unsafe { sys::mlx_vector_array_get(&mut output, outputs.0, 0) };
+        if status != MLX_SUCCESS {
+            unsafe { sys::mlx_array_free(output) };
+            return Err(format!(
+                "reading the correlation lookup output failed with MLX status {status}"
+            ));
         }
-    }
-    Ok(Array::from_slice(&out, &[n as i32, k as i32]))
+        // SAFETY: `mlx_vector_array_get` copies a retained handle into `output`;
+        // ownership transfers to `Array`, which frees it on drop. The owning vector
+        // (with its own reference) is released when `outputs` drops.
+        Ok(unsafe { Array::from_ptr(output) })
+    })
 }
 
 /// Floor-sized 2x2 average pooling on NHWC `[N,H,W,1]`.
