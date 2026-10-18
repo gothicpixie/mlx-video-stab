@@ -1,0 +1,8 @@
+[package]
+name = "mlxstab-raft-compat"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+mlx-rs = { version = "=0.32.0", default-features = false, features = ["accelerate", "safetensors"] }
