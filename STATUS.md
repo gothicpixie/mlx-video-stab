@@ -1,5 +1,20 @@
 # mlxstab status
 
+### 2026-10-17 opt-in low-frequency camera-path fidelity
+
+Added an opt-in term to the existing L1 path planner that softly pulls translation and rotation/log-scale paths
+towards a per-shot low-pass of the measured path. The L1 derivative penalties, per-frame border budget, window
+pinning and shot-boundary resets remain active. `l1_low_freq_fidelity=0` is the default; Python `Config` and CLI
+controls are available for comparisons. Mesh and rolling-shutter residual smoothing are unchanged.
+
+On the deterministic 120-frame, 0.5 px/frame pan control, default L1 removed the sustained pan while the opt-in
+setting (`fidelity=5`, `sigma=12`) retained 97.15% path gain and ended at 54.7 px of the intended 59.5 px. On the
+same pan plus 2 px high-frequency jitter, the selected opt-in synthetic test suppressed high-pass velocity error
+below 0.1 px/frame while preserving the pan. These are exact synthetic controls, not evidence of improvement on
+natural footage. The feature remains off by default pending disjoint real-window measurements and blinded visual
+review. The focused tests cover the LP target formulation, historical behavior, pan/jitter controls, cuts, windowing,
+validation and CLI wiring; the full suite passed **1738 tests**.
+
 ## Stage 0 progress
 
 ### Slice 1: evaluator reset and mask coordinates

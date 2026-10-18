@@ -54,6 +54,10 @@ or the [launch kit](marketing/README.md) for graphics and announcement copy.
    |jerk| in L1, so the result is made of static, constant-velocity and constant-acceleration segments, i.e. a tripod or a dolly)
    solved as an LP (HiGHS), with a box constraint `|path - raw| <= budget` (the **border budget**) and a small L1 pull to the raw path
    so the border stays small. Mesh and row residual paths get the same treatment. `--smooth gauss --sigma N` selects a Gaussian instead.
+   For an experimental L1 option that better retains sustained pans, `--l1-low-freq-fidelity W` adds a soft pull
+   towards a per-shot low-passed camera path; `--l1-low-freq-sigma N` sets its Gaussian width in frames. The
+   default weight is `0` (disabled). It remains opt-in because exact-motion controls show a pan/jitter tradeoff,
+   but it has not yet passed held-out real-footage and blinded visual checks.
 6. **Roll levelling**: an optional absolute roll series (degrees, positive = counter-clockwise lean) is folded into the target path
    before smoothing, so levelling and stabilization are one transform.
 7. **One resample**: stabilization, mesh, rolling-shutter correction, roll and optional zoom are composed into a single source-coordinate
@@ -65,6 +69,7 @@ or the [launch kit](marketing/README.md) for graphics and announcement copy.
 python -m mlxstab in.mp4 out.mp4 --mask mask.mp4 [--sigma 15] [--roll roll.json] [--budget 0.04] [--smooth l1|gauss]
                                   [--mesh 16x9|0x0] [--rs-rows 18] [--iters 24] [--flow-downscale 1|2|4|auto]
                                   [--max-flow-corr-gib GiB] [--cut-frames N[,N...]] [--analysis-stride N]
+                                  [--l1-low-freq-fidelity W] [--l1-low-freq-sigma N]
                                   [--start S --duration D] [--fps F]
 ```
 `--cut-frames` accepts explicit frame indices, relative to the decoded clip, that begin new shots. The flow pair

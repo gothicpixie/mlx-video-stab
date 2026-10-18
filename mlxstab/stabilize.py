@@ -68,6 +68,22 @@ def _validate_crop_zoom(value):
     return v
 
 
+def _validate_l1_low_freq_fidelity(value):
+    """Validate ``Config.l1_low_freq_fidelity``: finite and ``>= 0``; ``0`` disables the term."""
+    v = float(value)
+    if not np.isfinite(v) or v < 0:
+        raise ValueError(f"l1_low_freq_fidelity must be finite and >= 0, got {value!r}")
+    return v
+
+
+def _validate_l1_low_freq_sigma(value):
+    """Validate ``Config.l1_low_freq_sigma``: finite and ``> 0`` frames."""
+    v = float(value)
+    if not np.isfinite(v) or v <= 0:
+        raise ValueError(f"l1_low_freq_sigma must be finite and > 0, got {value!r}")
+    return v
+
+
 def _crop_zoom_matrix(W, H, crop_zoom):
     """Homogeneous output-space zoom ``Z`` mapping ``x -> c + (x - c)/crop_zoom`` with ``c = (W/2-.5, H/2-.5)``.
 
@@ -105,6 +121,8 @@ class Config:
     warm_iters: int = 0            # iterations once warm-started (0 = same as flow_iters)
     model: str = "similarity"      # global camera model: similarity | affine | homography (residuals go to the mesh)
     fidelity: float = 0.1          # L1 pull of the path towards the raw path (keeps the border small; 1.0 leaked jitter, 0 -> big border)
+    l1_low_freq_fidelity: float = 0.0   # opt-in: per-sample L1 pull towards a low-passed raw path (0 disables)
+    l1_low_freq_sigma: float = 15.0     # low-pass sigma in frames used to derive that target (per shot)
     warp_diag: bool = False        # opt-in: complete-warp shape/coverage diagnostics in the report (extra host math per frame)
     max_sampled_border_frac: float | None = None   # opt-in: cap the sampled out-of-bounds fraction (finite, [0,1)); None disables
     crop_zoom: float = 1.0         # opt-in: isotropic center zoom on output coords, composed before the output->source map (finite, >=1)
@@ -117,6 +135,8 @@ class Config:
             raise ValueError("flow_downscale='auto' requires a positive max_flow_corr_bytes budget")
         self.max_sampled_border_frac = _validate_sampled_border_frac(self.max_sampled_border_frac)
         self.crop_zoom = _validate_crop_zoom(self.crop_zoom)
+        self.l1_low_freq_fidelity = _validate_l1_low_freq_fidelity(self.l1_low_freq_fidelity)
+        self.l1_low_freq_sigma = _validate_l1_low_freq_sigma(self.l1_low_freq_sigma)
 
 
 @dataclass(frozen=True)
@@ -346,11 +366,24 @@ def _segments(T, cuts):
     return list(zip(starts, starts[1:] + [T]))
 
 
-def _smooth_segments(C, segments, mode, sigma, budget, w, fidelity):
-    """Apply ``SM.smooth_columns`` independently inside each shot (never across a cut)."""
+def _smooth_segments(C, segments, mode, sigma, budget, w, fidelity, fidelity_target=None, fidelity_weight=None):
+    """Apply ``SM.smooth_columns`` independently inside each shot (never across a cut).
+
+    Optional per-sample fidelity target/weight arrays ``[T,K]`` are sliced with each shot as well."""
     out = np.empty_like(C, dtype=np.float64)
     for s, e in segments:
-        out[s:e] = SM.smooth_columns(C[s:e], mode, sigma, budget, w, fidelity)
+        tgt = None if fidelity_target is None else fidelity_target[s:e]
+        wt = None if fidelity_weight is None else fidelity_weight[s:e]
+        out[s:e] = SM.smooth_columns(C[s:e], mode, sigma, budget, w, fidelity,
+                                     fidelity_target=tgt, fidelity_weight=wt)
+    return out
+
+
+def _lowpass_segments(C, segments, sigma):
+    """Zero-phase low-pass each shot independently; never filter across a cut."""
+    out = np.empty_like(C, dtype=np.float64)
+    for s, e in segments:
+        out[s:e] = np.stack([SM.lowpass_path(C[s:e, k], sigma) for k in range(C.shape[1])], 1)
     return out
 
 
@@ -905,10 +938,23 @@ def plan(mot, cfg, roll=None, n_frames=None):
     th = np.unwrap(np.angle(a)); ls = np.log(np.abs(a))
     R = 0.5 * np.hypot(W, H); b = cfg.budget * W
     P = np.stack([t.real, t.imag], 1)
+    ang_raw = np.stack([th, ls], 1) * R
+    lf_fidelity = cfg.l1_low_freq_fidelity if cfg.smooth == "l1" else 0.0
+    if lf_fidelity > 0:
+        # Opt-in low-frequency fidelity: pull the L1 solution towards a separately low-passed raw path
+        # inside each shot. The hard budget and window pinning are unchanged; the target is not a
+        # replacement for the L1 objective.
+        P_target = _lowpass_segments(P, segments, cfg.l1_low_freq_sigma)
+        A_target = _lowpass_segments(ang_raw, segments, cfg.l1_low_freq_sigma)
+        P_weight = np.full(T, lf_fidelity, np.float64)
+        A_weight = np.full(T, lf_fidelity, np.float64)
+    else:
+        P_target = A_target = P_weight = A_weight = None
     # Smooth each shot independently: a cut must not leak path or residuals into the next shot.
-    P = _smooth_segments(P, segments, cfg.smooth, cfg.sigma, b, cfg.l1_weights, cfg.fidelity)
-    ang = _smooth_segments(np.stack([th, ls], 1) * R, segments, cfg.smooth, cfg.sigma, b,
-                           cfg.l1_weights, cfg.fidelity) / R      # in corner-pixel units
+    P = _smooth_segments(P, segments, cfg.smooth, cfg.sigma, b, cfg.l1_weights, cfg.fidelity,
+                         P_target, P_weight)
+    ang = _smooth_segments(ang_raw, segments, cfg.smooth, cfg.sigma, b, cfg.l1_weights, cfg.fidelity,
+                           A_target, A_weight) / R      # in corner-pixel units
     rs = _smooth_segments(res.reshape(T, 8), segments, cfg.smooth, cfg.sigma, b,
                           cfg.l1_weights, cfg.fidelity).reshape(T, 4, 2)
     path = np.zeros_like(quads)

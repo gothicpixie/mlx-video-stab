@@ -79,6 +79,10 @@ def main(argv=None):
                         "memory); required by --flow-downscale auto and enforced for a fixed scale before RAFT construction")
     p.add_argument("--kernel", choices=["bilinear", "bicubic", "lanczos3"], default="lanczos3")
     p.add_argument("--fidelity", type=float, default=0.1, help="L1 pull of the smoothed path towards the raw path (0 = pure L1, larger = hugs the raw path)")
+    p.add_argument("--l1-low-freq-fidelity", type=float, default=0.0,
+                   help="opt-in L1 pull towards a low-passed camera path (0 disables; try on a copy and compare)")
+    p.add_argument("--l1-low-freq-sigma", type=float, default=15.0,
+                   help="Gaussian sigma in frames for the opt-in low-frequency L1 target")
     p.add_argument("--zoom", type=float, default=1.0)
     p.add_argument("--crop-zoom", type=float, default=1.0,
                    help="opt-in: isotropic center zoom on output coordinates (finite, >= 1), composed before the "
@@ -101,7 +105,9 @@ def main(argv=None):
     gc, gr = (int(v) for v in a.mesh.lower().split("x"))
     cfg = Config(smooth=a.smooth, sigma=a.sigma, budget=a.budget, mesh=(gc, gr), rs_rows=a.rs_rows, flow_iters=a.iters,
                  flow_downscale=a.flow_downscale, max_flow_corr_bytes=a.max_flow_corr_gib,
-                 kernel=a.kernel, zoom=a.zoom, fidelity=a.fidelity, warp_diag=a.warp_diag,
+                 kernel=a.kernel, zoom=a.zoom, fidelity=a.fidelity,
+                 l1_low_freq_fidelity=a.l1_low_freq_fidelity, l1_low_freq_sigma=a.l1_low_freq_sigma,
+                 warp_diag=a.warp_diag,
                  max_sampled_border_frac=a.max_sampled_border_frac, crop_zoom=a.crop_zoom,
                  analysis_stride=a.analysis_stride)
     rep = stabilize(a.input, a.output, a.mask, a.weights, cfg, a.roll, a.start, a.duration, a.fps, report=a.report,
