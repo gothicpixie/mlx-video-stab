@@ -4464,3 +4464,50 @@ and Python MLX is 0.32.3. Additional iteration counts and warm starts are not fi
 does not expose warm starts or fp16 network/correlation paths. Full checkpoint-schema validation, exact version
 pairing, compiled updates, runtime/copy/memory measurements, cancellation and recovery remain untested. Continue
 with multi-iteration parity and a measured complete-call comparison before considering a production migration.
+
+### E20 follow-up (2026-10-18): 24-iteration flow parity
+
+Extended the same deterministic bidirectional fixture to include both the one-iteration regression and the
+production 24-iteration setting. Two consecutive Python generator runs produced the same SHA-256
+`b48a360ba0cbcd0805beda5eed4ae439e969a15fcb436887162a4dd6feb7fa17`. The one-iteration Rust outputs remain
+exact. At 24 iterations, maximum absolute errors are `1.0884e-4` pixels (low forward), `7.0375e-4` (full
+forward), `8.9097e-4` (low backward), and `2.8856e-3` (full backward). The observed divergence grows over
+recurrent refinement; it remains below 0.003 pixels on this fixture, but is not exact parity.
+
+All **17 Rust tests pass**, along with formatting, strict clippy, and `git diff --check`. CodeGraph is synced;
+its affected-file query still does not identify Rust tests. These checks establish only the deterministic
+64x64 fp32 fixture. The binding/MLX version gap remains (`mlx-rs 0.32.0` targets 0.32.2; Python is 0.32.3),
+and the host-lookup loop has no runtime or memory measurement. Warm starts, other iteration counts, fp16 paths,
+compiled updates, cancellation/recovery, and repeated complete-call performance remain open.
+
+### E20 follow-up (2026-10-18): production-length bidirectional flow parity
+
+Extended the integrated Rust/Python flow fixture to a `cases` schema so one checkpoint-backed call can verify
+both a one-iteration regression and a production-length loop. The fixture is now schema
+`mlxstab.raft_compat.flow_bidir/2`: it records the deterministic 64x64 images once, then a `cases` array with
+entries for **1 and 24 iterations**. Each case stores the forward/backward low-resolution flow and both
+full-resolution flows after the mask head and convex 8x upsampling; the top level also records
+`verified_iters: [1, 24]`, the checkpoint SHA-256, Python/Rust MLX versions and the correlation configuration.
+The 1-iteration case is byte-for-byte unchanged from the previous fixture and remains the regression;
+24 iterations matches the production Python stabilizer's analysis path. Two consecutive regenerations produced
+the same fixture SHA-256 `b48a360ba0cbcd0805beda5eed4ae439e969a15fcb436887162a4dd6feb7fa17`.
+
+The Rust test now loads the model once, runs each fixture case at its recorded iteration count, and compares all
+four outputs. Maximum absolute errors are:
+
+| iterations | low forward | full forward | low backward | full backward |
+| ---: | ---: | ---: | ---: | ---: |
+| 1 | 0 | 0 | 0 | 0 |
+| 24 | 1.0883808e-4 | 7.0375204e-4 | 8.9097023e-4 | 2.8855205e-3 |
+
+The 1-iteration case keeps the original `1e-4` px gate. The 24-iteration case uses a `5e-3` px gate because
+small per-step differences accumulate over the longer loop; every measured output remains under 3e-3 px on a
+flow whose values are on the order of one pixel. All **17 Rust tests pass**; `cargo fmt --check`, strict
+`cargo clippy --all-targets -- -D warnings` and `git diff --check` pass. CodeGraph was synced and its
+affected-file query again found no Rust test links, so the tests were run directly.
+
+This verifies the integrated fp32 loop at **1 and 24 iterations** only, on the checked-in setup where Rust
+`mlx-rs 0.32.0` targets MLX 0.32.2 and Python MLX is 0.32.3. It is a parity result, not a runtime or speed
+measurement. Warm starts, fp16 network/correlation paths, other iteration counts, full checkpoint-schema
+validation, exact version pairing, compiled updates, cancellation/recovery and sustained memory behavior
+remain untested; the production-migration decision stays open.

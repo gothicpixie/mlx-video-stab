@@ -1855,14 +1855,20 @@ mod tests {
         let fixture: serde_json::Value =
             serde_json::from_str(include_str!("../tests/fixtures/flow_bidir_reference.json"))
                 .unwrap();
-        assert_eq!(fixture["schema"], "mlxstab.raft_compat.flow_bidir/1");
+        assert_eq!(fixture["schema"], "mlxstab.raft_compat.flow_bidir/2");
         assert_eq!(fixture["checkpoint_sha256"], checkpoint_hash);
         assert_eq!(fixture["rust_mlx_rs"], "0.32.0");
         assert_eq!(fixture["rust_mlx"], "0.32.2");
         assert!(fixture["python_mlx"].is_string());
         assert_eq!(fixture["height"], 64);
         assert_eq!(fixture["width"], 64);
-        assert_eq!(fixture["iters"], 1);
+        let verified_iters: Vec<u64> = fixture["verified_iters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_u64().unwrap())
+            .collect();
+        assert_eq!(verified_iters, [1, 24]);
         assert_eq!(fixture["corr_levels"], RAFT_CORR_LEVELS);
         assert_eq!(fixture["corr_radius"], RAFT_CORR_RADIUS);
 
@@ -1872,42 +1878,52 @@ mod tests {
         assert_eq!(first.shape(), &[1, 64, 64, 3]);
         assert_eq!(second.shape(), &[1, 64, 64, 3]);
 
+        let cases = fixture["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), verified_iters.len());
         let mut model = Raft::load(checkpoint).unwrap();
-        let flow = model.flow_bidir(&first, &second, 1).unwrap();
+        for (case, expected_iters) in cases.iter().zip(&verified_iters) {
+            let iters = case["iters"].as_u64().unwrap();
+            assert_eq!(iters, *expected_iters);
+            let flow = model.flow_bidir(&first, &second, iters as usize).unwrap();
 
-        for (label, shape_key, actual, expected) in [
-            (
-                "low forward",
-                "low_forward_shape",
-                &flow.low_forward,
-                &fixture["low_forward"],
-            ),
-            (
-                "full forward",
-                "up_forward_shape",
-                &flow.up_forward,
-                &fixture["up_forward"],
-            ),
-            (
-                "low backward",
-                "low_backward_shape",
-                &flow.low_backward,
-                &fixture["low_backward"],
-            ),
-            (
-                "full backward",
-                "up_backward_shape",
-                &flow.up_backward,
-                &fixture["up_backward"],
-            ),
-        ] {
-            let expected = json_f32(expected, &json_shape(&fixture[shape_key]));
-            let error = max_abs_error(actual, &expected);
-            println!("flow_bidir {label}: max abs error {error:e}");
-            assert!(
-                error < 1e-4,
-                "flow_bidir {label} max abs error {error} exceeds 1e-4"
-            );
+            for (label, shape_key, actual, expected) in [
+                (
+                    "low forward",
+                    "low_forward_shape",
+                    &flow.low_forward,
+                    &case["low_forward"],
+                ),
+                (
+                    "full forward",
+                    "up_forward_shape",
+                    &flow.up_forward,
+                    &case["up_forward"],
+                ),
+                (
+                    "low backward",
+                    "low_backward_shape",
+                    &flow.low_backward,
+                    &case["low_backward"],
+                ),
+                (
+                    "full backward",
+                    "up_backward_shape",
+                    &flow.up_backward,
+                    &case["up_backward"],
+                ),
+            ] {
+                let expected = json_f32(expected, &json_shape(&case[shape_key]));
+                let error = max_abs_error(actual, &expected);
+                println!("flow_bidir {iters} iters {label}: max abs error {error:e}");
+                // The 1-iteration case is the original regression and stays exact.
+                // At 24 iterations small per-step differences accumulate; the observed
+                // worst output is under 3e-3 px while the one-iteration case is zero.
+                let tolerance = if iters == 1 { 1e-4 } else { 5e-3 };
+                assert!(
+                    error < tolerance,
+                    "flow_bidir {iters} iters {label} max abs error {error} exceeds {tolerance}"
+                );
+            }
         }
     }
 

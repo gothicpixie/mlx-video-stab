@@ -60,12 +60,16 @@ Five goldens cover deterministic inputs:
 - `tests/fixtures/update_block_reference.json` for the updated hidden state,
   flow delta, and mask on deterministic 3x4 inputs. It records all inputs and
   outputs plus the checkpoint SHA-256 and Python/Rust MLX versions.
-- `tests/fixtures/flow_bidir_reference.json` for the complete one-iteration
-  bidirectional flow path on two deterministic 64x64 images. It records both
-  images, the forward/backward low-resolution flows, and both full-resolution
-  flows after mask-head convex upsampling, plus the checkpoint SHA-256, Python
-  MLX version, Rust `mlx-rs`/MLX versions, and the production correlation
-  configuration.
+- `tests/fixtures/flow_bidir_reference.json` for the complete bidirectional flow
+  path on two deterministic 64x64 images at **1 and 24** refinement iterations.
+  It records both images once, then a `cases` array whose entries carry the
+  iteration count and the forward/backward low-resolution flows and both
+  full-resolution flows after mask-head convex upsampling. It also records the
+  checkpoint SHA-256, Python MLX version, Rust `mlx-rs`/MLX versions, the
+  verified iteration counts, and the production correlation configuration.
+  The 1-iteration case is preserved unchanged as a regression, and two
+  consecutive regenerations produced the same fixture SHA-256
+  `b48a360ba0cbcd0805beda5eed4ae439e969a15fcb436887162a4dd6feb7fa17`.
 
 Regenerate them with:
 
@@ -84,9 +88,10 @@ The bidirectional loop is also uncompiled, so it does not demonstrate Rust
 runtime, memory, or copy behavior. The crate is a parity spike, not a
 production inference path:
 
-- The fixture covers one shared iteration in fp32. The loop accepts any
-  iteration count, but additional iteration counts have no checked-in golden
-  yet. Zero iterations is supported by construction but not separately tested.
+- The fixture covers 1 and 24 shared iterations in fp32; 24 matches the
+  production Python stabilization path. The loop accepts any iteration count,
+  but other counts have no checked-in golden. Zero iterations is supported by
+  construction but not separately tested.
 - Initial flow (`init_f`/`init_b` in Python) is not exposed; both directions
   start from zero flow.
 - fp16 encoder/correlation variants and the Python compile path are not ported.
@@ -96,9 +101,9 @@ production inference path:
   has MLX 0.32.3.
 
 E20 still requires an exact version pairing, strict validation of the complete
-RAFT parameter schema, comparison at more iteration counts, cancellation and
-error-recovery tests, and repeated end-to-end runtime and memory measurements
-before any migration decision.
+RAFT parameter schema, comparison at iteration counts beyond 1 and 24,
+cancellation and error-recovery tests, and repeated end-to-end runtime and
+memory measurements before any migration decision.
 
 Run on Apple Silicon with Rust and Xcode installed:
 
@@ -107,9 +112,13 @@ cargo test --manifest-path rust/raft-compat/Cargo.toml
 ```
 
 `mlx-rs` 0.32.0 currently targets MLX 0.32.2; the Python environment in this
-checkout has MLX 0.32.3. Encoder, update-block, and one-iteration bidirectional
-fixture outputs match exactly on this setup, but that is not full-model parity
-across versions or iteration counts. E20 still requires an exact version
-pairing, strict validation of the complete RAFT parameter schema, comparisons
-at additional iteration counts, cancellation/error-recovery tests, and repeated
-end-to-end runtime and memory measurements before any migration decision.
+checkout has MLX 0.32.3. Encoder, update-block, and bidirectional fixture
+outputs at 1 and 24 iterations match on this setup: max absolute error is zero
+for all four 1-iteration outputs, while the 24-iteration errors are
+`1.09e-4` (low forward), `7.04e-4` (full forward), `8.91e-4` (low backward)
+and `2.89e-3` (full backward) pixels. That is not full-model parity across
+versions or iteration counts. E20 still requires an exact version pairing,
+strict validation of the complete RAFT parameter schema, comparisons at
+iteration counts beyond 1 and 24, cancellation/error-recovery tests, and
+repeated end-to-end runtime and memory measurements before any migration
+decision.
