@@ -5,8 +5,9 @@
 //! intentionally small so it can be compared against Python's `lookup_level`.
 
 use mlx_rs::module::Module;
-use mlx_rs::nn::{BatchNorm, Conv2d, relu};
+use mlx_rs::nn::{BatchNorm, Conv2d, relu, sigmoid};
 use mlx_rs::ops::indexing::IndexOp;
+use mlx_rs::ops::{concatenate, tanh};
 use mlx_rs::{Array, Dtype};
 
 /// Bilinearly sample one RAFT correlation-pyramid level.
@@ -429,15 +430,38 @@ impl<'a> ParamReader<'a> {
         stride: i32,
         padding: i32,
     ) -> Result<Conv2d, String> {
+        self.conv_rect(
+            prefix,
+            input_channels,
+            output_channels,
+            (kernel, kernel),
+            (stride, stride),
+            (padding, padding),
+        )
+    }
+
+    /// Load a convolution whose spatial kernel, stride and padding may differ per axis.
+    ///
+    /// Weights use the converted NHWC layout `[out, kernel_h, kernel_w, in]`.
+    #[allow(clippy::too_many_arguments)]
+    fn conv_rect(
+        &mut self,
+        prefix: &str,
+        input_channels: i32,
+        output_channels: i32,
+        kernel: (i32, i32),
+        stride: (i32, i32),
+        padding: (i32, i32),
+    ) -> Result<Conv2d, String> {
         let weight = self.get(
             &format!("{prefix}.weight"),
-            &[output_channels, kernel, kernel, input_channels],
+            &[output_channels, kernel.0, kernel.1, input_channels],
         )?;
         let bias = self.get(&format!("{prefix}.bias"), &[output_channels])?;
-        let mut conv = Conv2d::new(input_channels, output_channels, (kernel, kernel))
-            .map_err(|e| e.to_string())?;
-        conv.stride = (stride, stride);
-        conv.padding = (padding, padding);
+        let mut conv =
+            Conv2d::new(input_channels, output_channels, kernel).map_err(|e| e.to_string())?;
+        conv.stride = stride;
+        conv.padding = padding;
         conv.weight.value = weight;
         conv.bias.value = Some(bias);
         Ok(conv)
@@ -664,6 +688,344 @@ impl RaftEncoders {
     }
 }
 
+// --- RAFT BasicUpdateBlock (checkpoint-backed, inference only) ---------------------------------------------
+
+/// Hidden channels in the RAFT GRU and the update-block feature/context tensors.
+pub const RAFT_HIDDEN_CHANNELS: i32 = 128;
+/// Correlation channels produced by the production RAFT configuration (`levels=4`, `radius=4`).
+pub const RAFT_CORR_CHANNELS: i32 = 324;
+/// Channels emitted by the mask head (the 9x9 convex-upsampling weights).
+pub const RAFT_MASK_CHANNELS: i32 = 576;
+
+/// The correlation/flow feature encoder inside the RAFT update block.
+#[derive(Debug)]
+pub struct MotionEncoder {
+    convc1: Conv2d,
+    convc2: Conv2d,
+    convf1: Conv2d,
+    convf2: Conv2d,
+    conv: Conv2d,
+}
+
+impl MotionEncoder {
+    fn load(reader: &mut ParamReader<'_>, prefix: &str) -> Result<Self, String> {
+        Ok(Self {
+            convc1: reader.conv(
+                &format!("{prefix}.convc1"),
+                RAFT_CORR_CHANNELS,
+                256,
+                1,
+                1,
+                0,
+            )?,
+            convc2: reader.conv(&format!("{prefix}.convc2"), 256, 192, 3, 1, 1)?,
+            convf1: reader.conv(&format!("{prefix}.convf1"), 2, 128, 7, 1, 3)?,
+            convf2: reader.conv(&format!("{prefix}.convf2"), 128, 64, 3, 1, 1)?,
+            conv: reader.conv(&format!("{prefix}.conv"), 256, 126, 3, 1, 1)?,
+        })
+    }
+
+    /// Encode correlation and current flow, returning 128 channels: 126 learned plus the 2 flow channels.
+    pub fn forward(&mut self, flow: &Array, corr: &Array) -> Result<Array, String> {
+        let cor = self.convc1.forward(corr).map_err(|e| e.to_string())?;
+        let cor = relu(&cor).map_err(|e| e.to_string())?;
+        let cor = self.convc2.forward(&cor).map_err(|e| e.to_string())?;
+        let cor = relu(&cor).map_err(|e| e.to_string())?;
+
+        let flo = self.convf1.forward(flow).map_err(|e| e.to_string())?;
+        let flo = relu(&flo).map_err(|e| e.to_string())?;
+        let flo = self.convf2.forward(&flo).map_err(|e| e.to_string())?;
+        let flo = relu(&flo).map_err(|e| e.to_string())?;
+
+        let combined = concatenate(&[&cor, &flo], -1).map_err(|e| e.to_string())?;
+        let out = self.conv.forward(&combined).map_err(|e| e.to_string())?;
+        let out = relu(&out).map_err(|e| e.to_string())?;
+        concatenate(&[&out, flow], -1).map_err(|e| e.to_string())
+    }
+}
+
+/// RAFT's separable convolution GRU: one horizontal pass followed by one vertical pass.
+#[derive(Debug)]
+pub struct SepConvGRU {
+    convz1: Conv2d,
+    convr1: Conv2d,
+    convq1: Conv2d,
+    convz2: Conv2d,
+    convr2: Conv2d,
+    convq2: Conv2d,
+}
+
+impl SepConvGRU {
+    fn load(reader: &mut ParamReader<'_>, prefix: &str) -> Result<Self, String> {
+        let hidden = RAFT_HIDDEN_CHANNELS;
+        let input = 2 * hidden; // concatenation of context (128) and motion features (128)
+        let channels = hidden + input;
+        Ok(Self {
+            convz1: reader.conv_rect(
+                &format!("{prefix}.convz1"),
+                channels,
+                hidden,
+                (1, 5),
+                (1, 1),
+                (0, 2),
+            )?,
+            convr1: reader.conv_rect(
+                &format!("{prefix}.convr1"),
+                channels,
+                hidden,
+                (1, 5),
+                (1, 1),
+                (0, 2),
+            )?,
+            convq1: reader.conv_rect(
+                &format!("{prefix}.convq1"),
+                channels,
+                hidden,
+                (1, 5),
+                (1, 1),
+                (0, 2),
+            )?,
+            convz2: reader.conv_rect(
+                &format!("{prefix}.convz2"),
+                channels,
+                hidden,
+                (5, 1),
+                (1, 1),
+                (2, 0),
+            )?,
+            convr2: reader.conv_rect(
+                &format!("{prefix}.convr2"),
+                channels,
+                hidden,
+                (5, 1),
+                (1, 1),
+                (2, 0),
+            )?,
+            convq2: reader.conv_rect(
+                &format!("{prefix}.convq2"),
+                channels,
+                hidden,
+                (5, 1),
+                (1, 1),
+                (2, 0),
+            )?,
+        })
+    }
+
+    /// One gated recurrent update of the hidden state with the concatenated context/motion input.
+    pub fn forward(&mut self, h: &Array, x: &Array) -> Result<Array, String> {
+        let mut h = h.clone();
+        h = sep_gru_step(&mut self.convz1, &mut self.convr1, &mut self.convq1, &h, x)?;
+        sep_gru_step(&mut self.convz2, &mut self.convr2, &mut self.convq2, &h, x)
+    }
+}
+
+fn sep_gru_step(
+    z_conv: &mut Conv2d,
+    r_conv: &mut Conv2d,
+    q_conv: &mut Conv2d,
+    h: &Array,
+    x: &Array,
+) -> Result<Array, String> {
+    let hx = concatenate(&[h, x], -1).map_err(|e| e.to_string())?;
+    let z = z_conv.forward(&hx).map_err(|e| e.to_string())?;
+    let z = sigmoid(&z).map_err(|e| e.to_string())?;
+    let r = r_conv.forward(&hx).map_err(|e| e.to_string())?;
+    let r = sigmoid(&r).map_err(|e| e.to_string())?;
+
+    let rh = &r * h;
+    let q_input = concatenate(&[&rh, x], -1).map_err(|e| e.to_string())?;
+    let q = q_conv.forward(&q_input).map_err(|e| e.to_string())?;
+    let q = tanh(&q).map_err(|e| e.to_string())?;
+
+    Ok(((-&z) + 1.0) * h + &z * &q)
+}
+
+/// Two-layer 3x3 flow head producing the per-iteration flow delta.
+#[derive(Debug)]
+pub struct FlowHead {
+    conv1: Conv2d,
+    conv2: Conv2d,
+}
+
+impl FlowHead {
+    fn load(reader: &mut ParamReader<'_>, prefix: &str) -> Result<Self, String> {
+        Ok(Self {
+            conv1: reader.conv(
+                &format!("{prefix}.conv1"),
+                RAFT_HIDDEN_CHANNELS,
+                256,
+                3,
+                1,
+                1,
+            )?,
+            conv2: reader.conv(&format!("{prefix}.conv2"), 256, 2, 3, 1, 1)?,
+        })
+    }
+
+    pub fn forward(&mut self, x: &Array) -> Result<Array, String> {
+        let y = self.conv1.forward(x).map_err(|e| e.to_string())?;
+        let y = relu(&y).map_err(|e| e.to_string())?;
+        self.conv2.forward(&y).map_err(|e| e.to_string())
+    }
+}
+
+/// Convex-upsampling mask head: 3x3 convolution, ReLU, then a 1x1 576-channel projection scaled by 0.25.
+#[derive(Debug)]
+pub struct MaskHead {
+    conv1: Conv2d,
+    conv2: Conv2d,
+}
+
+impl MaskHead {
+    fn load(
+        reader: &mut ParamReader<'_>,
+        conv1_prefix: &str,
+        conv2_prefix: &str,
+    ) -> Result<Self, String> {
+        Ok(Self {
+            conv1: reader.conv(conv1_prefix, RAFT_HIDDEN_CHANNELS, 256, 3, 1, 1)?,
+            conv2: reader.conv(conv2_prefix, 256, RAFT_MASK_CHANNELS, 1, 1, 0)?,
+        })
+    }
+
+    pub fn forward(&mut self, net: &Array) -> Result<Array, String> {
+        let y = self.conv1.forward(net).map_err(|e| e.to_string())?;
+        let y = relu(&y).map_err(|e| e.to_string())?;
+        let y = self.conv2.forward(&y).map_err(|e| e.to_string())?;
+        Ok(&y * 0.25)
+    }
+}
+
+/// Output of one RAFT update-block core step.
+#[derive(Debug)]
+pub struct CoreOutput {
+    pub net: Array,
+    pub delta: Array,
+}
+
+/// Output of a complete RAFT update-block call, including the mask head.
+#[derive(Debug)]
+pub struct UpdateBlockOutput {
+    pub net: Array,
+    pub delta: Array,
+    pub mask: Array,
+}
+
+/// Checkpoint-backed RAFT `BasicUpdateBlock` for the production 4-level, radius-4 correlation pyramid.
+#[derive(Debug)]
+pub struct BasicUpdateBlock {
+    pub encoder: MotionEncoder,
+    pub gru: SepConvGRU,
+    pub flow_head: FlowHead,
+    pub mask: MaskHead,
+}
+
+impl BasicUpdateBlock {
+    /// Load and validate the complete update block from a converted RAFT parameter map.
+    ///
+    /// Every `update_block.*` key is consumed exactly once by name and shape. Missing or
+    /// unexpected parameters under that prefix are rejected; unrelated `fnet`/`cnet` keys
+    /// in the same checkpoint are ignored.
+    pub fn load(params: &std::collections::HashMap<String, Array>) -> Result<Self, String> {
+        let mut reader = ParamReader::new(params);
+        let block = Self {
+            encoder: MotionEncoder::load(&mut reader, "update_block.encoder")?,
+            gru: SepConvGRU::load(&mut reader, "update_block.gru")?,
+            flow_head: FlowHead::load(&mut reader, "update_block.flow_head")?,
+            mask: MaskHead::load(&mut reader, "update_block.mask.0", "update_block.mask.2")?,
+        };
+        reader.finish("update_block")?;
+        Ok(block)
+    }
+
+    /// Load the update block directly from a converted safetensors checkpoint.
+    pub fn load_checkpoint(path: impl AsRef<std::path::Path>) -> Result<Self, String> {
+        let params = Array::load_safetensors(path).map_err(|e| e.to_string())?;
+        Self::load(&params)
+    }
+
+    /// Run one GRU/flow-head step and return the updated hidden state and flow delta.
+    ///
+    /// `net` and `inp` are `[1,H,W,128]`, `corr` is `[1,H,W,324]`, and `flow` is `[1,H,W,2]`.
+    pub fn core(
+        &mut self,
+        net: &Array,
+        inp: &Array,
+        corr: &Array,
+        flow: &Array,
+    ) -> Result<CoreOutput, String> {
+        validate_update_inputs(net, inp, corr, flow)?;
+        let motion = self.encoder.forward(flow, corr)?;
+        let gru_input = concatenate(&[inp, &motion], -1).map_err(|e| e.to_string())?;
+        let net = self.gru.forward(net, &gru_input)?;
+        let delta = self.flow_head.forward(&net)?;
+        Ok(CoreOutput { net, delta })
+    }
+
+    /// Run the mask head on a `[1,H,W,128]` hidden state, returning `[1,H,W,576]` scaled by 0.25.
+    pub fn mask_head(&mut self, net: &Array) -> Result<Array, String> {
+        validate_hidden(net)?;
+        self.mask.forward(net)
+    }
+
+    /// Run the complete update block: core step followed by the mask head on the updated state.
+    pub fn forward(
+        &mut self,
+        net: &Array,
+        inp: &Array,
+        corr: &Array,
+        flow: &Array,
+    ) -> Result<UpdateBlockOutput, String> {
+        let core = self.core(net, inp, corr, flow)?;
+        let mask = self.mask_head(&core.net)?;
+        Ok(UpdateBlockOutput {
+            net: core.net,
+            delta: core.delta,
+            mask,
+        })
+    }
+}
+
+fn validate_hidden(net: &Array) -> Result<(i32, i32), String> {
+    let shape = net.shape();
+    if shape.len() != 4 || shape[0] != 1 || shape[3] != RAFT_HIDDEN_CHANNELS {
+        return Err(format!(
+            "net must have shape [1,H,W,{RAFT_HIDDEN_CHANNELS}], got {shape:?}"
+        ));
+    }
+    if shape[1] <= 0 || shape[2] <= 0 {
+        return Err(format!(
+            "net spatial dimensions must be positive, got {shape:?}"
+        ));
+    }
+    Ok((shape[1], shape[2]))
+}
+
+fn validate_update_inputs(
+    net: &Array,
+    inp: &Array,
+    corr: &Array,
+    flow: &Array,
+) -> Result<(i32, i32), String> {
+    let (height, width) = validate_hidden(net)?;
+    for (name, array, channels) in [
+        ("net", net, RAFT_HIDDEN_CHANNELS),
+        ("inp", inp, RAFT_HIDDEN_CHANNELS),
+        ("corr", corr, RAFT_CORR_CHANNELS),
+        ("flow", flow, 2),
+    ] {
+        let expected = [1, height, width, channels];
+        if array.shape() != expected.as_slice() {
+            return Err(format!(
+                "{name} must have shape {expected:?} to match net, got {:?}",
+                array.shape()
+            ));
+        }
+    }
+    Ok((height, width))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -692,6 +1054,28 @@ mod tests {
             "fixture count for shape {shape:?}"
         );
         Array::from_slice(&data, shape)
+    }
+
+    fn max_abs_error(actual: &Array, expected: &Array) -> f32 {
+        assert_eq!(actual.shape(), expected.shape());
+        let actual = actual
+            .as_dtype(Dtype::Float32)
+            .unwrap()
+            .contiguous()
+            .unwrap();
+        let expected = expected
+            .as_dtype(Dtype::Float32)
+            .unwrap()
+            .contiguous()
+            .unwrap();
+        let actual = actual.as_slice::<f32>();
+        let expected = expected.as_slice::<f32>();
+        assert_eq!(actual.len(), expected.len());
+        actual
+            .iter()
+            .zip(expected)
+            .map(|(got, want)| (got - want).abs())
+            .fold(0.0, f32::max)
     }
 
     fn max_normalized_error(actual: &Array, expected: &Array) -> f32 {
@@ -1029,6 +1413,145 @@ mod tests {
                 "{name} max abs error {max_abs_error} exceeds tolerance"
             );
         }
+    }
+
+    #[test]
+    fn update_block_matches_python_mlx_fixture() {
+        let checkpoint = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vendor/weights/conv/raft-things.safetensors");
+        let checkpoint_hash = format!(
+            "{:x}",
+            sha2::Sha256::digest(std::fs::read(&checkpoint).unwrap())
+        );
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/update_block_reference.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["schema"], "mlxstab.raft_compat.update_block/1");
+        assert_eq!(fixture["checkpoint_sha256"], checkpoint_hash);
+        assert_eq!(fixture["rust_mlx_rs"], "0.32.0");
+        assert_eq!(fixture["rust_mlx"], "0.32.2");
+        assert!(fixture["python_mlx"].is_string());
+        assert_eq!(fixture["height"], 3);
+        assert_eq!(fixture["width"], 4);
+        assert_eq!(fixture["hidden_channels"], RAFT_HIDDEN_CHANNELS);
+        assert_eq!(fixture["corr_channels"], RAFT_CORR_CHANNELS);
+        assert_eq!(fixture["mask_channels"], RAFT_MASK_CHANNELS);
+
+        let inputs = &fixture["inputs"];
+        let net = json_f32(&inputs["net"], &json_shape(&inputs["net_shape"]));
+        let inp = json_f32(&inputs["inp"], &json_shape(&inputs["inp_shape"]));
+        let corr = json_f32(&inputs["corr"], &json_shape(&inputs["corr_shape"]));
+        let flow = json_f32(&inputs["flow"], &json_shape(&inputs["flow_shape"]));
+        assert_eq!(net.shape(), &[1, 3, 4, RAFT_HIDDEN_CHANNELS]);
+        assert_eq!(inp.shape(), &[1, 3, 4, RAFT_HIDDEN_CHANNELS]);
+        assert_eq!(corr.shape(), &[1, 3, 4, RAFT_CORR_CHANNELS]);
+        assert_eq!(flow.shape(), &[1, 3, 4, 2]);
+
+        let mut block = BasicUpdateBlock::load_checkpoint(&checkpoint).unwrap();
+        let core = block.core(&net, &inp, &corr, &flow).unwrap();
+        let mask = block.mask_head(&core.net).unwrap();
+        let combined = block.forward(&net, &inp, &corr, &flow).unwrap();
+
+        let expected_core = &fixture["core"];
+        let expected_net = json_f32(
+            &expected_core["net"],
+            &json_shape(&expected_core["net_shape"]),
+        );
+        let expected_delta = json_f32(
+            &expected_core["delta"],
+            &json_shape(&expected_core["delta_shape"]),
+        );
+        let expected_mask = json_f32(&fixture["mask"], &json_shape(&fixture["mask_shape"]));
+        assert_eq!(expected_net.shape(), &[1, 3, 4, RAFT_HIDDEN_CHANNELS]);
+        assert_eq!(expected_delta.shape(), &[1, 3, 4, 2]);
+        assert_eq!(expected_mask.shape(), &[1, 3, 4, RAFT_MASK_CHANNELS]);
+
+        let tolerance = 1e-5f32;
+        for (label, actual, expected) in [
+            ("updated net", &core.net, &expected_net),
+            ("delta flow", &core.delta, &expected_delta),
+            ("mask", &mask, &expected_mask),
+            ("combined net", &combined.net, &expected_net),
+            ("combined delta", &combined.delta, &expected_delta),
+            ("combined mask", &combined.mask, &expected_mask),
+        ] {
+            let error = max_abs_error(actual, expected);
+            println!("update block {label}: max abs error {error:e}");
+            assert!(
+                error < tolerance,
+                "update block {label} max abs error {error} exceeds {tolerance}"
+            );
+        }
+    }
+
+    #[test]
+    fn update_block_loader_rejects_missing_extra_and_misshapen_parameters() {
+        let checkpoint = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vendor/weights/conv/raft-things.safetensors");
+        let params = Array::load_safetensors(checkpoint).unwrap();
+
+        let mut missing = params.clone();
+        missing.remove("update_block.gru.convz2.weight");
+        let error = BasicUpdateBlock::load(&missing).unwrap_err();
+        assert!(
+            error.contains("missing parameter update_block.gru.convz2.weight"),
+            "unexpected error: {error}"
+        );
+
+        let mut extra = params.clone();
+        extra.insert(
+            "update_block.unexpected.weight".to_string(),
+            Array::from_slice(&[0.0f32], &[1]),
+        );
+        let error = BasicUpdateBlock::load(&extra).unwrap_err();
+        assert!(
+            error.contains("unexpected parameters under update_block"),
+            "unexpected error: {error}"
+        );
+
+        let mut misshapen = params.clone();
+        misshapen.insert(
+            "update_block.flow_head.conv1.bias".to_string(),
+            Array::from_slice(&[0.0f32], &[1]),
+        );
+        let error = BasicUpdateBlock::load(&misshapen).unwrap_err();
+        assert!(
+            error.contains("parameter shape mismatch for update_block.flow_head.conv1.bias"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn update_block_rejects_invalid_input_shapes() {
+        let checkpoint = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vendor/weights/conv/raft-things.safetensors");
+        let mut block = BasicUpdateBlock::load_checkpoint(checkpoint).unwrap();
+        let net = mlx_rs::ops::zeros::<f32>(&[1, 3, 4, RAFT_HIDDEN_CHANNELS]).unwrap();
+        let inp = mlx_rs::ops::zeros::<f32>(&[1, 3, 4, RAFT_HIDDEN_CHANNELS]).unwrap();
+        let corr = mlx_rs::ops::zeros::<f32>(&[1, 3, 4, RAFT_CORR_CHANNELS]).unwrap();
+        let flow = mlx_rs::ops::zeros::<f32>(&[1, 3, 4, 2]).unwrap();
+
+        let wrong_corr = mlx_rs::ops::zeros::<f32>(&[1, 3, 4, 323]).unwrap();
+        let error = block.core(&net, &inp, &wrong_corr, &flow).unwrap_err();
+        assert!(
+            error.contains("corr must have shape [1, 3, 4, 324]"),
+            "unexpected error: {error}"
+        );
+
+        let wrong_spatial = mlx_rs::ops::zeros::<f32>(&[1, 2, 4, 2]).unwrap();
+        let error = block.core(&net, &inp, &corr, &wrong_spatial).unwrap_err();
+        assert!(
+            error.contains("flow must have shape [1, 3, 4, 2]"),
+            "unexpected error: {error}"
+        );
+
+        let wrong_hidden = mlx_rs::ops::zeros::<f32>(&[1, 3, 4, 127]).unwrap();
+        let error = block.mask_head(&wrong_hidden).unwrap_err();
+        assert!(
+            error.contains("net must have shape [1,H,W,128]"),
+            "unexpected error: {error}"
+        );
     }
 
     #[test]

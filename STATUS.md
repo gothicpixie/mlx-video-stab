@@ -4423,3 +4423,23 @@ closes correlation construction and lookup parity for the small fixture only. It
 device-side production path, and the recurrent update block, bidirectional RAFT flow, end-to-end parity, and
 runtime/memory evidence remain open. Continue with the update block and integrate the full flow before judging
 whether Rust improves the project.
+
+### E20 follow-up (2026-10-18): checkpoint-backed update-block parity
+
+Added the checkpoint-backed Rust `BasicUpdateBlock`: motion encoder, horizontal then vertical separable GRU,
+flow-delta head, and quarter-scaled 576-channel convex-upsample mask head. The loader checks exact parameter
+names and shapes, rejects missing and unexpected update-block keys, and validates the production tensor shapes
+`net/inp=[1,H,W,128]`, `corr=[1,H,W,324]`, and `flow=[1,H,W,2]`.
+
+The fixture generator runs the repository's Python MLX `BasicUpdateBlock` on deterministic 3x4 inputs with the
+checked-in RAFT checkpoint. It records the inputs, updated hidden tensor, flow delta, and mask with checkpoint and
+runtime version metadata; two generations produced identical SHA-256
+`e95fdcf8219aa60a843f9b62bba3a788dbb2f6f39a200bff2123889efbe5d88c`. Rust matched Python with **zero maximum
+absolute error** for all three outputs and for the complete `forward` entry point. All **14 Rust tests pass**;
+formatting and strict clippy pass. CodeGraph was synced, and the changed-file query did not find Rust tests, which
+were run directly.
+
+The update block is now individually parity-tested but is not yet connected to the encoders and correlation
+pyramid in an iterative bidirectional flow call. Compiled execution, final-flow parity, precision edge cases,
+complete checkpoint schema validation, cancellation/recovery, and sustained end-to-end timing and memory remain
+open. Continue to one integrated RAFT flow test before judging Rust for production.
