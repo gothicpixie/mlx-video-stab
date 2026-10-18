@@ -633,3 +633,268 @@ def test_build_candidate_preserves_build_failure_while_closing_both_clips(tmp_pa
                 panel_width=40, panel_height=32)
     assert len(FakeEncoder.instances) == 2
     assert all(encoder.closed for encoder in FakeEncoder.instances)
+
+
+# --------------------------------------------------------------------------------------
+# opt-in matched-crop review (default raw-vs-stabilized mode only)
+# --------------------------------------------------------------------------------------
+
+def _matched_setup(monkeypatch, tmp_path, masks, *, raw_frames=None, stab_frames=None):
+    """Default-mode fake run with a baseline validity mask beside the stabilized output."""
+    count = len(masks)
+    H, W = masks[0].shape[:2]
+    raw_frames = raw_frames if raw_frames is not None else [
+        np.full((H, W, 3), 20 + i * 30, np.uint8) for i in range(count)]
+    stab_frames = stab_frames if stab_frames is not None else [
+        np.full((H, W, 3), 120 + i * 10, np.uint8) for i in range(count)]
+    source = tmp_path / "source.mts"
+    source.write_bytes(b"source")
+    video = tmp_path / "stabilized.mp4"
+    video.write_bytes(b"stabilized")
+    mask_path = tmp_path / "mask.mp4"
+    mask_path.write_bytes(b"mask")
+    manifest = {
+        "status": "success",
+        "source": {
+            "path": str(source), "path_type": "file", "sha256": MF.sha256_file(source),
+            "window": {"start_s": 0.0, "duration_s": count / 30.0},
+            "preprocessing": {"interlaced": False, "deinterlace": None, "decode_vf": None},
+            "decoded": {"frames": len(raw_frames), "fps": 30.0, "width": W, "height": H},
+        },
+        "outputs": {
+            "video": str(video), "mask": str(mask_path), "encoded_frames": count,
+            "decoded": {"frames": count, "fps": 30.0, "width": W, "height": H},
+            "cadence": {"measured_fps": 30.0, "measured_frames": count},
+            "encoded_pts": _pts(count, 30.0), "mask_pts": _pts(count, 30.0),
+            "timeline_alignment": {"aligned": True},
+        },
+    }
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest))
+    FakeEncoder.instances = []
+
+    def fake_probe(path):
+        return {"width": W, "height": H, "fps": 30.0, "interlaced": False}
+
+    def fake_decode(path, *args, **kwargs):
+        name = Path(path).name
+        frames = {"source.mts": raw_frames, "stabilized.mp4": stab_frames,
+                  "mask.mp4": masks}[name]
+        return iter(frames), 30.0, (W, H)
+
+    monkeypatch.setattr(media, "probe", fake_probe)
+    monkeypatch.setattr(media, "decode", fake_decode)
+    monkeypatch.setattr(media, "Encoder", FakeEncoder)
+    monkeypatch.setattr(media, "frame_pts", lambda path: _pts(count, 30.0))
+    return manifest_path, raw_frames, stab_frames, mask_path
+
+
+def _border_mask(H=20, W=20, border=1):
+    """Repo mask convention: black (0) valid interior, white (255) invalid border."""
+    mask = np.zeros((H, W, 3), np.uint8)
+    if border:
+        mask[:border] = mask[-border:] = 255
+        mask[:, :border] = mask[:, -border:] = 255
+    return mask
+
+
+def test_matched_crop_uses_black_as_valid_and_maximizes_support(tmp_path, monkeypatch):
+    masks = [_border_mask() for _ in range(2)]
+    manifest_path, _, _, _ = _matched_setup(monkeypatch, tmp_path, masks)
+    report = R.build(manifest_path, out_video=tmp_path / "crop.mp4",
+                     out_report=tmp_path / "crop.json", panel_width=40, panel_height=32,
+                     matched_crop_area_loss_cap=0.10)
+    crop = report["evidence"]["matched_crop"]
+    # Full frame=0.81 support; the 19x19 candidate (9.75% loss, the only allowed crop) reaches 324/361.
+    assert crop["rectangle"] == {"x": 0, "y": 0, "width": 19, "height": 19}
+    assert crop["support"] == pytest.approx(18 * 18 / (19 * 19))
+    assert crop["area_loss"] == pytest.approx(1.0 - 19 * 19 / (20 * 20))
+    assert "black is valid" in crop["mask"]["polarity"]
+    assert "white is invalid" in crop["mask"]["polarity"]
+
+
+def test_matched_crop_cap_enforcement_and_zero_only_keeps_full_frame(tmp_path, monkeypatch):
+    masks = [_border_mask()]
+    manifest_path, _, _, _ = _matched_setup(monkeypatch, tmp_path, masks)
+    report = R.build(manifest_path, out_video=tmp_path / "crop.mp4",
+                     out_report=tmp_path / "crop.json", panel_width=40, panel_height=32,
+                     matched_crop_area_loss_cap=0.05)
+    crop = report["evidence"]["matched_crop"]
+    # 19x19 loses 9.75% (>5%), so the full frame is the only candidate, even though its support is lower.
+    assert crop["rectangle"] == {"x": 0, "y": 0, "width": 20, "height": 20}
+    assert crop["area_loss"] == pytest.approx(0.0)
+    assert crop["support"] == pytest.approx(18 * 18 / (20 * 20))
+
+
+def test_matched_crop_no_benefit_tie_keeps_full_frame(tmp_path, monkeypatch):
+    masks = [_border_mask(border=0)]
+    manifest_path, _, _, _ = _matched_setup(monkeypatch, tmp_path, masks)
+    report = R.build(manifest_path, out_video=tmp_path / "crop.mp4",
+                     out_report=tmp_path / "crop.json", panel_width=40, panel_height=32,
+                     matched_crop_area_loss_cap=0.10)
+    crop = report["evidence"]["matched_crop"]
+    assert crop["rectangle"] == {"x": 0, "y": 0, "width": 20, "height": 20}
+    assert crop["area_loss"] == pytest.approx(0.0)
+    assert crop["support"] == pytest.approx(1.0)
+
+
+def test_matched_crop_applies_the_same_rectangle_to_raw_and_stabilized(tmp_path, monkeypatch):
+    from bench.multiscale_real_review import resize_bilinear
+    rows = np.arange(20, dtype=np.uint8)[:, None]
+    cols = np.arange(20, dtype=np.uint8)[None, :]
+    raw = np.empty((20, 20, 3), np.uint8)
+    raw[..., 0], raw[..., 1], raw[..., 2] = cols * 10, rows * 10, 7
+    stab = np.empty((20, 20, 3), np.uint8)
+    stab[..., 0], stab[..., 1], stab[..., 2] = 200, rows * 5, cols * 3
+    masks = [_border_mask()]
+    manifest_path, _, _, _ = _matched_setup(monkeypatch, tmp_path, masks,
+                                            raw_frames=[raw], stab_frames=[stab])
+    report = R.build(manifest_path, out_video=tmp_path / "crop.mp4",
+                     out_report=tmp_path / "crop.json", panel_width=64, panel_height=64,
+                     matched_crop_area_loss_cap=0.10)
+    rect = report["evidence"]["matched_crop"]["rectangle"]
+    assert (rect["x"], rect["y"], rect["width"], rect["height"]) == (0, 0, 19, 19)
+    expected_raw = resize_bilinear(raw[0:19, 0:19], 64, 64)
+    expected_stab = resize_bilinear(stab[0:19, 0:19], 64, 64)
+    original, reversed_clip = FakeEncoder.instances
+    # Labels only overwrite the top-left 25x31 box; the rest proves both panels used the shared crop.
+    assert np.array_equal(original.frames[0][40:, 40:64], expected_raw[40:, 40:64])
+    assert np.array_equal(original.frames[0][40:, 104:128], expected_stab[40:, 40:64])
+    assert np.array_equal(reversed_clip.frames[0][40:, 40:64], expected_stab[40:, 40:64])
+    assert np.array_equal(reversed_clip.frames[0][40:, 104:128], expected_raw[40:, 40:64])
+
+
+def test_matched_crop_group_id_distinguishes_crop_treatment(tmp_path, monkeypatch):
+    masks = [_border_mask() for _ in range(2)]
+    manifest_path, _, _, _ = _matched_setup(monkeypatch, tmp_path, masks)
+    plain = R.build(manifest_path, out_video=tmp_path / "plain.mp4",
+                    out_report=tmp_path / "plain.json", panel_width=40, panel_height=32)
+    cropped = R.build(manifest_path, out_video=tmp_path / "cropped.mp4",
+                      out_report=tmp_path / "cropped.json", panel_width=40, panel_height=32,
+                      matched_crop_area_loss_cap=0.10)
+    repeated = R.build(manifest_path, out_video=tmp_path / "cropped_repeat.mp4",
+                       out_report=tmp_path / "cropped_repeat.json", panel_width=40, panel_height=32,
+                       matched_crop_area_loss_cap=0.10)
+    plain_group = plain["position_reversal"]["group"]
+    cropped_group = cropped["position_reversal"]["group"]
+    assert plain_group != cropped_group
+    assert cropped_group == repeated["position_reversal"]["group"]
+    rect = cropped["evidence"]["matched_crop"]["rectangle"]
+    assert (f"|matched_crop:{rect['x']},{rect['y']},"
+            f"{rect['width']},{rect['height']}") in cropped_group
+    assert "|matched_crop:" not in plain_group
+    assert {pair["position_reversal"]["group"] for pair in cropped["pairs"]} == {cropped_group}
+    assert {pair["position_reversal"]["group"] for pair in plain["pairs"]} == {plain_group}
+
+
+def test_matched_crop_records_selection_provenance(tmp_path, monkeypatch):
+    masks = [_border_mask()]
+    manifest_path, _, _, mask_path = _matched_setup(monkeypatch, tmp_path, masks)
+    report = R.build(manifest_path, out_video=tmp_path / "crop.mp4",
+                     out_report=tmp_path / "crop.json", panel_width=40, panel_height=32,
+                     matched_crop_area_loss_cap=0.10)
+    crop = report["evidence"]["matched_crop"]
+    assert crop["area_loss_cap"] == pytest.approx(0.10)
+    assert crop["frames"] == 1
+    assert crop["selection_rule"] == R.MATCHED_CROP_SELECTION_RULE
+    assert crop["mask"] == {
+        "path": str(mask_path.resolve()), "sha256": MF.sha256_file(mask_path),
+        "width": 20, "height": 20, "fps": [30, 1], "frames": 1,
+        "polarity": R.MASK_VALIDITY_POLARITY,
+    }
+    written = json.loads((tmp_path / "crop.json").read_text())
+    assert written["evidence"]["matched_crop"] == crop
+
+
+def test_matched_crop_cli_flag_is_opt_in(tmp_path, monkeypatch, capsys):
+    masks = [_border_mask(border=0)]
+    manifest_path, _, _, _ = _matched_setup(monkeypatch, tmp_path, masks)
+    assert R.main([str(manifest_path), "--out-video", str(tmp_path / "cli.mp4"),
+                   "--out-report", str(tmp_path / "cli.json"),
+                   "--matched-crop-area-loss-cap", "0.10"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["status"] == "success"
+    report = json.loads((tmp_path / "cli.json").read_text())
+    assert report["evidence"]["matched_crop"]["rectangle"] == {
+        "x": 0, "y": 0, "width": 20, "height": 20}
+
+
+@pytest.mark.parametrize("cap", [float("nan"), float("inf"), float("-inf"), -0.01, 0.1001, 0.5, True, "0.04"])
+def test_matched_crop_rejects_invalid_caps(tmp_path, monkeypatch, cap):
+    masks = [_border_mask()]
+    manifest_path, _, _, _ = _matched_setup(monkeypatch, tmp_path, masks)
+    with pytest.raises(R.ReviewBuildError, match=r"finite fraction in \[0, 0.10\]"):
+        R.build(manifest_path, panel_width=40, panel_height=32,
+                matched_crop_area_loss_cap=cap)
+
+
+def test_matched_crop_is_rejected_in_candidate_mode(tmp_path, monkeypatch):
+    manifest_path, _ = _candidate_setup(monkeypatch, tmp_path, {"candidate.mp4": 50})
+    with pytest.raises(R.ReviewBuildError, match="only supported in the default"):
+        R.build(manifest_path, candidate_video=tmp_path / "candidate.mp4",
+                matched_crop_area_loss_cap=0.04)
+
+
+def test_matched_crop_requires_a_mask(tmp_path, monkeypatch):
+    masks = [_border_mask()]
+    manifest_path, _, _, _ = _matched_setup(monkeypatch, tmp_path, masks)
+    doc = json.loads(manifest_path.read_text())
+    doc["outputs"].pop("mask")
+    manifest_path.write_text(json.dumps(doc))
+    with pytest.raises(R.ReviewBuildError, match="outputs.mask is required"):
+        R.build(manifest_path, panel_width=40, panel_height=32, matched_crop_area_loss_cap=0.04)
+
+
+def test_matched_crop_rejects_missing_mask_file(tmp_path, monkeypatch):
+    masks = [_border_mask()]
+    manifest_path, _, _, mask_path = _matched_setup(monkeypatch, tmp_path, masks)
+    doc = json.loads(manifest_path.read_text())
+    doc["outputs"]["mask"] = str(tmp_path / "missing_mask.mp4")
+    manifest_path.write_text(json.dumps(doc))
+    with pytest.raises(R.ReviewBuildError, match="outputs.mask video is missing"):
+        R.build(manifest_path, panel_width=40, panel_height=32, matched_crop_area_loss_cap=0.04)
+
+
+@pytest.mark.parametrize("change, message", [
+    (lambda: None, "mask is not zero-based constant-frame-rate"),
+    (lambda: None, "mask video probe disagrees"),
+])
+def test_matched_crop_rejects_invalid_mask_evidence(tmp_path, monkeypatch, change, message):
+    masks = [_border_mask(), _border_mask()]
+    manifest_path, _, _, _ = _matched_setup(monkeypatch, tmp_path, masks)
+    if "PTS" not in message and "zero-based" in message:
+        current = media.frame_pts
+        monkeypatch.setattr(media, "frame_pts",
+                            lambda path: _pts(2, 25.0) if Path(path).name == "mask.mp4" else current(path))
+    else:
+        current_probe = media.probe
+
+        def fake_probe(path):
+            info = dict(current_probe(path))
+            if Path(path).name == "mask.mp4":
+                info["width"] = 19
+            return info
+
+        monkeypatch.setattr(media, "probe", fake_probe)
+    with pytest.raises(R.ReviewBuildError, match=message):
+        R.build(manifest_path, panel_width=40, panel_height=32, matched_crop_area_loss_cap=0.04)
+
+
+@pytest.mark.parametrize("delta, message", [(1, "exceeds manifest"), (-1, "ended before")])
+def test_matched_crop_rejects_mask_frame_count_mismatch(tmp_path, monkeypatch, delta, message):
+    masks = [_border_mask()]
+    manifest_path, _, _, _ = _matched_setup(monkeypatch, tmp_path, masks)
+    current = media.decode
+
+    def fake_decode(path, *args, **kwargs):
+        frames, fps, size = current(path, *args, **kwargs)
+        if Path(path).name == "mask.mp4":
+            frames = list(frames)
+            frames = frames + [frames[-1]] if delta > 0 else frames[:1]
+            if delta < 0:
+                frames = []
+        return frames, fps, size
+
+    monkeypatch.setattr(media, "decode", fake_decode)
+    with pytest.raises(R.ReviewBuildError, match=message):
+        R.build(manifest_path, panel_width=40, panel_height=32, matched_crop_area_loss_cap=0.04)

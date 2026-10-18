@@ -38,6 +38,14 @@ from .multiscale_real_review import resize_bilinear
 SCHEMA = "mlxstab.real_pair_review/1"
 DEFAULT_PAIR_NAME = "raw_vs_stabilized.mp4"
 DEFAULT_CANDIDATE_NAME = "baseline_vs_candidate.mp4"
+MAX_MATCHED_CROP_AREA_LOSS = 0.10
+MATCHED_CROP_SELECTION_RULE = (
+    "enumerate centered aspect-preserving integer rectangles (width 1..W, height=round(width*H/W)); "
+    "include the full frame; retain rectangles whose area loss 1-(width*height)/(W*H) is at most the cap; "
+    "select the rectangle with the highest mean-over-frames valid-pixel fraction inside it; on a support "
+    "tie select the least crop (smallest area loss / largest rectangle)"
+)
+MASK_VALIDITY_POLARITY = "black is valid (gray <= 127); white is invalid (gray > 127)"
 FONT = {
     "A": ("01110", "10001", "10001", "11111", "10001", "10001", "10001"),
     "B": ("11110", "10001", "10001", "11110", "10001", "10001", "11110"),
@@ -124,7 +132,11 @@ def _label(panel, word):
     return panel
 
 
-def _compose(raw, stabilized, width, height):
+def _compose(raw, stabilized, width, height, crop=None):
+    if crop is not None:
+        x, y, crop_width, crop_height = crop
+        raw = raw[y:y + crop_height, x:x + crop_width]
+        stabilized = stabilized[y:y + crop_height, x:x + crop_width]
     raw_panel = resize_bilinear(raw, width, height)
     stab_panel = resize_bilinear(stabilized, width, height)
     raw_panel = _label(raw_panel, "A")
@@ -156,6 +168,122 @@ def _validate_encoded_output(path, run_output, count, out_fps, where):
         raise ReviewBuildError(f"{where} video probe disagrees with manifest decoded metadata")
     _validate_cfr(media.frame_pts(path), count, out_fps, where)
     return info
+
+
+def _validate_matched_crop_cap(value):
+    """Validate the opt-in matched-crop cap as a finite fraction in ``[0, 0.10]``."""
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ReviewBuildError("matched-crop area-loss cap must be a finite fraction in [0, 0.10]")
+    cap = float(value)
+    if not math.isfinite(cap) or cap < 0 or cap > MAX_MATCHED_CROP_AREA_LOSS:
+        raise ReviewBuildError("matched-crop area-loss cap must be a finite fraction in [0, 0.10]")
+    return cap
+
+
+def _centered_crop_candidates(width, height, cap):
+    """Centered aspect-preserving rectangles within the cap, ordered from least to most crop.
+
+    Widths run from the full frame down to one pixel; the height follows the output aspect ratio
+    (``round(width * H / W)``). The full frame is therefore always the first candidate (area loss 0).
+    """
+    total = int(width) * int(height)
+    candidates = []
+    seen = set()
+    for crop_width in range(int(width), 0, -1):
+        crop_height = max(1, min(int(height), int(round(crop_width * height / width))))
+        x = (int(width) - crop_width) // 2
+        y = (int(height) - crop_height) // 2
+        rect = (x, y, crop_width, crop_height)
+        if rect in seen:
+            continue
+        seen.add(rect)
+        area = crop_width * crop_height
+        area_loss = 1.0 - area / total
+        if area_loss <= cap + 1e-12:
+            candidates.append({"rect": rect, "area": area, "area_loss": area_loss})
+    return candidates
+
+
+def _integral_image(valid):
+    """Zero-padded summed-area table so any rectangle's valid-pixel count is O(1)."""
+    return np.pad(valid.astype(np.int64).cumsum(0).cumsum(1), ((1, 0), (1, 0)))
+
+
+def _rect_sum(integral, rect):
+    x, y, width, height = rect
+    return int(integral[y + height, x + width] - integral[y, x + width]
+               - integral[y + height, x] + integral[y, x])
+
+
+def _select_matched_crop(mask_path, run_output, count, out_fps, cap):
+    """Select one shared centered crop from the baseline stabilized validity mask.
+
+    The mask is independently verified against the manifest's output dimensions/frame rate/count and its
+    zero-origin CFR clock, then streamed once. Repo masks encode valid pixels as black and invalid as white,
+    so ``gray > 127`` is invalid (``<= 127`` is valid). Selection uses only this baseline mask; raw and
+    stabilized frames are cropped with the returned rectangle.
+    """
+    mask_path = Path(mask_path).expanduser()
+    if not mask_path.is_file():
+        raise ReviewBuildError("manifest outputs.mask video is missing")
+    info = _validate_encoded_output(mask_path, run_output, count, out_fps, "mask")
+    width, height = int(run_output["width"]), int(run_output["height"])
+    frames, decode_fps, size = media.decode(mask_path, info)
+    if not _close(decode_fps, float(out_fps)):
+        raise ReviewBuildError("decoded mask frame rate disagrees with manifest output")
+    if size != (width, height):
+        raise ReviewBuildError("decoded mask dimensions disagree with manifest output")
+    candidates = _centered_crop_candidates(width, height, cap)
+    support_counts = np.zeros(len(candidates), dtype=np.int64)
+    try:
+        mask_iter = iter(frames)
+        for i in range(int(count)):
+            frame = next(mask_iter, None)
+            if frame is None:
+                raise ReviewBuildError("mask decode ended before manifest frame count")
+            if frame.shape[:2] != (height, width):
+                raise ReviewBuildError("decoded mask frame dimensions changed midstream")
+            channel = frame if frame.ndim == 2 else frame[..., 0]
+            valid = channel <= 127
+            integral = _integral_image(valid)
+            for j, candidate in enumerate(candidates):
+                support_counts[j] += _rect_sum(integral, candidate["rect"])
+        if sum(1 for _ in mask_iter):
+            raise ReviewBuildError("mask decoded frame count exceeds manifest")
+    finally:
+        close = getattr(frames, "close", None)
+        if close is not None:
+            try:
+                close()
+            except BaseException:
+                pass
+    # Candidates are ordered least-crop-first, so an exact support tie keeps the larger rectangle.
+    best = 0
+    for j in range(1, len(candidates)):
+        left = int(support_counts[j]) * int(candidates[best]["area"])
+        right = int(support_counts[best]) * int(candidates[j]["area"])
+        if left > right:
+            best = j
+    chosen = candidates[best]
+    x, y, crop_width, crop_height = chosen["rect"]
+    support = float(support_counts[best]) / (int(count) * int(chosen["area"]))
+    return {
+        "area_loss_cap": cap,
+        "area_loss": chosen["area_loss"],
+        "support": support,
+        "selection_rule": MATCHED_CROP_SELECTION_RULE,
+        "rectangle": {"x": x, "y": y, "width": crop_width, "height": crop_height},
+        "frames": int(count),
+        "mask": {
+            "path": str(mask_path.resolve()),
+            "sha256": MF.sha256_file(mask_path),
+            "width": width,
+            "height": height,
+            "fps": [out_fps.numerator, out_fps.denominator],
+            "frames": int(count),
+            "polarity": MASK_VALIDITY_POLARITY,
+        },
+    }
 
 
 def _build_candidate(manifest_path, manifest, candidate_video, *, out_video, out_report, out_reversed,
@@ -398,7 +526,8 @@ def _build_candidate(manifest_path, manifest, candidate_video, *, out_video, out
 
 
 def build(manifest_path, *, out_video=None, out_report=None, out_reversed=None,
-          panel_width=640, panel_height=360, candidate_video=None):
+          panel_width=640, panel_height=360, candidate_video=None,
+          matched_crop_area_loss_cap=None):
     manifest_path = Path(manifest_path).resolve()
     try:
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -407,9 +536,14 @@ def build(manifest_path, *, out_video=None, out_report=None, out_reversed=None,
     if manifest.get("status") != "success":
         raise ReviewBuildError("benchmark manifest status must be success")
     if candidate_video is not None:
+        if matched_crop_area_loss_cap is not None:
+            raise ReviewBuildError(
+                "matched-crop area-loss cap is only supported in the default raw-vs-stabilized mode")
         return _build_candidate(manifest_path, manifest, candidate_video, out_video=out_video,
                                 out_report=out_report, out_reversed=out_reversed,
                                 panel_width=panel_width, panel_height=panel_height)
+    crop_cap = (None if matched_crop_area_loss_cap is None
+                else _validate_matched_crop_cap(matched_crop_area_loss_cap))
     source = manifest.get("source") or {}
     outputs = manifest.get("outputs") or {}
     window = source.get("window") or {}
@@ -441,6 +575,12 @@ def build(manifest_path, *, out_video=None, out_report=None, out_reversed=None,
     indices = source_indices(source_fps, out_fps, count, int(run_source["frames"]))
     if panel_width < 32 or panel_height < 32 or panel_width * 2 * panel_height > 4_194_304:
         raise ReviewBuildError("panel size must be at least 32x32 and total at most 4,194,304 pixels")
+    matched_crop = None
+    if crop_cap is not None:
+        mask_value = outputs.get("mask")
+        if not mask_value:
+            raise ReviewBuildError("manifest outputs.mask is required for matched-crop review")
+        matched_crop = _select_matched_crop(mask_value, run_output, count, out_fps, crop_cap)
 
     output_path = Path(out_video) if out_video else manifest_path.parent / "raw_vs_stabilized.mp4"
     reversed_path = Path(out_reversed) if out_reversed else _reversed_video_path(output_path)
@@ -487,6 +627,15 @@ def build(manifest_path, *, out_video=None, out_report=None, out_reversed=None,
         raise ReviewBuildError("decoded source dimensions disagree with manifest")
     if stab_size != (run_output.get("width"), run_output.get("height")):
         raise ReviewBuildError("decoded output dimensions disagree with manifest")
+    crop_rect = None
+    if matched_crop is not None:
+        rectangle = matched_crop["rectangle"]
+        crop_rect = (rectangle["x"], rectangle["y"], rectangle["width"], rectangle["height"])
+        x, y, crop_width, crop_height = crop_rect
+        for label, (frame_width, frame_height) in (("source", raw_size), ("output", stab_size)):
+            if (x < 0 or y < 0 or x + crop_width > frame_width or y + crop_height > frame_height):
+                raise ReviewBuildError(
+                    f"matched-crop rectangle does not fit the decoded {label} frame dimensions")
 
     # Both clips are encoded from the same paired frames in one pass: the original has raw on the left
     # (A) and stabilized on the right (B); the position-reversed clip swaps the panels but keeps the fixed
@@ -524,7 +673,11 @@ def build(manifest_path, *, out_video=None, out_report=None, out_reversed=None,
                 raise ReviewBuildError("decoded output frame dimensions changed midstream")
             for role, _path, swap in jobs:
                 left, right = (stabilized, raw) if swap else (raw, stabilized)
-                encoders[role].write(_compose(left, right, panel_width, panel_height))
+                if crop_rect is None:                 # default path: exactly the previous call
+                    encoder_frame = _compose(left, right, panel_width, panel_height)
+                else:
+                    encoder_frame = _compose(left, right, panel_width, panel_height, crop_rect)
+                encoders[role].write(encoder_frame)
         # Drain both iterators so the count check covers extra frames as well as early EOF.
         raw_count += sum(1 for _ in raw_iter)
         extra_output = sum(1 for _ in stab_iter)
@@ -554,6 +707,12 @@ def build(manifest_path, *, out_video=None, out_report=None, out_reversed=None,
         # Shared stable identifier for the paired original/position-reversed items: both roles carry the same
         # group so the offline position-bias audit can pair them without relying on the clip name or index.
         group_id = (f"{run_id}|{source_sha}|{float(window['start_s'])}|{float(window['duration_s'])}")
+        if matched_crop is not None:
+            # Cropped and uncropped reviews of the same run/window are distinct treatments, so include the
+            # selected rectangle in the group identity. The suffix is omitted entirely for the default mode.
+            rectangle = matched_crop["rectangle"]
+            group_id += (f"|matched_crop:{rectangle['x']},{rectangle['y']},"
+                         f"{rectangle['width']},{rectangle['height']}")
         report = {
             "schema": Gemini.INPUT_SCHEMA,
             "ok": True,
@@ -623,6 +782,8 @@ def build(manifest_path, *, out_video=None, out_report=None, out_reversed=None,
                 ],
             },
         }
+        if matched_crop is not None:
+            report["evidence"]["matched_crop"] = matched_crop
         MF.write_manifest(report_path, report)
         return report
     except BaseException:
@@ -651,11 +812,16 @@ def main(argv=None):
     parser.add_argument("--out-report")
     parser.add_argument("--panel-width", type=int, default=640)
     parser.add_argument("--panel-height", type=int, default=360)
+    parser.add_argument("--matched-crop-area-loss-cap", type=float,
+                        help="opt-in default raw-vs-stabilized review: share one centered aspect-preserving "
+                             "crop chosen from the baseline validity mask with at most this area loss "
+                             "(fraction in [0, 0.10])")
     args = parser.parse_args(argv)
     try:
         result = build(args.manifest, out_video=args.out_video, out_reversed=args.out_reversed,
                        out_report=args.out_report, panel_width=args.panel_width,
-                       panel_height=args.panel_height, candidate_video=args.candidate_video)
+                       panel_height=args.panel_height, candidate_video=args.candidate_video,
+                       matched_crop_area_loss_cap=args.matched_crop_area_loss_cap)
     except Exception as exc:
         print(json.dumps({"status": "failure", "error": f"{type(exc).__name__}: {exc}"}, sort_keys=True))
         return 1
