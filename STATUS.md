@@ -3163,6 +3163,18 @@ filtering likely explains the prior screen. Either result is exploratory on an a
 cannot select a default or establish perceptual quality. The audit report is under
 `out/bench/real_composition_audit/s13_t048_10s.json`.
 
+Result (2026-10-18): evaluated production with raw cumulative mesh/row residuals and the captured `Plan.G`
+unchanged against the exact composed map on a 65 × 37 uniform image-space lattice (2,405 points) for all 300
+encoded-frame indices. The residual temporal smoothers were disabled on the production map; exact composition
+has no residual smoother. The maximum displacement was **221.52 px**, the mean of per-frame maxima was
+**143.06 px**, and the mean of per-frame spatial means was **54.90 px**. The predeclared geometric mismatch
+screen is crossed by a wide margin, and the result shows that temporal residual smoothing alone does not explain
+the sparse-probe discrepancy. This remains a same-window geometry diagnosis, not proof that exact composition
+improves perceived stability: the comparison uses sparse samples and does not score the rendered video. The
+dense report is `out/bench/real_composition_audit/s13_t048_10s_same_base_dense.json`. A rendered exact-composition
+candidate is being checked against the captured baseline with motion, support and blinded review; no production
+change follows unless those quality checks support it.
+
 ## Shared-pipeline MLX versus PyTorch MPS flow comparison (2026-10-17)
 
 Added `bench.bench_stabilizer`, a paired command that substitutes only the RAFT flow backend while keeping the
