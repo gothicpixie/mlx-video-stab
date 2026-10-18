@@ -4176,3 +4176,15 @@ agreements**. The visible result is therefore suggestive but inconclusive. `crop
 experimental operating point; default `1.0` is unchanged. Next verify the frozen ratio on the reliable S13/S24
 windows from distinct source files, measuring the same crop support and independent KLT changes before considering
 any preset or runtime policy.
+
+Follow-up on independent sources (2026-10-18): the same fixed crop-zoom replay was applied to the existing S13
+t032–042 and S24 t109–119 10-second windows. Both plans preserved their baseline camera paths and residual fields,
+had zero fit fallbacks, and produced aligned 300-frame outputs. Mean invalid mask area fell **1.919% → 0.767%**
+on S13 and **1.149% → 0.284%** on S24 (worst-frame area **6.677% → 4.866%** and **3.925% → 2.028%**).
+RAFT jitter rose **1.57%** and **1.69%**, respectively; KLT-only jitter rose **2.74%** and **1.79%**. RAFT
+wobble improved **6.39%** on S24 and worsened **1.10%** on S13. Gemini 3.8 Flash returned medium-confidence
+ties in both panel orders for both windows; the position audit found zero two-order non-tie agreements. The
+fixed zoom consistently improves edge support at a small measured motion cost, but the visual review does not
+show a perceived quality difference on these clips. This remains a four-window screen across three source files,
+not held-out population evidence; `crop_zoom=1.0` remains the default. Full reports are in ignored
+`out/bench/cropzoom_102_crosssource/`.
