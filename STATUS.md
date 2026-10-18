@@ -3981,3 +3981,34 @@ source as exploratory proxy evidence, not independent clips or camera ground tru
 x-specific effect exceeds repeat variability, is visible in both windows and is not explained by crop/encoding.
 Do not change the model from the synthetic result alone. The small resolution/frame-length sensitivity check
 also remains open.
+
+### Real-footage gate revalidation and disposition (2026-10-17)
+
+The planned current-source runs and blind reviews already exist; do not rerun them. Both
+`out/bench/current_source_t060_10s_baseline/` and
+`out/bench/current_source_t800_10s_baseline/` are successful 10-second runs on source SHA
+`e4b1f80d54dfa9089741486be297c6fe74d754fe127ec04dfe5a7edcf8d9fbb3`, with matching config digest
+`8e0378b967beaed72f14d572ad1dd6d0b480034c1b5a094c2d90c7562258a2fe`, 300 aligned output frames, reliable
+metrics and no fit fallbacks. Their paired review clip hashes match the completed Gemini records. Both
+position-reversal audits report mapped-method agreement and zero side-following.
+
+At t060, RAFT jitter changed **1.5873 → 0.5192 px**, reported frame motion **2.1710 → 1.0483 px**, and
+x/y/rotation stability **[0.929, 0.843, 0.876] → [0.956, 0.934, 0.926]**; crop support was 97.76%. At t800,
+jitter changed **1.0361 → 0.0632 px**, frame motion **1.1195 → 0.0993 px**, and x/y/rotation stability
+**[0.920, 0.784, 0.856] → [0.950, 0.722, 0.824]**; crop support was 98.44%. These are single-run flow-based
+measurements, not camera-path ground truth. Reduced jitter alone does not distinguish shake removal from
+intentional-motion suppression; the axis scores do not move uniformly across windows.
+
+Gemini 3.8 Flash preferred raw at medium confidence in both panel orders for both windows, citing black edge
+gaps/wedges on the stabilized output. The t060 and t800 audits show that this preference followed the mapped
+content, not screen position. This is one automated reviewer on compressed, low-resolution comparisons from
+two windows of the same source. It is exploratory evidence of a perceptual border tradeoff, not a general
+quality result. It does not test or validate content-aware intent preservation.
+
+A redundant t060 baseline rerun was interrupted after about 104 minutes; an exploratory one-second run with
+flow downscale 4 and 8 iterations then completed in 55 seconds. The short run only demonstrated that the
+reduced-cost path works and is not quality evidence. No new full baseline or Gemini call is needed. The same-
+source real-footage gate is complete; the next useful gate is an independently selected source/window with
+separate measurements of high-frequency shake attenuation and low-frequency path retention, plus edge/crop
+artifacts and blinded review. The small resolution/frame-length sensitivity check remains open, and no model
+or production default change follows from these results.
