@@ -4568,3 +4568,13 @@ matched Rust release median regressed from **0.490 s to 0.567 s** on 360x640 (se
 The implementation was removed; no code from this experiment remains in the runtime. This rejects that fusion
 for the current MLX convolution backend. The next optimization should reduce recurrent graph or kernel overhead
 without increasing convolution cost, then be accepted only after parity and benchmark gates.
+
+### E20 follow-up (2026-10-18): rejected paired-direction lookup dispatch
+
+Prototyped a second Metal kernel that computes forward and backward correlation lookups in one dispatch per
+pyramid level without copying or stacking the correlation volumes. Its outputs matched two independent lookups
+within `1e-6` for float32 and `1e-3` for float16, including fractional/out-of-bounds coordinates. All **19 Rust
+tests passed**, including the 1/24-iteration flow fixture. But the 360x640 Rust release median rose from **0.490 s
+to 0.544 s** (seven calls), about 11% slower. The paired kernel and API were removed. The extra per-thread
+direction branch and combined scheduling cost more than the dispatches they saved on this workload. Keep the
+single-direction cached kernel; investigate update-path graph execution next.
