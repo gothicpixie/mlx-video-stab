@@ -4153,3 +4153,26 @@ earlier raw preference on these two windows. It does not prove that borders are 
 all invalid pixels, or generalize beyond two windows from one source. No production crop behavior or default
 changes follow; a crop policy still needs evaluation of motion, retained field of view, and failure cases on
 independent sources.
+
+### Fixed crop-zoom replay at the matched-crop scale (2026-10-18)
+
+To distinguish a review-only crop from a real output change, replayed the cached `00176.MTS` t060/t800 motion
+fits with only `crop_zoom=1.0202`, approximately matching the `1882x1059` review crop. Each baseline plan was
+reconstructed exactly before planning; candidate `G` equaled baseline `G @ Z` (max absolute difference 0),
+mesh/row corrections and measured camera path were unchanged, both renders had zero fit fallbacks, and all
+600 processed frames produced 300 aligned `30000/1001` outputs with baseline-identical output PTS.
+
+At t060, mean invalid mask area fell **2.236% → 1.018%** (worst frame **5.804% → 4.346%**); at t800 it fell
+**1.556% → 0.415%** (worst **4.106% → 2.172%**). The corresponding RAFT jitter changed **0.51917 →
+0.52825 px** at t060 (**+1.75%**) and **0.06321 → 0.06484 px** at t800 (**+2.58%**). RAFT wobble was
+**0.05365 → 0.05352 px** and **0.03431 → 0.03442 px**, respectively. Independent KLT-only jitter changed
+**0.52383 → 0.53300 px** (**+1.75%**) and **0.18540 → 0.18687 px** (**+0.79%**), with no fit failures.
+These are two windows from one source, and both evaluators measure image-space motion rather than camera-intent
+truth.
+
+Gemini 3.8 Flash compared baseline and crop-zoom output with reversed panel order. It preferred the candidate in
+one call for each window and returned ties for both reversals. The position audit found **zero two-order non-tie
+agreements**. The visible result is therefore suggestive but inconclusive. `crop_zoom=1.0202` remains an
+experimental operating point; default `1.0` is unchanged. Next verify the frozen ratio on the reliable S13/S24
+windows from distinct source files, measuring the same crop support and independent KLT changes before considering
+any preset or runtime policy.
