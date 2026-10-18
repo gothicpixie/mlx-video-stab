@@ -4115,3 +4115,31 @@ pass is a resolution-sensitivity check by the same model on the same source wind
 The clips, raw judgments and audits are retained under `out/bench/low_freq_l1_fidelity_00176/` and
 `out/bench/gemini_review/low_freq_l1_00176/` (ignored experiment artifacts). The feature remains opt-in; no
 quality win is established and no default change is justified.
+
+### Mask-selected matched-framing review (2026-10-18)
+
+Added an opt-in `bench.real_pair_review --matched-crop-area-loss-cap 0.04` mode. It verifies and streams the
+baseline run's validity-mask video, selects one centered aspect-preserving rectangle maximizing mean valid
+support over the whole window within the area-loss cap, and applies that exact rectangle to both raw and
+stabilized panels. The review manifest records the rectangle, cap, selected support and mask hash. The default
+uncropped workflow and production renderer are unchanged. Position-reversal identities include the crop
+rectangle so uncropped and cropped judgments cannot be accidentally joined as one pair.
+
+The first screen reused reliable, previously selected ten-second baselines from two distinct sources:
+`STREAM_00013.MTS` t032–042 (SHA-256
+`594d11e5789f2cf318dfe67a575169ed45dcc3bd6d974a96d0a4f7653f69e39e`) and `STREAM_00024.MTS` t109–119
+(SHA-256 `8885a7890de8a35069cd1866d26cdbcd9b70279dd98307a8d407606216d8a56e`). Both had 300 aligned frames,
+zero fit fallbacks, reliable RAFT metrics and independent KLT agreement. The selected shared crop was
+`x=19,y=10,width=1882,height=1059`, removing 3.885% of image area. Average mask support rose from 98.085% to
+99.234% on S13 and from 98.851% to 99.708% on S24. This measures available pixels only; the crop does not
+change the underlying stabilization.
+
+Gemini 3.8 Flash reviewed uncropped and matched-crop pairs in both panel orders (eight judgments total). S13
+received ties in all four calls. S24 received ties in three calls and one original-order raw preference; its
+position reversal was a tie. The audit found four correctly paired conditions and zero pairs with repeatable
+non-tie method agreement. This review therefore does not show that cropping changes perceived quality; the
+sample remains a small automated screen. No crop policy or stabilization default changes follow. The complete
+review and audit remain in ignored `out/bench/matched_crop_visual_review_gemini*.json` artifacts. Next, apply
+the same frozen crop rule to the existing `00176.MTS` t060/t800 baselines whose earlier uncropped Gemini calls
+flagged borders, to directly test that framing confound; treat those same-source windows as paired diagnostics,
+not independent validation.
