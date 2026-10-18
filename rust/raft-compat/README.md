@@ -213,8 +213,26 @@ of fresh Rust processes at 360x640, with one warmup and seven measured
 24-iteration calls each, had median-of-process-medians **0.512 s compiled**
 and **0.536 s direct**; compiled was faster in all five pairs. Median process
 peak RSS was 90.5 MiB compiled and 90.3 MiB direct. Treat this as a modest
-single-host result, not a general win. Python MLX and PyTorch were not rerun in
-this experiment, so it does not change the cross-backend comparison above.
+single-host result, not a general win.
+
+After that A/B, all three paths were rerun on the same 360x640 synthetic pair,
+checkpoint, 24 iterations, one warmup, and seven measured calls per backend:
+
+| backend | median per pair | process peak RSS |
+|---|---:|---:|
+| Rust release / MLX 0.32.2, compiled update | 0.4851 s | 89.3 MiB |
+| Python MLX 0.32.3 | 0.5154 s | 167.2 MiB |
+| PyTorch MPS | 0.5539 s | 471.2 MiB |
+
+Rust was 5.9% faster than Python MLX and 12.4% faster than PyTorch MPS in this
+run. Its seven times ranged 0.476–0.497 s. The PyTorch first sample was
+0.890 s; the other six ranged 0.518–0.562 s. This supersedes the older
+cross-backend snapshot above for this workload, but remains a single-host,
+single-pair result. PyTorch computes the convex-upsample mask every iteration,
+while Rust and Python MLX compute it only on the final iteration, so graph work
+is not identical. Process RSS does not include accelerator allocations. This
+does not establish better stabilization quality, robustness, or performance on
+other inputs and hardware.
 
 Run on Apple Silicon with Rust and Xcode installed:
 

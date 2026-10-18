@@ -4601,3 +4601,21 @@ Python MLX and PyTorch were not rerun in this experiment. Against their last rec
 cross-backend standing therefore remains unsettled; in particular this experiment does not establish that
 Rust beats PyTorch overall. Continue with exact MLX version pairing, more input sizes and longer repeats,
 then address full-model parity, warm starts, cancellation/recovery and video-level quality.
+
+The compiled Rust path was then rerun with both Python backends on the same 360x640 synthetic pair, checkpoint,
+24 iterations, one warmup and seven measured calls per backend. Medians and process peak RSS were:
+
+| backend | median per pair | process peak RSS |
+|---|---:|---:|
+| Rust release / MLX 0.32.2, compiled update | 0.4851 s | 89.3 MiB |
+| Python MLX 0.32.3 | 0.5154 s | 167.2 MiB |
+| PyTorch MPS | 0.5539 s | 471.2 MiB |
+
+In this run Rust is **5.9% faster than Python MLX** and **12.4% faster than PyTorch MPS**, with process peak RSS
+lower by 77.9 MiB and 381.9 MiB respectively. The Rust run's seven samples ranged 0.476–0.497 s. The MPS run
+had a 0.890 s first sample and 0.518–0.562 s for the remaining six; its reported median is unaffected by that
+first-call outlier. This supersedes the earlier cross-backend latency snapshot for this workload, but still
+uses one synthetic pair on one host. PyTorch computes the convex-upsample mask every iteration while Rust and
+Python MLX compute it only on the final iteration, so the graph work is not identical. RSS is process-level,
+not accelerator allocation. The result supports continuing the Rust path; it does not establish superiority in
+video quality, robustness, supported features or other hardware/workloads.
