@@ -4044,3 +4044,14 @@ shared-lock pauses. DeepSeek Flash via Pi confirmed that the failure invalidates
 step; do not rehabilitate it with subjective comments. This is a retained failure row, not proof that the
 stabilizer worsens quality. The planned real-footage intent gate remains open pending a different source with
 reliable independent tracking or camera-path ground truth.
+
+Supplementary positive-control visual QC (2026-10-17): the already-studied `00177.MTS` t050–060 scale-2
+baseline was paired against its raw input and submitted with a position reversal. It is not holdout evidence and
+does not change the failed t022–032 gate. Gemini returned medium-confidence ties in both orders, citing severe
+low-light blur/noise; the original-order call noted subtle bottom-border warping in the stabilized opening
+frame. The position-bias audit paired the two ties correctly, but zero non-tie calls mean side bias cannot be
+estimated. The pair, API response and audit are in
+`out/bench/intent_real_00177_t050_positive_control/`. RAFT jitter on this previously explored window was
+0.2689 → 0.1561 px with zero RAFT fallbacks, but KLT had 2 failed input and 2 failed output pairs and no
+jitter estimates. Treat this as a protocol/limitations check only; it does not validate the real-footage
+intent hypothesis or establish a perceptual benefit.
