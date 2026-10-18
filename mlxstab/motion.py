@@ -108,13 +108,19 @@ def observe(F, B, step=8, fb_abs=1.0, fb_rel=0.05):
                fb_inside=np.array(inside, bool))
 
 
-def _kernel_field(pts, vals, w, centers, sig, iters=3, huber=1.5):
-    """Robust Gaussian-kernel regression of vals [N,k] at centers [V,d] (anisotropic sig [d]). Returns (est [V,k], mass [V])."""
+def _kernel_field(pts, vals, w, centers, sig, iters=3, huber=1.5, weights=None):
+    """Robust Gaussian-kernel regression of vals [N,k] at centers [V,d] (anisotropic sig [d]). Returns (est [V,k], mass [V]).
+
+    ``weights`` is an optional per-sample/per-center multiplier [N,V] (for example a depth-similarity weight).
+    It affects only the regression estimate; the returned ``mass`` remains the non-robust kernel-weighted count
+    of usable samples ``(K * w).sum(0)``, so observation-coverage/support semantics are unchanged."""
     d2 = (((pts[:, None, :] - centers[None]) / sig) ** 2).sum(-1)
     K = np.exp(-0.5 * d2) * (d2 < 9.0)
     rw = np.ones(len(pts))
     for _ in range(iters):
         Kw = K * (w * rw)[:, None]
+        if weights is not None:
+            Kw = Kw * np.asarray(weights, np.float64)
         mass = Kw.sum(0)
         est = (Kw.T @ vals) / np.maximum(mass, 1e-9)[:, None]
         at = (K @ est) / np.maximum(K.sum(1), 1e-9)[:, None]
@@ -165,12 +171,109 @@ def _cycle_maps(obs, gc, gr):
     return rms, frac, mass
 
 
-def _fill(field, mass, thr):
-    """Replace under-observed vertices (mass<thr) by diffusion from observed neighbours (field [R,C,2])."""
+# Relative-depth weighting is defined on a per-frame robustly normalized depth map (scale/shift invariant).
+# A normalized difference at or above ``DEPTH_BOUNDARY_FRAC`` is a strong layer boundary: fill diffusion and
+# mesh smoothing never cross it. Below it, ``DEPTH_SIMILARITY_BAND`` and the configured strength set how quickly
+# the same-layer preference falls off. These are geometry-independent relative-depth units, not metric depth.
+DEPTH_BOUNDARY_FRAC = 0.10
+DEPTH_SIMILARITY_BAND = 0.08
+
+
+def _relative_depth_map(depth, shape):
+    """Validate and robustly normalize one source-frame relative-depth map to a finite-inlier [0,1] span.
+
+    Returns ``None`` when the map carries no usable depth variation (all non-finite, constant, or a degenerate
+    span), which makes the depth-aware path a no-op. Values outside the robust 5th-95th percentile span are not
+    clipped: a large relative-depth jump stays large, so strong boundaries remain detectable. Non-finite entries
+    stay non-finite and are treated as uninformative by the weighting helpers."""
+    try:
+        d = np.asarray(depth, np.float64)
+    except (TypeError, ValueError):
+        raise ValueError(f"depth must be a 2-D array of shape {shape}, got {type(depth).__name__}") from None
+    if d.ndim == 3 and d.shape[2] == 1:
+        d = d[..., 0]
+    if d.ndim != 2 or d.shape != tuple(shape):
+        raise ValueError(f"depth must have shape {tuple(shape)} (or that shape plus a trailing 1), got {d.shape}")
+    finite = np.isfinite(d)
+    if finite.sum() < 2:
+        return None
+    lo, hi = np.percentile(d[finite], [5.0, 95.0])
+    span = float(hi - lo)
+    if not np.isfinite(span) or span <= 1e-9:
+        return None
+    return (d - lo) / span
+
+
+def _nearest_depth(depth_map, pts):
+    """Nearest-pixel relative depth at ``pts`` [N,2] (x, y), clamped to the image.
+
+    Nearest sampling deliberately preserves layer discontinuities instead of blending depth across a boundary."""
+    pts = np.asarray(pts, np.float64)
+    H, W = depth_map.shape
+    x = np.clip(np.rint(pts[:, 0]).astype(np.int64), 0, W - 1)
+    y = np.clip(np.rint(pts[:, 1]).astype(np.int64), 0, H - 1)
+    return depth_map[y, x]
+
+
+def _depth_similarity(delta, strength):
+    """Relative-depth similarity ``exp(-strength * (delta / band)^2)``; non-finite depth is uninformative."""
+    delta = np.asarray(delta, np.float64)
+    sim = np.exp(-float(strength) * (delta / DEPTH_SIMILARITY_BAND) ** 2)
+    return np.where(np.isfinite(delta), sim, 1.0)
+
+
+def _depth_edge_weights(depth_map, strength):
+    """Per-direction edge weights ``(up, down, left, right)`` for a [R,C] mesh depth map.
+
+    An edge weight is zero at a strong relative-depth boundary (``|delta| >= DEPTH_BOUNDARY_FRAC``), so fill and
+    smoothing cannot cross layers. Otherwise it is the relative-depth similarity, which only controls how much
+    smoothly varying depth attenuates propagation. Borders have no edge and therefore weight zero here."""
+    z = np.asarray(depth_map, np.float64)
+    up = np.zeros_like(z); down = np.zeros_like(z); left = np.zeros_like(z); right = np.zeros_like(z)
+
+    def link(a, b):
+        delta = np.abs(a - b)
+        sim = _depth_similarity(delta, strength)
+        return np.where(np.isfinite(delta) & (delta < DEPTH_BOUNDARY_FRAC), sim, 0.0)
+
+    up[1:, :] = link(z[1:, :], z[:-1, :])
+    down[:-1, :] = link(z[:-1, :], z[1:, :])
+    left[:, 1:] = link(z[:, 1:], z[:, :-1])
+    right[:, :-1] = link(z[:, :-1], z[:, 1:])
+    return up, down, left, right
+
+
+def _fill_depth_aware(field, ok, depth_map, strength):
+    """Diffusion fill that never crosses a strong relative-depth boundary (same iteration contract as ``_fill``)."""
+    f = np.where(ok[..., None], field, 0.0)
+    cur = ok.copy()
+    up, down, left, right = _depth_edge_weights(depth_map, strength)
+    for _ in range(field.shape[0] + field.shape[1]):
+        if cur.all(): break
+        fp = np.pad(f, ((1, 1), (1, 1), (0, 0)), mode="constant")
+        cp = np.pad(cur.astype(float), 1, mode="constant")
+        nsum = (up[..., None] * cp[:-2, 1:-1, None] * fp[:-2, 1:-1] +
+                down[..., None] * cp[2:, 1:-1, None] * fp[2:, 1:-1] +
+                left[..., None] * cp[1:-1, :-2, None] * fp[1:-1, :-2] +
+                right[..., None] * cp[1:-1, 2:, None] * fp[1:-1, 2:])
+        ncnt = (up * cp[:-2, 1:-1] + down * cp[2:, 1:-1] +
+                left * cp[1:-1, :-2] + right * cp[1:-1, 2:])
+        new = (~cur) & (ncnt > 0)
+        f[new] = nsum[new] / ncnt[new][:, None]; cur = cur | new
+    return f
+
+
+def _fill(field, mass, thr, depth=None, depth_strength=0.0):
+    """Replace under-observed vertices (mass<thr) by diffusion from observed neighbours (field [R,C,2]).
+
+    With a finite ``depth`` map and positive ``depth_strength``, diffusion is gated by relative-depth similarity
+    and stops at strong depth boundaries. The default path is byte-for-byte the historical fill."""
     ok = mass >= thr
     f = np.where(ok[..., None], field, 0.0)
     if ok.all(): return f
     if not ok.any(): return np.zeros_like(f)
+    if depth is not None and depth_strength > 0.0:
+        return _fill_depth_aware(f, ok, depth, depth_strength)
     cur = ok.copy()
     for _ in range(field.shape[0] + field.shape[1]):
         if cur.all(): break
@@ -225,6 +328,42 @@ def fallback_reason(n_valid_samples, n_ransac_inliers, min_valid, min_inlier_fra
     if n_valid_samples > 0 and n_ransac_inliers / n_valid_samples < min_inlier_frac:
         return FALLBACK_REASON_LOW_RANSAC_INLIER_FRACTION
     return FALLBACK_REASON_NONE
+
+
+def _validate_depth_strength(value):
+    """Validate the opt-in relative-depth mesh weighting strength (finite, scalar, >= 0).
+
+    The same strictness as the shape-strength validator applies: booleans, strings, arrays and complex values are
+    rejected rather than coerced. ``0`` is the production default and disables every depth-aware branch."""
+    name = "depth strength"
+    if (isinstance(value, (bool, np.bool_, str, bytes)) or not np.isscalar(value)):
+        raise ValueError(f"{name} must be a finite non-negative scalar, got {value!r}")
+    try:
+        strength = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{name} must be a finite non-negative scalar, got {value!r}") from None
+    if not np.isfinite(strength) or strength < 0.0:
+        raise ValueError(f"{name} must be a finite non-negative scalar, got {value!r}")
+    return strength
+
+
+def _smooth_mesh_depth_aware(mesh, depth_map, strength):
+    """Separable [1 2 1] mesh smoothing with relative-depth edge weights and hard strong-boundary barriers.
+
+    This mirrors the historical two-pass normalization at a depth-uniform border, but interior edges are weighted
+    by depth similarity and zeroed at ``DEPTH_BOUNDARY_FRAC``. Only called when depth weighting is enabled, so the
+    depth-off path keeps the exact historical arithmetic."""
+    up, down, left, right = _depth_edge_weights(depth_map, strength)
+    # Borders replicate the edge vertex, exactly like the historical ``mode="edge"`` padding.
+    up[0, :] = 1.0; down[-1, :] = 1.0; left[:, 0] = 1.0; right[:, -1] = 1.0
+    p = np.pad(mesh, ((1, 1), (1, 1), (0, 0)), mode="edge")
+    num = 2 * p[1:-1, 1:-1] + up[..., None] * p[:-2, 1:-1] + down[..., None] * p[2:, 1:-1]
+    den = 2 + up + down
+    m = num / den[..., None]
+    p = np.pad(m, ((0, 0), (1, 1), (0, 0)), mode="edge")
+    num = 2 * p[:, 1:-1] + left[..., None] * p[:, :-2] + right[..., None] * p[:, 2:]
+    den = 2 + left + right
+    return num / den[..., None]
 
 
 def _validate_shape_strength(value):
@@ -343,13 +482,22 @@ def _regularize_mesh_shape(mesh, support_mass, W, H, strength):
 
 
 def fit_motion(obs, mesh=(16, 9), rs_rows=18, thr=1.5, rng=None, min_valid=60, model="similarity",
-               shape_strength=0.0):
+               shape_strength=0.0, depth=None, depth_strength=0.0):
     """Global homography by RANSAC on valid flow samples, movers excluded, then row-wise and mesh residual fields.
 
     ``shape_strength`` is a research-only, opt-in strength for shape-preserving regularization of the local
     residual mesh (trace-free symmetric strain). It defaults to ``0``, which leaves the historical H/mesh/rows
-    byte-for-byte unchanged. The regularizer never touches the global similarity or the x-independent row field."""
+    byte-for-byte unchanged. The regularizer never touches the global similarity or the x-independent row field.
+
+    ``depth`` is an optional source-frame relative-depth map ``[H,W]`` (or ``[H,W,1]``) and ``depth_strength`` an
+    opt-in, finite non-negative weight (default ``0``). When enabled, samples with a relative depth unlike a mesh
+    vertex are down-weighted in the local residual regression; under-observed fill and the separable mesh smoothing
+    do not cross strong relative-depth boundaries. The global H, RANSAC/mover masks, row field, support masses and
+    all depth-off results are unchanged. Depth is normalized per frame, so only relative similarity matters."""
     strength = _validate_shape_strength(shape_strength)
+    depth_strength = _validate_depth_strength(depth_strength)
+    if depth_strength > 0.0 and depth is None:
+        raise ValueError("depth_strength > 0 requires a source relative-depth map")
     gc, gr = mesh
     W, H = obs.W, obs.H
     v = obs.valid
@@ -404,12 +552,23 @@ def fit_motion(obs, mesh=(16, 9), rs_rows=18, thr=1.5, rng=None, min_valid=60, m
     vx = -.5 + np.arange(gc + 1) * W / gc; vy = -.5 + np.arange(gr + 1) * H / gr
     cx, cy2 = np.meshgrid(vx, vy)
     centers = np.stack([cx.ravel(), cy2.ravel()], 1)
-    est, mass = _kernel_field(obs.pts, resid_vec, w, centers, np.array([W / gc, H / gr]))
+    depth_map = _relative_depth_map(depth, (H, W)) if depth_strength > 0.0 else None
+    vertex_depth = None
+    weights = None
+    if depth_map is not None:
+        vertex_depth = _nearest_depth(depth_map, centers).reshape(gr + 1, gc + 1)
+        sample_depth = _nearest_depth(depth_map, obs.pts)
+        weights = _depth_similarity(sample_depth[:, None] - vertex_depth.reshape(1, -1), depth_strength)
+    est, mass = _kernel_field(obs.pts, resid_vec, w, centers, np.array([W / gc, H / gr]), weights=weights)
     mesh_support_mass = mass.reshape(gr + 1, gc + 1)                # preserved before _fill diffuses vertices
-    mesh_f = _fill(est.reshape(gr + 1, gc + 1, 2), mesh_support_mass, SUPPORT_THRESHOLD)
-    p = np.pad(mesh_f, ((1, 1), (1, 1), (0, 0)), mode="edge")                # light spatial regularisation [1 2 1]^2/16
-    mesh_f = (p[:-2, 1:-1] + 2 * p[1:-1, 1:-1] + p[2:, 1:-1]) / 4
-    p = np.pad(mesh_f, ((0, 0), (1, 1), (0, 0)), mode="edge"); mesh_f = (p[:, :-2] + 2 * p[:, 1:-1] + p[:, 2:]) / 4
+    mesh_f = _fill(est.reshape(gr + 1, gc + 1, 2), mesh_support_mass, SUPPORT_THRESHOLD,
+                   depth=vertex_depth, depth_strength=depth_strength)
+    if vertex_depth is not None:
+        mesh_f = _smooth_mesh_depth_aware(mesh_f, vertex_depth, depth_strength)
+    else:
+        p = np.pad(mesh_f, ((1, 1), (1, 1), (0, 0)), mode="edge")
+        mesh_f = (p[:-2, 1:-1] + 2 * p[1:-1, 1:-1] + p[2:, 1:-1]) / 4
+        p = np.pad(mesh_f, ((0, 0), (1, 1), (0, 0)), mode="edge"); mesh_f = (p[:, :-2] + 2 * p[:, 1:-1] + p[:, 2:]) / 4
     if strength > 0.0:
         mesh_f = _regularize_mesh_shape(mesh_f, mesh_support_mass, W, H, strength)
     return Fit(Hm, mesh_f, rows, float(inlier_frac), float(mv[v].mean()), False,

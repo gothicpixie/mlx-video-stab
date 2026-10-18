@@ -100,6 +100,22 @@ def _validate_mesh_shape_strength(value):
     return v
 
 
+def _validate_mesh_depth_strength(value):
+    """Validate ``Config.mesh_depth_strength``: finite, scalar and ``>= 0``; ``0`` disables it.
+
+    Booleans, strings, arrays and complex values are rejected rather than coerced, so a typo cannot silently
+    enable, disable or distort the experimental depth-aware mesh weighting."""
+    if isinstance(value, (bool, np.bool_, str, bytes)) or not np.isscalar(value):
+        raise ValueError(f"mesh_depth_strength must be a finite non-negative scalar, got {value!r}")
+    try:
+        v = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"mesh_depth_strength must be a finite non-negative scalar, got {value!r}") from None
+    if not np.isfinite(v) or v < 0.0:
+        raise ValueError(f"mesh_depth_strength must be a finite non-negative scalar, got {value!r}")
+    return v
+
+
 def _crop_zoom_matrix(W, H, crop_zoom):
     """Homogeneous output-space zoom ``Z`` mapping ``x -> c + (x - c)/crop_zoom`` with ``c = (W/2-.5, H/2-.5)``.
 
@@ -124,6 +140,7 @@ class Config:
     mesh: tuple = (16, 9)          # cells (cols, rows) of the residual mesh; (0, 0) disables
     mesh_budget: float = 0.012     # residual correction cap, fraction of width
     mesh_shape_strength: float = 0.0  # experimental: opt-in shape-preserving mesh regularization; 0 disables
+    mesh_depth_strength: float = 0.0  # experimental: opt-in relative-depth weighting for local mesh fill/smoothing; 0 disables
     rs_rows: int = 18              # row bands for rolling-shutter correction; 0 disables
     flow_iters: int = 24
     flow_downscale: int | str = 1   # positive integer, or "auto" to pick from (1, 2, 4) under max_flow_corr_bytes
@@ -155,6 +172,7 @@ class Config:
         self.l1_low_freq_fidelity = _validate_l1_low_freq_fidelity(self.l1_low_freq_fidelity)
         self.l1_low_freq_sigma = _validate_l1_low_freq_sigma(self.l1_low_freq_sigma)
         self.mesh_shape_strength = _validate_mesh_shape_strength(self.mesh_shape_strength)
+        self.mesh_depth_strength = _validate_mesh_depth_strength(self.mesh_depth_strength)
 
 
 @dataclass(frozen=True)
@@ -406,7 +424,7 @@ def _lowpass_segments(C, segments, sigma):
 
 
 def analyze(frames, flow_fn, cfg, W, H, fps, log=None, masks=None, on_step=None, stride=1, threads=True,
-            flow_sample_callback=None, cuts=None):
+            flow_sample_callback=None, cuts=None, depth_fn=None):
     """Pass 1: motion fit for each consecutive analysed pair (every `stride`-th frame). `frames` yields uint8 [H,W,3];
     flow_fn(a, b, key) -> [H,W,2] mx, or flow_fn.bidir(a, b) -> (forward, backward). While the GPU computes the next flow, a worker
     thread fits the previous pair on the CPU.
@@ -415,14 +433,25 @@ def analyze(frames, flow_fn, cfg, W, H, fps, log=None, masks=None, on_step=None,
     not measured: it becomes an identity placeholder fit tagged ``sequence_boundary``, the flow backend's
     temporal state is reset (when it exposes ``reset()``), and the fit count stays one per analysed pair. Cuts
     must align with ``stride`` so ``plan`` can reset the path exactly at the boundary. Default ``None`` keeps
-    the historical single-shot behaviour unchanged."""
+    the historical single-shot behaviour unchanged.
+
+    ``depth_fn`` is an opt-in callable ``depth_fn(source_frame_index) -> [H,W]`` returning that source frame's
+    relative-depth map. It is used only when ``cfg.mesh_depth_strength > 0`` and is called once per measured pair
+    with the source (earlier) frame index; the destination frame's depth is not used. Default ``None`` leaves the
+    historical analysis unchanged."""
     from concurrent.futures import ThreadPoolExecutor
     cuts = _validate_cuts_for_stride(_normalize_cuts(cuts), stride)
+    if depth_fn is not None and not callable(depth_fn):
+        raise ValueError("depth_fn must be callable or None")
+    if cfg.mesh_depth_strength > 0.0 and depth_fn is None:
+        raise ValueError("mesh_depth_strength > 0 requires a depth_fn(source_frame_index) callback")
     mot = Motion(W, H, fps, stride=stride, cuts=cuts); prev = None; prev_i = None; rng = np.random.default_rng(cfg.seed)
     gc, gr = cfg.mesh
     pool = ThreadPoolExecutor(1) if threads else None; pend = []
-    fit = lambda obs: MO.fit_motion(obs, (max(gc, 1), max(gr, 1)), cfg.rs_rows, rng=rng, model=cfg.model,
-                                    shape_strength=cfg.mesh_shape_strength)
+    def fit(obs, src_depth=None):
+        return MO.fit_motion(obs, (max(gc, 1), max(gr, 1)), cfg.rs_rows, rng=rng, model=cfg.model,
+                              shape_strength=cfg.mesh_shape_strength, depth=src_depth,
+                              depth_strength=cfg.mesh_depth_strength)
     mrow, mcol = max(gr, 1), max(gc, 1)
     def boundary_fit():
         return MO.Fit(np.eye(3), np.zeros((mrow + 1, mcol + 1, 2)), np.zeros((max(cfg.rs_rows, 1), 2)),
@@ -463,8 +492,9 @@ def analyze(frames, flow_fn, cfg, W, H, fps, log=None, masks=None, on_step=None,
                     xs, ys, forward_grid, backward_grid = raw_grid
                     flow_sample_callback(prev_i, i, xs, ys, forward_grid, backward_grid,
                                          obs.valid.copy(), obs.fb_err.copy(), obs.fb_tol.copy(), obs.fb_inside.copy())
-                if pool: pend.append(pool.submit(fit, obs))
-                else: mot.fits.append(fit(obs))
+                src_depth = depth_fn(prev_i) if (depth_fn is not None and cfg.mesh_depth_strength > 0.0) else None
+                if pool: pend.append(pool.submit(fit, obs, src_depth))
+                else: mot.fits.append(fit(obs, src_depth))
                 while len(pend) > 2: mot.fits.append(pend.pop(0).result())
                 if log and i % 20 == 0: log(f"flow {i}")
         prev = fr; prev_i = i; pm = cm
@@ -1167,12 +1197,17 @@ def _distortion(Gm, W, H):
 
 def stabilize(src, out, mask=None, weights=None, cfg=None, roll=None, start=None, duration=None, fps_out=None,
               flow_fn=None, log=print, report=None, on_step=None, dump_motion=None, dump_motion_npz=None,
-              dump_plan=None, diag_every=0, diag_callback=None, dump_flow_samples_npz=None, cuts=None):
+              dump_plan=None, diag_every=0, diag_callback=None, dump_flow_samples_npz=None, cuts=None,
+              depth_fn=None):
     """Stabilize one clip.
 
     ``cuts`` is opt-in: a sequence of internal frame indices that begin a new shot. Pairs spanning a cut are
     not measured, the flow backend is reset, and planning/smoothing restart independently per shot. Default
     ``None`` preserves the single-shot behaviour. Cuts must align with ``Config.analysis_stride``.
+
+    ``depth_fn`` is the opt-in ``depth_fn(source_frame_index) -> [H,W]`` relative-depth callback forwarded to
+    ``analyze``. It is consulted only when ``Config.mesh_depth_strength > 0``; the default ``None`` and the
+    depth-off configuration leave the plan and renderer unchanged.
     """
     cfg = cfg or Config()
     if cfg.warp_diag and diag_callback is not None and diag_every:
@@ -1193,7 +1228,8 @@ def stabilize(src, out, mask=None, weights=None, cfg=None, roll=None, start=None
                              valid, fb_err, fb_tol, fb_inside))
 
     mot = analyze(frames, flow_fn, cfg, W, H, fps, log, on_step=on_step, stride=cfg.analysis_stride,
-                  flow_sample_callback=capture_flow_sample if flow_samples is not None else None, cuts=cuts)
+                  flow_sample_callback=capture_flow_sample if flow_samples is not None else None, cuts=cuts,
+                  depth_fn=depth_fn)
     if flow_samples is not None:
         save_flow_samples_npz(flow_samples, dump_flow_samples_npz, W, H, fps, cfg.analysis_stride,
                               cfg.step, mot.n_frames)
