@@ -1,13 +1,16 @@
-//! Initial E20 compatibility spike for the MLX RAFT correlation lookup.
+//! E20 compatibility spike for RAFT in Rust/MLX.
 //!
-//! This is a correctness prototype, not a production lookup kernel: it materializes
-//! MLX inputs on the host and loops in Rust. The API and numerical behavior are
-//! intentionally small so it can be compared against Python's `lookup_level`.
+//! The crate now covers the checkpoint-backed encoders, correlation pyramid,
+//! update block, and a bidirectional flow loop. It remains a correctness
+//! prototype: correlation lookup materializes MLX inputs on the host and loops
+//! in Rust, and the update block is not compiled. The API and numerical behavior
+//! mirror Python's `RAFT.frame_features` / `RAFT.flow_bidir` so outputs can be
+//! compared directly; compilation and performance work are still outstanding.
 
 use mlx_rs::module::Module;
 use mlx_rs::nn::{BatchNorm, Conv2d, relu, sigmoid};
 use mlx_rs::ops::indexing::IndexOp;
-use mlx_rs::ops::{concatenate, tanh};
+use mlx_rs::ops::{concatenate, einsum, pad, softmax_axis, stack, tanh};
 use mlx_rs::{Array, Dtype};
 
 /// Bilinearly sample one RAFT correlation-pyramid level.
@@ -688,12 +691,282 @@ impl RaftEncoders {
     }
 }
 
+// --- Bidirectional flow API ---------------------------------------------------------------------------------
+
+/// Per-frame RAFT features, reusable across the forward and backward pairs it joins.
+#[derive(Debug)]
+pub struct FrameFeat {
+    pub fmap: Array,
+    pub net: Array,
+    pub inp: Array,
+}
+
+/// Forward/backward flow in low-resolution feature-grid pixels and full-resolution image pixels.
+///
+/// Field names mirror Python's `RAFT.flow_bidir` return order: `(low_f, up_f, low_b, up_b)`.
+#[derive(Debug)]
+pub struct BidirectionalFlow {
+    pub low_forward: Array,
+    pub up_forward: Array,
+    pub low_backward: Array,
+    pub up_backward: Array,
+}
+
+/// Checkpoint-backed RAFT encoders plus update block for fp32 inference and Python parity checks.
+///
+/// The bidirectional loop mirrors `mlxstab.raft.model.RAFT`: features are encoded once per frame, the
+/// forward and backward correlation pyramids are kept separate, and both directions share one
+/// batch-2 update-block call per iteration. Coordinate and flow updates stay float32. This is an
+/// uncompiled host-lookup compatibility reference; it is not a production inference path.
+#[derive(Debug)]
+pub struct Raft {
+    pub encoders: RaftEncoders,
+    pub update_block: BasicUpdateBlock,
+}
+
+impl Raft {
+    /// Load all RAFT parameters from a converted safetensors checkpoint.
+    pub fn load(path: impl AsRef<std::path::Path>) -> Result<Self, String> {
+        let params = Array::load_safetensors(path).map_err(|e| e.to_string())?;
+        Self::from_params(&params)
+    }
+
+    /// Build the complete model from an already-loaded converted parameter map.
+    pub fn from_params(params: &std::collections::HashMap<String, Array>) -> Result<Self, String> {
+        Ok(Self {
+            encoders: RaftEncoders::from_params(params)?,
+            update_block: BasicUpdateBlock::load(params)?,
+        })
+    }
+
+    /// Encode one `[1,H,W,3]` 0..255 image into fnet/cnet features.
+    ///
+    /// This matches Python's `RAFT.frame_features`: the image is normalized to -1..1, `fnet` (instance
+    /// norm) produces the correlation features, and `cnet` (batch norm) produces the hidden state and
+    /// context split by `tanh` and `relu`. Height and width must be positive multiples of 8.
+    pub fn frame_features(&mut self, im: &Array) -> Result<FrameFeat, String> {
+        let x = normalize_image(im)?;
+        let fmap = self.encoders.fnet.forward(&x)?;
+        let c = self.encoders.cnet.forward(&x)?;
+        let net =
+            tanh(c.index((.., .., .., 0..RAFT_HIDDEN_CHANNELS))).map_err(|e| e.to_string())?;
+        let inp = relu(c.index((.., .., .., RAFT_HIDDEN_CHANNELS..2 * RAFT_HIDDEN_CHANNELS)))
+            .map_err(|e| e.to_string())?;
+        Ok(FrameFeat { fmap, net, inp })
+    }
+
+    /// Bidirectional flow between two `[1,H,W,3]` 0..255 images.
+    ///
+    /// `iters` is the shared GRU refinement count for both directions; zero returns the initialized
+    /// (zero) flow with the encoder mask head. Outputs mirror Python's `(low_f, up_f, low_b, up_b)`.
+    pub fn flow_bidir(
+        &mut self,
+        im1: &Array,
+        im2: &Array,
+        iters: usize,
+    ) -> Result<BidirectionalFlow, String> {
+        let a = self.frame_features(im1)?;
+        let b = self.frame_features(im2)?;
+        self.flow_bidir_features(&a, &b, iters)
+    }
+
+    /// Bidirectional flow from precomputed frame features, matching Python's `flow_bidir`.
+    ///
+    /// Both features must come from `frame_features` on the same feature grid. The forward pyramid is
+    /// `a @ b^T`, the backward pyramid is `b @ a^T`, and each iteration looks up both directions before
+    /// running one batch-2 update-block core step.
+    pub fn flow_bidir_features(
+        &mut self,
+        a: &FrameFeat,
+        b: &FrameFeat,
+        iters: usize,
+    ) -> Result<BidirectionalFlow, String> {
+        let shape = a.fmap.shape();
+        if shape.len() != 4 || shape[0] != 1 || shape[1] <= 0 || shape[2] <= 0 || shape[3] <= 0 {
+            return Err(format!(
+                "fmap must be non-empty NHWC [1,H,W,C], got {shape:?}"
+            ));
+        }
+        if b.fmap.shape() != shape {
+            return Err(format!(
+                "forward and backward feature grids must match, got {:?} and {:?}",
+                shape,
+                b.fmap.shape()
+            ));
+        }
+        let feature_shape = [1, shape[1], shape[2], RAFT_HIDDEN_CHANNELS];
+        for (name, array) in [("forward net", &a.net), ("forward inp", &a.inp)] {
+            if array.shape() != feature_shape.as_slice() {
+                return Err(format!(
+                    "{name} must have shape {feature_shape:?}, got {:?}",
+                    array.shape()
+                ));
+            }
+        }
+        for (name, array) in [("backward net", &b.net), ("backward inp", &b.inp)] {
+            if array.shape() != feature_shape.as_slice() {
+                return Err(format!(
+                    "{name} must have shape {feature_shape:?}, got {:?}",
+                    array.shape()
+                ));
+            }
+        }
+
+        let (height, width) = (shape[1], shape[2]);
+        let corr_forward = CorrBlock::new(
+            &a.fmap,
+            &b.fmap,
+            RAFT_CORR_LEVELS,
+            RAFT_CORR_RADIUS,
+            Dtype::Float32,
+        )?;
+        let corr_backward = CorrBlock::new(
+            &b.fmap,
+            &a.fmap,
+            RAFT_CORR_LEVELS,
+            RAFT_CORR_RADIUS,
+            Dtype::Float32,
+        )?;
+
+        let c0 = coords_grid(2, height, width);
+        let mut c1 = c0.clone();
+        let mut net = concatenate(&[&a.net, &b.net], 0).map_err(|e| e.to_string())?;
+        let inp = concatenate(&[&a.inp, &b.inp], 0).map_err(|e| e.to_string())?;
+
+        for _ in 0..iters {
+            let forward_coords = c1.index((0..1, .., .., ..));
+            let backward_coords = c1.index((1..2, .., .., ..));
+            let forward_corr = corr_forward.lookup(&forward_coords)?;
+            let backward_corr = corr_backward.lookup(&backward_coords)?;
+            let corr =
+                concatenate(&[&forward_corr, &backward_corr], 0).map_err(|e| e.to_string())?;
+            let flow = c1.subtract(&c0).map_err(|e| e.to_string())?;
+            let core = self.update_block.core(&net, &inp, &corr, &flow)?;
+            net = core.net;
+            c1 = c1.add(&core.delta).map_err(|e| e.to_string())?;
+        }
+
+        let mask = self.update_block.mask_head(&net)?;
+        let low = c1.subtract(&c0).map_err(|e| e.to_string())?;
+        let up = upsample_flow_batch(&low, &mask)?;
+        Ok(BidirectionalFlow {
+            low_forward: low.index((0..1, .., .., ..)),
+            up_forward: up.index((0..1, .., .., ..)),
+            low_backward: low.index((1..2, .., .., ..)),
+            up_backward: up.index((1..2, .., .., ..)),
+        })
+    }
+}
+
+/// Normalize a `[1,H,W,3]` 0..255 image exactly like Python's `RAFT.frame_features`.
+fn normalize_image(im: &Array) -> Result<Array, String> {
+    let shape = im.shape();
+    if shape.len() != 4 || shape[0] != 1 || shape[1] <= 0 || shape[2] <= 0 || shape[3] != 3 {
+        return Err(format!(
+            "image must have shape [1,H,W,3] with positive spatial dimensions, got {shape:?}"
+        ));
+    }
+    if shape[1] % 8 != 0 || shape[2] % 8 != 0 {
+        return Err(format!(
+            "image height and width must be multiples of 8 (pad first), got {shape:?}"
+        ));
+    }
+    let x = im.as_dtype(Dtype::Float32).map_err(|e| e.to_string())?;
+    x.divide(Array::from_f32(255.0))
+        .and_then(|v| v.multiply(Array::from_f32(2.0)))
+        .and_then(|v| v.subtract(Array::from_f32(1.0)))
+        .map_err(|e| e.to_string())
+}
+
+/// XY coordinate grid `[batch,H,W,2]`, matching Python's `coords_grid`.
+fn coords_grid(batch: i32, height: i32, width: i32) -> Array {
+    let mut values = Vec::with_capacity((batch * height * width * 2) as usize);
+    for _ in 0..batch {
+        for y in 0..height {
+            for x in 0..width {
+                values.push(x as f32);
+                values.push(y as f32);
+            }
+        }
+    }
+    Array::from_slice(&values, &[batch, height, width, 2])
+}
+
+/// Convex 8x upsampling for one direction: `flow [1,h,w,2]`, `mask [1,h,w,576]` -> `[1,8h,8w,2]`.
+fn upsample_flow(flow: &Array, mask: &Array) -> Result<Array, String> {
+    let shape = flow.shape();
+    if shape.len() != 4 || shape[0] != 1 || shape[1] <= 0 || shape[2] <= 0 || shape[3] != 2 {
+        return Err(format!(
+            "flow must have shape [1,h,w,2] with positive spatial dimensions, got {shape:?}"
+        ));
+    }
+    let (height, width) = (shape[1], shape[2]);
+    let expected_mask = [1, height, width, RAFT_MASK_CHANNELS];
+    if mask.shape() != expected_mask.as_slice() {
+        return Err(format!(
+            "mask must have shape {expected_mask:?}, got {:?}",
+            mask.shape()
+        ));
+    }
+
+    let m = mask
+        .reshape(&[height, width, 9, 8, 8])
+        .and_then(|v| softmax_axis(&v, 2, None))
+        .map_err(|e| e.to_string())?;
+    let f = flow
+        .index(0)
+        .multiply(Array::from_f32(8.0))
+        .map_err(|e| e.to_string())?;
+    let pads = [(1, 1), (1, 1), (0, 0)];
+    let padded = pad(&f, &pads, None, None).map_err(|e| e.to_string())?;
+    let mut neighbors = Vec::with_capacity(9);
+    for dy in 0..3 {
+        for dx in 0..3 {
+            neighbors.push(padded.index((dy..dy + height, dx..dx + width, ..)));
+        }
+    }
+    let nb = stack(&neighbors[..], 2).map_err(|e| e.to_string())?;
+    // Python: mx.einsum("hwkij,hwkc->hiwjc", m, nb).reshape(1, 8*h, 8*w, 2)
+    let up = einsum("hwkij,hwkc->hiwjc", [&m, &nb]).map_err(|e| e.to_string())?;
+    up.reshape(&[1, 8 * height, 8 * width, 2])
+        .map_err(|e| e.to_string())
+}
+
+/// Batch wrapper for [`upsample_flow`], matching Python's `upsample_flow_batch`.
+fn upsample_flow_batch(flow: &Array, mask: &Array) -> Result<Array, String> {
+    let shape = flow.shape();
+    if shape.len() != 4 || shape[0] <= 0 {
+        return Err(format!(
+            "flow must have shape [B,h,w,2] with positive batch, got {shape:?}"
+        ));
+    }
+    if mask.shape().len() != 4 || mask.shape()[0] != shape[0] {
+        return Err(format!(
+            "mask batch must match flow batch {}, got {:?}",
+            shape[0],
+            mask.shape()
+        ));
+    }
+    let mut parts = Vec::with_capacity(shape[0] as usize);
+    for i in 0..shape[0] {
+        parts.push(upsample_flow(
+            &flow.index((i..i + 1, .., .., ..)),
+            &mask.index((i..i + 1, .., .., ..)),
+        )?);
+    }
+    concatenate(&parts[..], 0).map_err(|e| e.to_string())
+}
+
 // --- RAFT BasicUpdateBlock (checkpoint-backed, inference only) ---------------------------------------------
 
 /// Hidden channels in the RAFT GRU and the update-block feature/context tensors.
 pub const RAFT_HIDDEN_CHANNELS: i32 = 128;
 /// Correlation channels produced by the production RAFT configuration (`levels=4`, `radius=4`).
 pub const RAFT_CORR_CHANNELS: i32 = 324;
+/// Correlation pyramid levels used by the production checkpoint and the Python `RAFT` defaults.
+pub const RAFT_CORR_LEVELS: usize = 4;
+/// Correlation lookup radius used by the production checkpoint and the Python `RAFT` defaults.
+pub const RAFT_CORR_RADIUS: usize = 4;
 /// Channels emitted by the mask head (the 9x9 convex-upsampling weights).
 pub const RAFT_MASK_CHANNELS: i32 = 576;
 
@@ -947,7 +1220,8 @@ impl BasicUpdateBlock {
 
     /// Run one GRU/flow-head step and return the updated hidden state and flow delta.
     ///
-    /// `net` and `inp` are `[1,H,W,128]`, `corr` is `[1,H,W,324]`, and `flow` is `[1,H,W,2]`.
+    /// `net` and `inp` are `[B,H,W,128]`, `corr` is `[B,H,W,324]`, and `flow` is `[B,H,W,2]`.
+    /// `B` may be 1 (single pair) or 2 (batched forward/backward refinement).
     pub fn core(
         &mut self,
         net: &Array,
@@ -963,7 +1237,7 @@ impl BasicUpdateBlock {
         Ok(CoreOutput { net, delta })
     }
 
-    /// Run the mask head on a `[1,H,W,128]` hidden state, returning `[1,H,W,576]` scaled by 0.25.
+    /// Run the mask head on a `[B,H,W,128]` hidden state, returning `[B,H,W,576]` scaled by 0.25.
     pub fn mask_head(&mut self, net: &Array) -> Result<Array, String> {
         validate_hidden(net)?;
         self.mask.forward(net)
@@ -989,9 +1263,9 @@ impl BasicUpdateBlock {
 
 fn validate_hidden(net: &Array) -> Result<(i32, i32), String> {
     let shape = net.shape();
-    if shape.len() != 4 || shape[0] != 1 || shape[3] != RAFT_HIDDEN_CHANNELS {
+    if shape.len() != 4 || shape[0] <= 0 || shape[3] != RAFT_HIDDEN_CHANNELS {
         return Err(format!(
-            "net must have shape [1,H,W,{RAFT_HIDDEN_CHANNELS}], got {shape:?}"
+            "net must have shape [B,H,W,{RAFT_HIDDEN_CHANNELS}] with positive batch, got {shape:?}"
         ));
     }
     if shape[1] <= 0 || shape[2] <= 0 {
@@ -1009,13 +1283,14 @@ fn validate_update_inputs(
     flow: &Array,
 ) -> Result<(i32, i32), String> {
     let (height, width) = validate_hidden(net)?;
+    let batch = net.shape()[0];
     for (name, array, channels) in [
         ("net", net, RAFT_HIDDEN_CHANNELS),
         ("inp", inp, RAFT_HIDDEN_CHANNELS),
         ("corr", corr, RAFT_CORR_CHANNELS),
         ("flow", flow, 2),
     ] {
-        let expected = [1, height, width, channels];
+        let expected = [batch, height, width, channels];
         if array.shape() != expected.as_slice() {
             return Err(format!(
                 "{name} must have shape {expected:?} to match net, got {:?}",
@@ -1549,7 +1824,108 @@ mod tests {
         let wrong_hidden = mlx_rs::ops::zeros::<f32>(&[1, 3, 4, 127]).unwrap();
         let error = block.mask_head(&wrong_hidden).unwrap_err();
         assert!(
-            error.contains("net must have shape [1,H,W,128]"),
+            error.contains("net must have shape [B,H,W,128]"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn update_block_accepts_batch_two() {
+        let checkpoint = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vendor/weights/conv/raft-things.safetensors");
+        let mut block = BasicUpdateBlock::load_checkpoint(checkpoint).unwrap();
+        let net = mlx_rs::ops::zeros::<f32>(&[2, 3, 4, RAFT_HIDDEN_CHANNELS]).unwrap();
+        let inp = mlx_rs::ops::zeros::<f32>(&[2, 3, 4, RAFT_HIDDEN_CHANNELS]).unwrap();
+        let corr = mlx_rs::ops::zeros::<f32>(&[2, 3, 4, RAFT_CORR_CHANNELS]).unwrap();
+        let flow = mlx_rs::ops::zeros::<f32>(&[2, 3, 4, 2]).unwrap();
+        let out = block.forward(&net, &inp, &corr, &flow).unwrap();
+        assert_eq!(out.net.shape(), &[2, 3, 4, RAFT_HIDDEN_CHANNELS]);
+        assert_eq!(out.delta.shape(), &[2, 3, 4, 2]);
+        assert_eq!(out.mask.shape(), &[2, 3, 4, RAFT_MASK_CHANNELS]);
+    }
+
+    #[test]
+    fn flow_bidir_matches_python_mlx_fixture() {
+        let checkpoint = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vendor/weights/conv/raft-things.safetensors");
+        let checkpoint_hash = format!(
+            "{:x}",
+            sha2::Sha256::digest(std::fs::read(&checkpoint).unwrap())
+        );
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/flow_bidir_reference.json"))
+                .unwrap();
+        assert_eq!(fixture["schema"], "mlxstab.raft_compat.flow_bidir/1");
+        assert_eq!(fixture["checkpoint_sha256"], checkpoint_hash);
+        assert_eq!(fixture["rust_mlx_rs"], "0.32.0");
+        assert_eq!(fixture["rust_mlx"], "0.32.2");
+        assert!(fixture["python_mlx"].is_string());
+        assert_eq!(fixture["height"], 64);
+        assert_eq!(fixture["width"], 64);
+        assert_eq!(fixture["iters"], 1);
+        assert_eq!(fixture["corr_levels"], RAFT_CORR_LEVELS);
+        assert_eq!(fixture["corr_radius"], RAFT_CORR_RADIUS);
+
+        let images = &fixture["images"];
+        let first = json_f32(&images["first"], &json_shape(&images["first_shape"]));
+        let second = json_f32(&images["second"], &json_shape(&images["second_shape"]));
+        assert_eq!(first.shape(), &[1, 64, 64, 3]);
+        assert_eq!(second.shape(), &[1, 64, 64, 3]);
+
+        let mut model = Raft::load(checkpoint).unwrap();
+        let flow = model.flow_bidir(&first, &second, 1).unwrap();
+
+        for (label, shape_key, actual, expected) in [
+            (
+                "low forward",
+                "low_forward_shape",
+                &flow.low_forward,
+                &fixture["low_forward"],
+            ),
+            (
+                "full forward",
+                "up_forward_shape",
+                &flow.up_forward,
+                &fixture["up_forward"],
+            ),
+            (
+                "low backward",
+                "low_backward_shape",
+                &flow.low_backward,
+                &fixture["low_backward"],
+            ),
+            (
+                "full backward",
+                "up_backward_shape",
+                &flow.up_backward,
+                &fixture["up_backward"],
+            ),
+        ] {
+            let expected = json_f32(expected, &json_shape(&fixture[shape_key]));
+            let error = max_abs_error(actual, &expected);
+            println!("flow_bidir {label}: max abs error {error:e}");
+            assert!(
+                error < 1e-4,
+                "flow_bidir {label} max abs error {error} exceeds 1e-4"
+            );
+        }
+    }
+
+    #[test]
+    fn flow_bidir_rejects_invalid_images() {
+        let checkpoint = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vendor/weights/conv/raft-things.safetensors");
+        let mut model = Raft::load(checkpoint).unwrap();
+        let valid = mlx_rs::ops::zeros::<f32>(&[1, 64, 64, 3]).unwrap();
+        let wrong_channels = mlx_rs::ops::zeros::<f32>(&[1, 64, 64, 2]).unwrap();
+        let wrong_batch = mlx_rs::ops::zeros::<f32>(&[2, 64, 64, 3]).unwrap();
+        let unaligned = mlx_rs::ops::zeros::<f32>(&[1, 60, 64, 3]).unwrap();
+
+        assert!(model.flow_bidir(&valid, &wrong_channels, 1).is_err());
+        assert!(model.flow_bidir(&wrong_batch, &valid, 1).is_err());
+        let error = model.flow_bidir(&valid, &unaligned, 1).unwrap_err();
+        assert!(
+            error.contains("multiples of 8"),
             "unexpected error: {error}"
         );
     }

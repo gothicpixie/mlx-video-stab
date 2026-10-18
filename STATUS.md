@@ -4443,3 +4443,24 @@ The update block is now individually parity-tested but is not yet connected to t
 pyramid in an iterative bidirectional flow call. Compiled execution, final-flow parity, precision edge cases,
 complete checkpoint schema validation, cancellation/recovery, and sustained end-to-end timing and memory remain
 open. Continue to one integrated RAFT flow test before judging Rust for production.
+
+### E20 follow-up (2026-10-18): integrated bidirectional flow parity
+
+Connected the checkpoint-backed frame encoders, separate forward/backward correlation pyramids, batch-2 update
+block, and convex mask upsampler behind Rust `Raft::flow_bidir`. The loop accepts an iteration count, reuses each
+frame's features, starts both directions from a shared XY grid, and keeps coordinate/flow updates in float32.
+This follows Python `RAFT.frame_features` and `RAFT.flow_bidir`; correlation lookup remains host-materialized,
+and this API is not compiled.
+
+The checkpoint-backed fixture uses deterministic 64x64 RGB inputs and one refinement iteration on an 8x8 feature
+grid. It stores both inputs and all four outputs (forward/backward low-resolution and full-resolution flow),
+along with checkpoint and runtime metadata. Two generations produced the same SHA-256
+`6382f3f5c8db471c6a54b7d1ce92376044ba3d19e5ab9bc673ddf9af9221c770`. Rust matched Python MLX with **zero maximum
+absolute error** for all four outputs. All **17 Rust tests pass**; formatting, strict clippy, and `git diff --check`
+pass. CodeGraph was synced; its affected-file query did not find Rust tests, which were run directly.
+
+This establishes one-iteration fp32 parity on the checked-in setup, where Rust `mlx-rs 0.32.0` targets MLX 0.32.2
+and Python MLX is 0.32.3. Additional iteration counts and warm starts are not fixture-tested; the current Rust API
+does not expose warm starts or fp16 network/correlation paths. Full checkpoint-schema validation, exact version
+pairing, compiled updates, runtime/copy/memory measurements, cancellation and recovery remain untested. Continue
+with multi-iteration parity and a measured complete-call comparison before considering a production migration.
