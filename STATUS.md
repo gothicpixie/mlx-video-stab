@@ -1,5 +1,29 @@
 # mlxstab status
 
+### 2026-10-18 experimental shape-preserving residual-mesh regularization
+
+Added a default-off `mesh_shape_strength` experiment to the per-pair residual mesh fit and exposed it through
+`Config` and `--mesh-shape-strength`. It penalizes only the trace-free symmetric part of each mesh-cell
+displacement gradient, so translation, local rotation, isotropic scale, the global fit and x-independent row
+correction are left alone. Strength zero bypasses the sparse solve and preserves the prior fit output. Analytic
+tests cover that parity, the intended null modes, localized shear reduction, support weighting, finite fallback
+behavior and pipeline/CLI validation.
+
+The first matched real-footage screen used current-source `00176.MTS` t060–061, the same 1920×1080 interlaced
+decode and benchmark settings for both arms, and 30 aligned CFR output frames. On the saved 59-pair motion
+capture, strength 10 reduced mean trace-free mesh strain energy by 93.1% with 0.082 px RMS and 0.620 px maximum
+mesh change. The matched benchmark evaluator then measured RAFT jitter **0.04653 → 0.05733 px** (+23.2%),
+wobble **0.03227 → 0.03393 px** (+5.2%), and frame motion **0.07366 → 0.10246 px** (+39.1%). Gemini 3.8 Flash
+judged the original paired clip a medium-confidence tie and preferred baseline at medium confidence after
+panel reversal; only one of the two judgments was non-tie, so this does not establish a stable perceptual
+preference. The old saved baseline manifest had a stale source hash and was rejected; the comparison was
+repeated with two fresh benchmark runs from the current source hash before review.
+
+This strength-10 setting fails the first product gate and is not recommended or enabled by default. The option
+remains experimental for a targeted future case only; do not broaden into a strength sweep without a specific
+visual failure prediction and an independent quality measure. Runs, video comparisons and API judgments are
+ignored under `out/bench/mesh_shape_matched_t060_1s_*`.
+
 ### 2026-10-17 opt-in low-frequency camera-path fidelity
 
 Added an opt-in term to the existing L1 path planner that softly pulls translation and rotation/log-scale paths

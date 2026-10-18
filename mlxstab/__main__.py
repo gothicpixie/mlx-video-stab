@@ -69,6 +69,9 @@ def main(argv=None):
     p.add_argument("--budget", type=float, default=0.04, help="border budget: max path deviation, fraction of frame width")
     p.add_argument("--roll", help="JSON roll series in degrees (positive = counter-clockwise lean) to level the horizon")
     p.add_argument("--mesh", default="16x9", help="residual mesh cells COLSxROWS, or 0x0 to disable")
+    p.add_argument("--mesh-shape-strength", type=float, default=0.0,
+                   help="experimental: opt-in shape-preserving residual-mesh regularization strength "
+                        "(finite, >= 0); disabled by default (0)")
     p.add_argument("--rs-rows", type=int, default=18, help="rolling-shutter row bands, 0 disables")
     p.add_argument("--iters", type=int, default=24)
     p.add_argument("--flow-downscale", type=_flow_downscale_arg, default=1,
@@ -104,6 +107,7 @@ def main(argv=None):
     a = p.parse_args(argv)
     gc, gr = (int(v) for v in a.mesh.lower().split("x"))
     cfg = Config(smooth=a.smooth, sigma=a.sigma, budget=a.budget, mesh=(gc, gr), rs_rows=a.rs_rows, flow_iters=a.iters,
+                 mesh_shape_strength=a.mesh_shape_strength,
                  flow_downscale=a.flow_downscale, max_flow_corr_bytes=a.max_flow_corr_gib,
                  kernel=a.kernel, zoom=a.zoom, fidelity=a.fidelity,
                  l1_low_freq_fidelity=a.l1_low_freq_fidelity, l1_low_freq_sigma=a.l1_low_freq_sigma,

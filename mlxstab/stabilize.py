@@ -84,6 +84,22 @@ def _validate_l1_low_freq_sigma(value):
     return v
 
 
+def _validate_mesh_shape_strength(value):
+    """Validate ``Config.mesh_shape_strength``: finite, scalar and ``>= 0``; ``0`` disables it.
+
+    Booleans, strings, arrays and complex values are rejected rather than coerced, so a typo cannot silently
+    enable, disable or distort the experimental regularizer."""
+    if isinstance(value, (bool, np.bool_, str, bytes)) or not np.isscalar(value):
+        raise ValueError(f"mesh_shape_strength must be a finite non-negative scalar, got {value!r}")
+    try:
+        v = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"mesh_shape_strength must be a finite non-negative scalar, got {value!r}") from None
+    if not np.isfinite(v) or v < 0.0:
+        raise ValueError(f"mesh_shape_strength must be a finite non-negative scalar, got {value!r}")
+    return v
+
+
 def _crop_zoom_matrix(W, H, crop_zoom):
     """Homogeneous output-space zoom ``Z`` mapping ``x -> c + (x - c)/crop_zoom`` with ``c = (W/2-.5, H/2-.5)``.
 
@@ -107,6 +123,7 @@ class Config:
     budget: float = 0.04           # max path deviation as a fraction of frame width = the border budget
     mesh: tuple = (16, 9)          # cells (cols, rows) of the residual mesh; (0, 0) disables
     mesh_budget: float = 0.012     # residual correction cap, fraction of width
+    mesh_shape_strength: float = 0.0  # experimental: opt-in shape-preserving mesh regularization; 0 disables
     rs_rows: int = 18              # row bands for rolling-shutter correction; 0 disables
     flow_iters: int = 24
     flow_downscale: int | str = 1   # positive integer, or "auto" to pick from (1, 2, 4) under max_flow_corr_bytes
@@ -137,6 +154,7 @@ class Config:
         self.crop_zoom = _validate_crop_zoom(self.crop_zoom)
         self.l1_low_freq_fidelity = _validate_l1_low_freq_fidelity(self.l1_low_freq_fidelity)
         self.l1_low_freq_sigma = _validate_l1_low_freq_sigma(self.l1_low_freq_sigma)
+        self.mesh_shape_strength = _validate_mesh_shape_strength(self.mesh_shape_strength)
 
 
 @dataclass(frozen=True)
@@ -403,7 +421,8 @@ def analyze(frames, flow_fn, cfg, W, H, fps, log=None, masks=None, on_step=None,
     mot = Motion(W, H, fps, stride=stride, cuts=cuts); prev = None; prev_i = None; rng = np.random.default_rng(cfg.seed)
     gc, gr = cfg.mesh
     pool = ThreadPoolExecutor(1) if threads else None; pend = []
-    fit = lambda obs: MO.fit_motion(obs, (max(gc, 1), max(gr, 1)), cfg.rs_rows, rng=rng, model=cfg.model)
+    fit = lambda obs: MO.fit_motion(obs, (max(gc, 1), max(gr, 1)), cfg.rs_rows, rng=rng, model=cfg.model,
+                                    shape_strength=cfg.mesh_shape_strength)
     mrow, mcol = max(gr, 1), max(gc, 1)
     def boundary_fit():
         return MO.Fit(np.eye(3), np.zeros((mrow + 1, mcol + 1, 2)), np.zeros((max(cfg.rs_rows, 1), 2)),

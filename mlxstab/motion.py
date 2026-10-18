@@ -227,8 +227,129 @@ def fallback_reason(n_valid_samples, n_ransac_inliers, min_valid, min_inlier_fra
     return FALLBACK_REASON_NONE
 
 
-def fit_motion(obs, mesh=(16, 9), rs_rows=18, thr=1.5, rng=None, min_valid=60, model="similarity"):
-    """Global homography by RANSAC on valid flow samples, movers excluded, then row-wise and mesh residual fields."""
+def _validate_shape_strength(value):
+    """Validate the opt-in mesh shape-regularization strength (finite, scalar, >= 0).
+
+    Booleans, strings, arrays and complex values are rejected rather than coerced, so a typo cannot silently
+    disable or distort the research-only regularizer. ``0`` is the production default."""
+    name = "shape regularization strength"
+    if (isinstance(value, (bool, np.bool_, str, bytes)) or not np.isscalar(value)):
+        raise ValueError(f"{name} must be a finite non-negative scalar, got {value!r}")
+    try:
+        strength = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError(f"{name} must be a finite non-negative scalar, got {value!r}") from None
+    if not np.isfinite(strength) or strength < 0.0:
+        raise ValueError(f"{name} must be a finite non-negative scalar, got {value!r}")
+    return strength
+
+
+def _regularize_mesh_shape(mesh, support_mass, W, H, strength):
+    """Weighted least-squares shape-preserving regularization of the local residual mesh.
+
+    The unknown is the per-vertex residual displacement ``u`` (pixels). The objective is
+
+        sum_v m_v ||u_v - u0_v||^2  +  strength * sum_cells area_c * s_c ||dev sym(grad u)||_F^2
+
+    where ``u0`` is the supplied local residual mesh, ``m_v`` is the data/support weight (the pre-fill
+    observation coverage mass, normalized by its median positive value), ``s_c`` is the mean normalized support
+    of the cell's four vertices, ``area_c`` is the cell area, and ``dev sym(grad u)`` is the trace-free
+    symmetric part of the displacement gradient. Translation (constant ``u``), local rotation (skew gradient)
+    and isotropic scale (trace) are in the nullspace of the energy, so they are not penalized. The global
+    similarity and x-independent row field are not inputs to this solve.
+
+    This is a direct sparse normal-equation solve, not a scalar shrink of ``u0``. At ``strength == 0`` the
+    caller does not invoke it, preserving the historical mesh byte-for-byte. Degenerate grids, absent support,
+    and non-finite solver results return a finite copy of ``u0`` unchanged."""
+    mesh = np.asarray(mesh, np.float64)
+    if strength <= 0.0 or mesh.ndim != 3 or mesh.shape[2] != 2:
+        return mesh.copy()
+    R, C, _ = mesh.shape
+    if R < 2 or C < 2 or not np.isfinite(mesh).all():
+        return mesh.copy()
+
+    if support_mass is None:
+        mass = np.ones((R, C), np.float64)
+    else:
+        mass = np.asarray(support_mass, np.float64)
+        if mass.shape != (R, C):
+            raise ValueError(f"support_mass must have shape {(R, C)}, got {mass.shape}")
+        mass = np.where(np.isfinite(mass) & (mass > 0.0), mass, 0.0)
+    positive = mass[mass > 0.0]
+    if positive.size == 0:
+        return mesh.copy()
+    scale = float(np.median(positive))
+    if not np.isfinite(scale) or scale <= 0.0:
+        return mesh.copy()
+    mass = mass / scale
+
+    from scipy import sparse
+    from scipy.sparse.linalg import spsolve
+
+    dx = float(W) / float(C - 1)
+    dy = float(H) / float(R - 1)
+    if not np.isfinite(dx) or not np.isfinite(dy) or dx <= 0.0 or dy <= 0.0:
+        return mesh.copy()
+    area = dx * dy
+
+    # Assemble the two independent deviatoric strain components per cell. For e00 = (u_x,x - u_y,y)/2 and
+    # e01 = (u_x,y + u_y,x)/2, ||dev sym(grad u)||_F^2 = 2 * (e00^2 + e01^2); the sqrt(2*area*s) row weight
+    # makes the sparse normal equations equal that per-cell energy.
+    rows, cols, vals = [], [], []
+    row = 0
+    for i in range(R - 1):
+        for j in range(C - 1):
+            n00 = i * C + j
+            n01 = n00 + 1
+            n10 = n00 + C
+            n11 = n10 + 1
+            cell_support = 0.25 * (mass[i, j] + mass[i, j + 1] + mass[i + 1, j] + mass[i + 1, j + 1])
+            if not np.isfinite(cell_support) or cell_support <= 0.0:
+                continue
+            rw = np.sqrt(2.0 * area * cell_support)
+            # e00 row.
+            for node, comp, coef in (
+                    (n00, 0, -1.0 / (4.0 * dx)), (n01, 0, 1.0 / (4.0 * dx)),
+                    (n10, 0, -1.0 / (4.0 * dx)), (n11, 0, 1.0 / (4.0 * dx)),
+                    (n00, 1, 1.0 / (4.0 * dy)), (n01, 1, 1.0 / (4.0 * dy)),
+                    (n10, 1, -1.0 / (4.0 * dy)), (n11, 1, -1.0 / (4.0 * dy))):
+                rows.append(row); cols.append(2 * node + comp); vals.append(rw * coef)
+            row += 1
+            # e01 row.
+            for node, comp, coef in (
+                    (n00, 1, -1.0 / (4.0 * dx)), (n01, 1, 1.0 / (4.0 * dx)),
+                    (n10, 1, -1.0 / (4.0 * dx)), (n11, 1, 1.0 / (4.0 * dx)),
+                    (n00, 0, -1.0 / (4.0 * dy)), (n01, 0, -1.0 / (4.0 * dy)),
+                    (n10, 0, 1.0 / (4.0 * dy)), (n11, 0, 1.0 / (4.0 * dy))):
+                rows.append(row); cols.append(2 * node + comp); vals.append(rw * coef)
+            row += 1
+    if row == 0:
+        return mesh.copy()
+
+    D = sparse.coo_matrix((vals, (rows, cols)), shape=(row, 2 * R * C)).tocsr()
+    # A tiny floor on otherwise unsupported vertices keeps the normal equations non-singular and anchors them to
+    # the finite filled target; it is negligible wherever real support exists.
+    floor = max(1e-9 * float(mass.max()), 1e-12)
+    data_w = np.repeat(np.where(mass > 0.0, mass, floor).ravel(), 2)
+    A = sparse.diags(data_w, format="csr") + strength * (D.T @ D)
+    u0 = mesh.reshape(-1)
+    try:
+        u = spsolve(A.tocsc(), data_w * u0)
+    except Exception:
+        return mesh.copy()
+    if not np.isfinite(u).all():
+        return mesh.copy()
+    return np.asarray(u, np.float64).reshape(R, C, 2)
+
+
+def fit_motion(obs, mesh=(16, 9), rs_rows=18, thr=1.5, rng=None, min_valid=60, model="similarity",
+               shape_strength=0.0):
+    """Global homography by RANSAC on valid flow samples, movers excluded, then row-wise and mesh residual fields.
+
+    ``shape_strength`` is a research-only, opt-in strength for shape-preserving regularization of the local
+    residual mesh (trace-free symmetric strain). It defaults to ``0``, which leaves the historical H/mesh/rows
+    byte-for-byte unchanged. The regularizer never touches the global similarity or the x-independent row field."""
+    strength = _validate_shape_strength(shape_strength)
     gc, gr = mesh
     W, H = obs.W, obs.H
     v = obs.valid
@@ -289,6 +410,8 @@ def fit_motion(obs, mesh=(16, 9), rs_rows=18, thr=1.5, rng=None, min_valid=60, m
     p = np.pad(mesh_f, ((1, 1), (1, 1), (0, 0)), mode="edge")                # light spatial regularisation [1 2 1]^2/16
     mesh_f = (p[:-2, 1:-1] + 2 * p[1:-1, 1:-1] + p[2:, 1:-1]) / 4
     p = np.pad(mesh_f, ((0, 0), (1, 1), (0, 0)), mode="edge"); mesh_f = (p[:, :-2] + 2 * p[:, 1:-1] + p[:, 2:]) / 4
+    if strength > 0.0:
+        mesh_f = _regularize_mesh_shape(mesh_f, mesh_support_mass, W, H, strength)
     return Fit(Hm, mesh_f, rows, float(inlier_frac), float(mv[v].mean()), False,
                n_valid_samples=n_valid, n_ransac_inliers=n_inliers, fallback_reason=FALLBACK_REASON_NONE,
                mesh_support_mass=mesh_support_mass, row_support_mass=row_support_mass,
