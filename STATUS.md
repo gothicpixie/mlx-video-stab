@@ -3171,9 +3171,16 @@ has no residual smoother. The maximum displacement was **221.52 px**, the mean o
 screen is crossed by a wide margin, and the result shows that temporal residual smoothing alone does not explain
 the sparse-probe discrepancy. This remains a same-window geometry diagnosis, not proof that exact composition
 improves perceived stability: the comparison uses sparse samples and does not score the rendered video. The
-dense report is `out/bench/real_composition_audit/s13_t048_10s_same_base_dense.json`. A rendered exact-composition
-candidate is being checked against the captured baseline with motion, support and blinded review; no production
-change follows unless those quality checks support it.
+dense report is `out/bench/real_composition_audit/s13_t048_10s_same_base_dense.json`. The exact-composition
+candidate rendered successfully at the captured 300-frame 1920 × 1080 CFR cadence. Its own support report shows
+6.392% mean invalid pixels and 16.451% at the worst frame. Gemini 3.8 Flash reviewed the 960 × 540-per-panel
+baseline/candidate comparison and its panel reversal, preferring the baseline at medium confidence in both
+orders; it cited rubber-sheet warping and curved border distortion in the candidate. The position-bias audit
+confirmed that the preference followed the baseline across physical sides. The candidate is rejected for this
+window; the result does not show that all composed residuals fail, but unfiltered exact composition is not a
+production improvement here. The render, paired review and judgments are under
+`out/bench/stage0_composition_t048_10s_baseline/`. Candidate motion metrics are still pending. No production
+change follows.
 
 ## Shared-pipeline MLX versus PyTorch MPS flow comparison (2026-10-17)
 
