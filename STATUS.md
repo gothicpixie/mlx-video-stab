@@ -1,6 +1,6 @@
 # mlxstab status
 
-### 2026-10-18 pre-registered E04 cold-12 fast-preset gate (not yet run)
+### 2026-10-18 pre-registered E04 cold-12 fast-preset gate
 
 Test whether disabling same-grid warm reuse and reducing RAFT from 20 to 12 iterations can improve complete-pipeline
 throughput without degrading stabilization. The prior E04 flow-initialization benchmark used a model-derived
@@ -24,6 +24,35 @@ baseline preference. Static/pan controls must remain within their existing noise
 document cold-12 as an optional fast preset and repeat on a held-out source before considering it for a default.
 If it fails, retain warm-20 and stop this branch; attribute only the single failing window with cold-20 before
 any further iteration-count experiment. All artifacts will remain under ignored `out/bench/e04_fast12_*`.
+
+### E04 cold-12 gate result (2026-10-18; branch rejected after two windows)
+
+Both arms were freshly run from the same current source hashes, weights and benchmark code; the source-declared
+windows and all configuration except `warm_start`/`flow_iters` matched. `00176.MTS` t060–070 passed its numeric
+and support gates: warm-20 versus cold-12 stabilization time was **574.70 → 388.71 s** (-32.4%) and analysis
+time **521.43 → 340.04 s** (-34.8%). RAFT jitter was **0.51917 → 0.51804 px** (-0.22%); wobble was
+**0.05365 → 0.05477 px** (+2.09%). KLT output/input jitter ratio changed **0.33444 → 0.33465** (+0.06%).
+Mean invalid border area was **2.236% → 2.217%**, worst-frame area **5.804% → 5.835%**, and both arms had zero
+stabilization fit fallbacks. Gemini called the original order a tie and the reversed order baseline-preferred;
+the position-bias audit found only one non-tie judgment, so there was no repeatable two-order preference.
+
+`00177.MTS` t090–100 failed the pre-registered gate. Warm-20 versus cold-12 stabilization time was
+**516.10 → 442.03 s** (-14.4%) and analysis time **471.85 → 396.29 s** (-16.0%), both short of their required
+15%/20% gains. RAFT jitter worsened **2.5028 → 3.3398 px** (+33.4%), wobble worsened **0.4783 → 0.6153 px**
+(+28.6%), and worst-frame invalid border area rose **6.620% → 8.379%** (+1.76 percentage points, above the
+1-point limit). The baseline had one stabilization fit fallback and the candidate had zero, but output RAFT had
+five versus four fallback fits. KLT could not score either arm: the input had 37 failed track pairs and the
+output path metrics were unavailable. Per the preregistered stop rule, the remaining `STREAM_00013.MTS` and
+`STREAM_00024.MTS` windows were not run and no fast preset is adopted.
+
+The required cold-20 attribution on the failing `00177.MTS` window isolated initialization from iteration
+count. Cold-20 took **532.28 s** stabilization / **488.73 s** analysis versus warm-20 at **516.10 s / 471.85 s**
+(+3.1% / +3.6%); cold initialization alone did not improve speed. The run produced its full motion, plan and
+render, but its evaluation-only tail was cancelled after more than 40 minutes because the speed attribution was
+already conclusive; its RAFT output metrics are incomplete and are not used. This gate rejects cold-12 as a
+fast preset for the tested population. It does not establish that 12 iterations is always inferior or that
+warm-20 is optimal; reopen only with a new, specific hypothesis and a gate that addresses the measured t090
+quality regressions. Manifests and reviews are under ignored `out/bench/e04_fast12_*`.
 
 ### 2026-10-18 experimental shape-preserving residual-mesh regularization
 
