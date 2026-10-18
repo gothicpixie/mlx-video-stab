@@ -926,6 +926,25 @@ pub struct BidirectionalFlow {
     pub up_backward: Array,
 }
 
+fn split_frame_features(
+    fmap: &Array,
+    context: &Array,
+    batch_index: i32,
+) -> Result<FrameFeat, String> {
+    let batch = batch_index..batch_index + 1;
+    let fmap = fmap.index((batch.clone(), .., .., ..));
+    let net = tanh(context.index((batch.clone(), .., .., 0..RAFT_HIDDEN_CHANNELS)))
+        .map_err(|e| e.to_string())?;
+    let inp = relu(context.index((
+        batch,
+        ..,
+        ..,
+        RAFT_HIDDEN_CHANNELS..2 * RAFT_HIDDEN_CHANNELS,
+    )))
+    .map_err(|e| e.to_string())?;
+    Ok(FrameFeat { fmap, net, inp })
+}
+
 /// Checkpoint-backed RAFT encoders plus update block for fp32 inference and Python parity checks.
 ///
 /// The bidirectional loop mirrors `mlxstab.raft.model.RAFT`: features are encoded once per frame, the
@@ -940,6 +959,7 @@ pub struct Raft {
     pub update_block: BasicUpdateBlock,
     compiled_update: bool,
     compiled_core: Option<CompiledCore>,
+    batched_encoding: bool,
 }
 
 impl Raft {
@@ -956,6 +976,7 @@ impl Raft {
             update_block: BasicUpdateBlock::load(params)?,
             compiled_update: true,
             compiled_core: None,
+            batched_encoding: false,
         })
     }
 
@@ -972,6 +993,19 @@ impl Raft {
         self.compiled_update
     }
 
+    /// Select whether `flow_bidir` encodes both input frames as one batch of two.
+    ///
+    /// `false` (the default) encodes the frames separately as the reference. `true` runs each
+    /// encoder once on the concatenated pair, then splits the per-frame features.
+    pub fn set_batched_encoding(&mut self, batched: bool) {
+        self.batched_encoding = batched;
+    }
+
+    /// Return the frame-encoder batching mode selected by `set_batched_encoding`.
+    pub fn batched_encoding(&self) -> bool {
+        self.batched_encoding
+    }
+
     /// Encode one `[1,H,W,3]` 0..255 image into fnet/cnet features.
     ///
     /// This matches Python's `RAFT.frame_features`: the image is normalized to -1..1, `fnet` (instance
@@ -981,11 +1015,34 @@ impl Raft {
         let x = normalize_image(im)?;
         let fmap = self.encoders.fnet.forward(&x)?;
         let c = self.encoders.cnet.forward(&x)?;
-        let net =
-            tanh(c.index((.., .., .., 0..RAFT_HIDDEN_CHANNELS))).map_err(|e| e.to_string())?;
-        let inp = relu(c.index((.., .., .., RAFT_HIDDEN_CHANNELS..2 * RAFT_HIDDEN_CHANNELS)))
-            .map_err(|e| e.to_string())?;
-        Ok(FrameFeat { fmap, net, inp })
+        split_frame_features(&fmap, &c, 0)
+    }
+
+    /// Encode two `[1,H,W,3]` images together, then return one `FrameFeat` per image.
+    ///
+    /// Instance normalization is per sample and cnet batch normalization uses the checkpoint's
+    /// evaluation statistics, so this preserves the separate `frame_features` semantics.
+    pub fn frame_features_pair(
+        &mut self,
+        im1: &Array,
+        im2: &Array,
+    ) -> Result<(FrameFeat, FrameFeat), String> {
+        let first = normalize_image(im1)?;
+        let second = normalize_image(im2)?;
+        if first.shape() != second.shape() {
+            return Err(format!(
+                "paired images must have matching shapes, got {:?} and {:?}",
+                first.shape(),
+                second.shape()
+            ));
+        }
+        let pair = concatenate(&[&first, &second], 0).map_err(|e| e.to_string())?;
+        let fmap = self.encoders.fnet.forward(&pair)?;
+        let context = self.encoders.cnet.forward(&pair)?;
+        Ok((
+            split_frame_features(&fmap, &context, 0)?,
+            split_frame_features(&fmap, &context, 1)?,
+        ))
     }
 
     /// Bidirectional flow between two `[1,H,W,3]` 0..255 images.
@@ -998,8 +1055,11 @@ impl Raft {
         im2: &Array,
         iters: usize,
     ) -> Result<BidirectionalFlow, String> {
-        let a = self.frame_features(im1)?;
-        let b = self.frame_features(im2)?;
+        let (a, b) = if self.batched_encoding {
+            self.frame_features_pair(im1, im2)?
+        } else {
+            (self.frame_features(im1)?, self.frame_features(im2)?)
+        };
         self.flow_bidir_features(&a, &b, iters)
     }
 
@@ -2248,13 +2308,17 @@ mod tests {
             model.set_compiled_update(false);
             assert!(!model.compiled_update());
             let direct = model.flow_bidir(&first, &second, iters as usize).unwrap();
+            model.set_batched_encoding(true);
+            let batched = model.flow_bidir(&first, &second, iters as usize).unwrap();
+            model.set_batched_encoding(false);
 
-            for (label, shape_key, compiled_output, direct_output, expected) in [
+            for (label, shape_key, compiled_output, direct_output, batched_output, expected) in [
                 (
                     "low forward",
                     "low_forward_shape",
                     &compiled.low_forward,
                     &direct.low_forward,
+                    &batched.low_forward,
                     &case["low_forward"],
                 ),
                 (
@@ -2262,6 +2326,7 @@ mod tests {
                     "up_forward_shape",
                     &compiled.up_forward,
                     &direct.up_forward,
+                    &batched.up_forward,
                     &case["up_forward"],
                 ),
                 (
@@ -2269,6 +2334,7 @@ mod tests {
                     "low_backward_shape",
                     &compiled.low_backward,
                     &direct.low_backward,
+                    &batched.low_backward,
                     &case["low_backward"],
                 ),
                 (
@@ -2276,6 +2342,7 @@ mod tests {
                     "up_backward_shape",
                     &compiled.up_backward,
                     &direct.up_backward,
+                    &batched.up_backward,
                     &case["up_backward"],
                 ),
             ] {
@@ -2292,10 +2359,12 @@ mod tests {
                 };
                 let compiled_error = max_abs_error(compiled_output, &expected);
                 let direct_error = max_abs_error(direct_output, &expected);
+                let batched_error = max_abs_error(batched_output, &expected);
                 let split_error = max_abs_error(compiled_output, direct_output);
                 println!(
                     "flow_bidir {iters} iters {label}: compiled error {compiled_error:e}, \
-                     direct error {direct_error:e}, compiled vs direct {split_error:e}"
+                     direct error {direct_error:e}, batched error {batched_error:e}, \
+                     compiled vs direct {split_error:e}"
                 );
                 assert!(
                     compiled_error < compiled_tolerance,
@@ -2306,6 +2375,11 @@ mod tests {
                     direct_error < direct_tolerance,
                     "direct flow_bidir {iters} iters {label} max abs error {direct_error} \
                      exceeds {direct_tolerance}"
+                );
+                assert!(
+                    batched_error < compiled_tolerance,
+                    "batched flow_bidir {iters} iters {label} max abs error {batched_error} \
+                     exceeds {compiled_tolerance}"
                 );
             }
         }

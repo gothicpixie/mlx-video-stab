@@ -47,6 +47,7 @@ struct Args {
     reps: usize,
     warmup: usize,
     compiled_update: bool,
+    batched_encoding: bool,
 }
 
 impl Args {
@@ -61,6 +62,7 @@ impl Args {
             reps: 5,
             warmup: 1,
             compiled_update: true,
+            batched_encoding: false,
         };
         let mut argv = std::env::args().skip(1);
         while let Some(arg) = argv.next() {
@@ -77,12 +79,15 @@ impl Args {
                 "--compiled-update" => {
                     args.compiled_update = parse_bool01("--compiled-update", &value()?)?
                 }
+                "--batched-encoding" => {
+                    args.batched_encoding = parse_bool01("--batched-encoding", &value()?)?
+                }
                 "--help" | "-h" => {
                     println!(
                         "usage: bench_flow_bidir --first PATH --second PATH \
                          [--checkpoint PATH] [--height N] [--width N] \
                          [--iters N] [--reps N] [--warmup N] \
-                         [--compiled-update 0|1]"
+                         [--compiled-update 0|1] [--batched-encoding 0|1]"
                     );
                     std::process::exit(0);
                 }
@@ -207,6 +212,7 @@ fn run() -> Result<(), String> {
     // measured timing, matching bench_raft.py's placement.
     let mut model = Raft::load(&args.checkpoint)?;
     model.set_compiled_update(args.compiled_update);
+    model.set_batched_encoding(args.batched_encoding);
 
     let mut warmup_s = Vec::with_capacity(args.warmup);
     for _ in 0..args.warmup {
@@ -267,6 +273,14 @@ fn run() -> Result<(), String> {
                 "direct"
             },
             "correlation_lookup": "cached MLX Metal kernel",
+        },
+        "encoder_batching": {
+            "batched": model.batched_encoding(),
+            "mode": if model.batched_encoding() {
+                "pair_batch"
+            } else {
+                "separate"
+            },
         },
         "timing_scope": (
             "wall time around one Raft::flow_bidir call plus one eval of all four \

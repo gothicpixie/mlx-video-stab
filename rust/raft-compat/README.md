@@ -35,6 +35,11 @@ can share one batch-2 update, matching Python's `_iterate`.
   comparison. The final mask head runs once and both directions are
   convex-upsampled by 8x.
 
+`Raft::set_batched_encoding(true)` optionally concatenates the two input frames
+and runs fnet/cnet as batch-2 before splitting their features. Separate
+per-frame encoding remains the default because the measured latency change was
+inconclusive.
+
 Inputs must be positive multiples of 8 in height and width. The 64x64 fixture
 uses an 8x8 feature grid, so all four correlation levels remain non-empty.
 
@@ -233,6 +238,17 @@ while Rust and Python MLX compute it only on the final iteration, so graph work
 is not identical. Process RSS does not include accelerator allocations. This
 does not establish better stabilization quality, robustness, or performance on
 other inputs and hardware.
+
+The Rust harness also accepts `--batched-encoding 1` to compare pair-batched
+fnet/cnet against separate batch-1 calls; the default is `0`, and the selected
+mode is included in its JSON. Both paths returned exact fixture parity at 1 and
+24 refinement iterations. Across ten alternating fresh-process pairs at
+360x640, the median of per-process medians was 0.4904 s separate and 0.4941 s
+batched. Batched mode won seven paired comparisons, with a median paired gain
+of 0.94%, but the group medians show it 0.8% slower and run-to-run variation
+was larger than either effect. Peak RSS medians were 90.9 MiB separate and
+89.1 MiB batched. This does not justify changing the default or claiming a
+speed improvement; the small RSS difference needs sustained-run confirmation.
 
 The PyTorch run above used the upstream schedule that computes the mask on all
 24 iterations. `bench/bench_raft.py` now accepts an optional final

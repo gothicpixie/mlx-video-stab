@@ -4645,3 +4645,25 @@ the benchmark JSON; the measured data remain local under ignored `out/raft-bench
 synthetic pair and one host. The result does not establish a video-quality win, and the near-tie shifts the
 next performance work toward profiling Rust stages and batched feature encoding instead of counting the
 previous PyTorch timing advantage.
+
+### E20 follow-up (2026-10-18): pair-batched frame encoders
+
+Added `Raft::frame_features_pair` and an opt-in `set_batched_encoding(true)` path for `flow_bidir`. It
+normalizes both `[1,H,W,3]` inputs, concatenates them, invokes fnet/cnet once each at batch size two, then splits
+the feature map and context back into per-frame `FrameFeat`s. The existing per-frame calls remain the default
+and reference; the Rust benchmark selects the experiment with `--batched-encoding 0|1` and records the mode in
+JSON. No upstream files were changed.
+
+The fixture-backed bidirectional test now exercises both encoding modes at 1 and 24 iterations. Batched-mode
+outputs have **zero max-absolute difference** from the Python fixture for all four low/full forward/backward
+flows at both iteration counts. All **18 Rust tests pass**, as do formatting, strict clippy and CodeGraph sync;
+the affected-file query found no linked tests, so the Rust suite was run directly.
+
+Ten alternating fresh-process A/B pairs at 360x640, with compiled update fixed, one warmup and seven measured
+24-iteration calls, did not show a robust latency win. Separate encoding's median of process medians was
+**0.49038 s**; batched encoding's was **0.49410 s** (0.8% slower). Batched mode was faster in 7/10 individual
+pairs, with a 0.94% median paired gain, but the per-run spread (about 0.471–0.535 s) was larger than the
+effect and the combined median went the other way. Median process peak RSS was 90.9 MiB separate and 89.1 MiB
+batched, a small decrease that is not yet evidence of a sustained-memory advantage. Keep batching opt-in and
+the separate path as default. The next Rust speed action is to profile encoder, correlation construction,
+and refinement separately before attempting another fusion.
