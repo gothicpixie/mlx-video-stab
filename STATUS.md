@@ -1,5 +1,30 @@
 # mlxstab status
 
+### 2026-10-18 pre-registered E04 cold-12 fast-preset gate (not yet run)
+
+Test whether disabling same-grid warm reuse and reducing RAFT from 20 to 12 iterations can improve complete-pipeline
+throughput without degrading stabilization. The prior E04 flow-initialization benchmark used a model-derived
+24-iteration reference and found cold-12 closest to it on the tested pairs; it did not measure downstream video
+quality or justify production changes. This gate tests the product consequence, not another initialization/EPE
+variant.
+
+Compare historical `warm_start=true, flow_iters=20` against `warm_start=false, flow_iters=12`, holding all other
+configuration, source, decode, weights, output cadence, and evaluation settings fixed. Run fresh paired arms on
+four distinct source windows: `00176.MTS` t060–070, `00177.MTS` t090–100, `STREAM_00013.MTS` t032–042, and
+`STREAM_00024.MTS` t109–119. Record source hashes and full manifests. Obtain independent KLT where available,
+full output border metrics, and counterbalanced Gemini A/B plus panel reversals. This is a preset experiment;
+neither arm changes the production default during evaluation.
+
+Pass only if every window has zero fit fallbacks; stabilization wall time improves at least 15% and analysis
+time at least 20%, with no window slower; RAFT output jitter and wobble do not increase by more than
+`max(5%, 0.1 px at 1080p)`; independent KLT jitter ratio is at most 1.05 wherever available (unavailable KLT
+remains unverified, never a pass); mean invalid border area worsens by at most 0.2 percentage points and
+worst-frame invalid area by at most 1 point; and the counterbalanced review has no repeatable two-order
+baseline preference. Static/pan controls must remain within their existing noise tolerance. If the gate passes,
+document cold-12 as an optional fast preset and repeat on a held-out source before considering it for a default.
+If it fails, retain warm-20 and stop this branch; attribute only the single failing window with cold-20 before
+any further iteration-count experiment. All artifacts will remain under ignored `out/bench/e04_fast12_*`.
+
 ### 2026-10-18 experimental shape-preserving residual-mesh regularization
 
 Added a default-off `mesh_shape_strength` experiment to the per-pair residual mesh fit and exposed it through
