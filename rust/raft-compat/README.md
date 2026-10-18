@@ -1,8 +1,10 @@
 # RAFT Rust/MLX compatibility spike
 
 This crate starts E20 from `PLAN.md`. It pins the community `mlx-rs` binding to
-0.32.0 and exercises a small part of the Python RAFT contract: correlation
-lookup and loading the checked-in converted RAFT safetensors file.
+0.32.0 and exercises parts of the Python RAFT contract: correlation lookup,
+loading the checked-in converted RAFT safetensors file, and the checkpoint-backed
+`cnet.conv1` layer compared with a Python MLX golden. Regenerate that golden
+with `.venv/bin/python rust/raft-compat/tools/generate_cnet_conv1_reference.py`.
 
 The lookup is deliberately a host-side correctness reference. It materializes
 MLX inputs into contiguous f32 slices and builds a new MLX output array. It is
@@ -17,9 +19,9 @@ cargo test --manifest-path rust/raft-compat/Cargo.toml
 ```
 
 `mlx-rs` 0.32.0 currently targets MLX 0.32.2; the Python environment in this
-checkout has MLX 0.32.3. The present tests establish API/build feasibility and
-lookup semantics, not cross-version model parity. E20 still requires an exact
-version pairing, strict full-model parameter-schema validation, compiled
-bidirectional RAFT updates, Python-vs-Rust intermediate/final comparisons,
+checkout has MLX 0.32.3. The sampled `cnet.conv1` fixture passes across those
+versions, but this is not full-model parity. E20 still requires an exact version
+pairing, strict full-model parameter-schema validation, the rest of both
+encoders, compiled bidirectional RAFT updates, final-flow comparisons,
 cancellation/error-recovery tests, and repeated end-to-end runtime and memory
 measurements before any migration decision.

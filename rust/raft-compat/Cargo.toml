@@ -6,3 +6,7 @@ publish = false
 
 [dependencies]
 mlx-rs = { version = "=0.32.0", default-features = false, features = ["accelerate", "safetensors"] }
+
+[dev-dependencies]
+serde_json = "1"
+sha2 = "0.10"

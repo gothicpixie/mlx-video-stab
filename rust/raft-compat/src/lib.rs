@@ -4,6 +4,8 @@
 //! MLX inputs on the host and loops in Rust. The API and numerical behavior are
 //! intentionally small so it can be compared against Python's `lookup_level`.
 
+use mlx_rs::module::Module;
+use mlx_rs::nn::Conv2d;
 use mlx_rs::{Array, Dtype};
 
 /// Bilinearly sample one RAFT correlation-pyramid level.
@@ -131,9 +133,46 @@ pub fn load_safetensors_checked(
     Ok(loaded)
 }
 
+/// Run the checkpoint-backed RAFT context encoder's first 7x7 convolution.
+///
+/// This is a real MLX convolution with the converted RAFT weight layout
+/// `[out,kh,kw,in]`; the remaining normalization/residual encoder stages are
+/// not ported yet.
+pub fn cnet_conv1(
+    input: &Array,
+    params: &std::collections::HashMap<String, Array>,
+) -> Result<Array, String> {
+    if input.shape().len() != 4 || input.shape()[0] != 1 || input.shape()[3] != 3 {
+        return Err(format!(
+            "input must be NHWC [1,H,W,3], got {:?}",
+            input.shape()
+        ));
+    }
+    let weight = params
+        .get("cnet.conv1.weight")
+        .ok_or_else(|| "missing cnet.conv1.weight".to_string())?;
+    let bias = params
+        .get("cnet.conv1.bias")
+        .ok_or_else(|| "missing cnet.conv1.bias".to_string())?;
+    if weight.shape() != [64, 7, 7, 3] || bias.shape() != [64] {
+        return Err(format!(
+            "unexpected cnet.conv1 parameter shapes: weight={:?}, bias={:?}",
+            weight.shape(),
+            bias.shape()
+        ));
+    }
+    let mut conv = Conv2d::new(3, 64, (7, 7)).map_err(|e| e.to_string())?;
+    conv.stride = (2, 2);
+    conv.padding = (3, 3);
+    conv.weight.value = weight.clone();
+    conv.bias.value = Some(bias.clone());
+    conv.forward(input).map_err(|e| e.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sha2::Digest;
 
     #[test]
     fn lookup_matches_xy_order_bilinear_and_zero_padding() {
@@ -200,8 +239,58 @@ mod tests {
     fn reads_checked_in_raft_safetensors() {
         let checkpoint = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../vendor/weights/conv/raft-things.safetensors");
+        let checkpoint_hash = format!(
+            "{:x}",
+            sha2::Sha256::digest(std::fs::read(&checkpoint).unwrap())
+        );
+        assert_eq!(
+            checkpoint_hash,
+            "84c1f730d4620ef4dd0a2eeeef97db7a729fc4190ee05cdd0169030fc92fccc1"
+        );
         let params = Array::load_safetensors(checkpoint).unwrap();
         assert_eq!(params.len(), 154);
         assert_eq!(params["cnet.conv1.weight"].shape(), &[64, 7, 7, 3]);
+    }
+
+    #[test]
+    fn cnet_conv1_matches_python_mlx_fixture() {
+        let checkpoint = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vendor/weights/conv/raft-things.safetensors");
+        let params = Array::load_safetensors(checkpoint).unwrap();
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/cnet_conv1_reference.json"))
+                .unwrap();
+        assert_eq!(fixture["schema"], "mlxstab.raft_compat.cnet_conv1/1");
+        let checkpoint = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vendor/weights/conv/raft-things.safetensors");
+        let checkpoint_hash = format!(
+            "{:x}",
+            sha2::Sha256::digest(std::fs::read(checkpoint).unwrap())
+        );
+        assert_eq!(fixture["checkpoint_sha256"], checkpoint_hash);
+
+        let input: Vec<f32> = (0..9 * 11 * 3)
+            .map(|i| (((i % 29) as f32) - 14.0) / 14.0)
+            .collect();
+        let input = Array::from_slice(&input, &[1, 9, 11, 3]);
+        let output = cnet_conv1(&input, &params).unwrap().contiguous().unwrap();
+        assert_eq!(output.shape(), &[1, 5, 6, 64]);
+        let actual = output.as_slice::<f32>();
+        let positions = fixture["positions_yx"].as_array().unwrap();
+        let expected_rows = fixture["outputs"].as_array().unwrap();
+        assert_eq!(positions.len(), expected_rows.len());
+        let mut max_abs_error = 0.0f32;
+        for (position, expected) in positions.iter().zip(expected_rows) {
+            let y = position[0].as_u64().unwrap() as usize;
+            let x = position[1].as_u64().unwrap() as usize;
+            let expected = expected.as_array().unwrap();
+            assert_eq!(expected.len(), 64);
+            for channel in 0..64 {
+                let got = actual[(y * 6 + x) * 64 + channel];
+                let want = expected[channel].as_f64().unwrap() as f32;
+                max_abs_error = max_abs_error.max((got - want).abs());
+            }
+        }
+        assert!(max_abs_error < 2e-4, "max abs error {max_abs_error}");
     }
 }
