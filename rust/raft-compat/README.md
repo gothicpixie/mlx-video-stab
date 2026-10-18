@@ -250,6 +250,14 @@ was larger than either effect. Peak RSS medians were 90.9 MiB separate and
 89.1 MiB batched. This does not justify changing the default or claiming a
 speed improvement; the small RSS difference needs sustained-run confirmation.
 
+For a stage breakdown, `--profile-stages 1` reports encoding plus zero-,
+one-, and full-iteration `flow_bidir_features` calls, each with independent
+warmups and evaluated outputs. At 360x640, five independent runs measured
+median feature encoding at 109.5 ms and the 24-iteration flow stage at 409.8
+ms; the estimated later-iteration increment was 16.6 ms. These include MLX
+launch/eval overhead and do not separate correlation lookup from the update
+core. Use this as a hotspot guide, not as an isolated kernel profile.
+
 The PyTorch run above used the upstream schedule that computes the mask on all
 24 iterations. `bench/bench_raft.py` now accepts an optional final
 `mask_schedule` argument (`every_iteration` or `final_only`). The latter

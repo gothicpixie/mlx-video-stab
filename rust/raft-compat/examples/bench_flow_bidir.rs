@@ -23,6 +23,11 @@
 //! compiled core, and `0` uses the direct `BasicUpdateBlock::core` reference. The selected mode is
 //! recorded in the JSON output.
 //!
+//! `--profile-stages 1` additionally profiles, with independent untimed warmups, feature encoding,
+//! zero-iteration flow, one-iteration flow, and the full configured-iteration flow. Flow stages use
+//! precomputed features via `flow_bidir_features`, so the full stage excludes encoding. The derived
+//! one-iteration and per-later-iteration increments are estimates, not pure kernel timings.
+//!
 //! The program prints one compact JSON line. Peak process RSS is deliberately
 //! not inferred here; wrap the executable with `/usr/bin/time -l` as shown.
 //! This is a measurement harness, not a production path.
@@ -31,7 +36,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use mlx_rs::Array;
-use mlxstab_raft_compat::Raft;
+use mlxstab_raft_compat::{FrameFeat, Raft};
 use sha2::{Digest, Sha256};
 
 const DEFAULT_CHECKPOINT: &str = "vendor/weights/conv/raft-things.safetensors";
@@ -48,6 +53,7 @@ struct Args {
     warmup: usize,
     compiled_update: bool,
     batched_encoding: bool,
+    profile_stages: bool,
 }
 
 impl Args {
@@ -63,6 +69,7 @@ impl Args {
             warmup: 1,
             compiled_update: true,
             batched_encoding: false,
+            profile_stages: false,
         };
         let mut argv = std::env::args().skip(1);
         while let Some(arg) = argv.next() {
@@ -82,12 +89,16 @@ impl Args {
                 "--batched-encoding" => {
                     args.batched_encoding = parse_bool01("--batched-encoding", &value()?)?
                 }
+                "--profile-stages" => {
+                    args.profile_stages = parse_bool01("--profile-stages", &value()?)?
+                }
                 "--help" | "-h" => {
                     println!(
                         "usage: bench_flow_bidir --first PATH --second PATH \
                          [--checkpoint PATH] [--height N] [--width N] \
                          [--iters N] [--reps N] [--warmup N] \
-                         [--compiled-update 0|1] [--batched-encoding 0|1]"
+                         [--compiled-update 0|1] [--batched-encoding 0|1] \
+                         [--profile-stages 0|1]"
                     );
                     std::process::exit(0);
                 }
@@ -105,6 +116,9 @@ impl Args {
         }
         if args.reps == 0 {
             return Err("reps must be at least 1".into());
+        }
+        if args.profile_stages && args.iters < 2 {
+            return Err("--profile-stages 1 requires --iters >= 2".into());
         }
         Ok(args)
     }
@@ -173,6 +187,157 @@ fn timed_once(
     Ok(started.elapsed().as_secs_f64())
 }
 
+fn encode_frames(
+    model: &mut Raft,
+    first: &Array,
+    second: &Array,
+) -> Result<(FrameFeat, FrameFeat), String> {
+    if model.batched_encoding() {
+        model.frame_features_pair(first, second)
+    } else {
+        Ok((model.frame_features(first)?, model.frame_features(second)?))
+    }
+}
+
+fn eval_frame_features(first: &FrameFeat, second: &FrameFeat) -> Result<(), String> {
+    mlx_rs::transforms::eval([
+        &first.fmap,
+        &first.net,
+        &first.inp,
+        &second.fmap,
+        &second.net,
+        &second.inp,
+    ])
+    .map_err(|e| e.to_string())
+}
+
+/// Encode and materialize both frames' features inside the clock.
+fn timed_encoding_once(model: &mut Raft, first: &Array, second: &Array) -> Result<f64, String> {
+    let started = Instant::now();
+    let (a, b) = encode_frames(model, first, second)?;
+    eval_frame_features(&a, &b)?;
+    Ok(started.elapsed().as_secs_f64())
+}
+
+/// Run one bidirectional flow stage from precomputed features and materialize all four outputs.
+fn timed_flow_features_once(
+    model: &mut Raft,
+    a: &FrameFeat,
+    b: &FrameFeat,
+    iters: usize,
+) -> Result<f64, String> {
+    let started = Instant::now();
+    let flow = model
+        .flow_bidir_features(a, b, iters)
+        .map_err(|e| e.to_string())?;
+    mlx_rs::transforms::eval([
+        &flow.low_forward,
+        &flow.up_forward,
+        &flow.low_backward,
+        &flow.up_backward,
+    ])
+    .map_err(|e| e.to_string())?;
+    Ok(started.elapsed().as_secs_f64())
+}
+
+fn stage_timing(warmup_s: &[f64], run_s: &[f64]) -> serde_json::Value {
+    serde_json::json!({
+        "warmup_s": warmup_s,
+        "run_s": run_s,
+        "summary_s": summary(run_s),
+    })
+}
+
+fn profile_stages(
+    model: &mut Raft,
+    first: &Array,
+    second: &Array,
+    args: &Args,
+) -> Result<serde_json::Value, String> {
+    let mut encoding_warmup_s = Vec::with_capacity(args.warmup);
+    for _ in 0..args.warmup {
+        encoding_warmup_s.push(timed_encoding_once(model, first, second)?);
+    }
+    let mut encoding_s = Vec::with_capacity(args.reps);
+    for _ in 0..args.reps {
+        encoding_s.push(timed_encoding_once(model, first, second)?);
+    }
+
+    // Flow stages start from one materialized feature pair, matching a caller that has already
+    // encoded its frames and then invokes flow_bidir_features.
+    let (a, b) = encode_frames(model, first, second)?;
+    eval_frame_features(&a, &b)?;
+
+    let mut zero_warmup_s = Vec::with_capacity(args.warmup);
+    for _ in 0..args.warmup {
+        zero_warmup_s.push(timed_flow_features_once(model, &a, &b, 0)?);
+    }
+    let mut zero_s = Vec::with_capacity(args.reps);
+    for _ in 0..args.reps {
+        zero_s.push(timed_flow_features_once(model, &a, &b, 0)?);
+    }
+
+    let mut one_warmup_s = Vec::with_capacity(args.warmup);
+    for _ in 0..args.warmup {
+        one_warmup_s.push(timed_flow_features_once(model, &a, &b, 1)?);
+    }
+    let mut one_s = Vec::with_capacity(args.reps);
+    for _ in 0..args.reps {
+        one_s.push(timed_flow_features_once(model, &a, &b, 1)?);
+    }
+
+    let mut full_warmup_s = Vec::with_capacity(args.warmup);
+    for _ in 0..args.warmup {
+        full_warmup_s.push(timed_flow_features_once(model, &a, &b, args.iters)?);
+    }
+    let mut full_s = Vec::with_capacity(args.reps);
+    for _ in 0..args.reps {
+        full_s.push(timed_flow_features_once(model, &a, &b, args.iters)?);
+    }
+
+    let zero_median = median(&zero_s);
+    let one_median = median(&one_s);
+    let full_median = median(&full_s);
+    let first_increment = one_median - zero_median;
+    let recurrent_increment = (full_median - one_median) / (args.iters - 1) as f64;
+
+    Ok(serde_json::json!({
+        "schema": "mlxstab.raft_compat.stage_profile/1",
+        "iters": args.iters,
+        "reps": args.reps,
+        "warmup": args.warmup,
+        "timing_scope": (
+            "median wall time per stage with all materialized outputs evaluated; each stage has \
+             its own untimed warmup. Feature encoding times frame_features/frame_features_pair; \
+             flow stages time flow_bidir_features on precomputed features only"
+        ),
+        "stages": {
+            "feature_encoding_s": stage_timing(&encoding_warmup_s, &encoding_s),
+            "zero_iter_flow_s": stage_timing(&zero_warmup_s, &zero_s),
+            "one_iter_flow_s": stage_timing(&one_warmup_s, &one_s),
+            "full_iter_flow_s": stage_timing(&full_warmup_s, &full_s),
+        },
+        "estimates": {
+            "first_correlation_update_incremental_s": {
+                "value": first_increment,
+                "formula": "median(one_iter_flow_s) - median(zero_iter_flow_s)",
+                "note": (
+                    "estimate of correlation construction/lookup plus the first update, not a \
+                     pure kernel timing; includes stage-level launch and eval overhead"
+                ),
+            },
+            "recurrent_incremental_per_later_iter_s": {
+                "value": recurrent_increment,
+                "formula": "(median(full_iter_flow_s) - median(one_iter_flow_s)) / (iters - 1)",
+                "note": (
+                    "derived amortized estimate for later iterations, not a pure per-kernel \
+                     timing; includes per-iteration launch, lookup, update, and eval overhead"
+                ),
+            },
+        },
+    }))
+}
+
 fn median(values: &[f64]) -> f64 {
     let mut sorted = values.to_vec();
     sorted.sort_by(f64::total_cmp);
@@ -224,7 +389,13 @@ fn run() -> Result<(), String> {
         run_s.push(timed_once(&mut model, &first, &second, args.iters)?);
     }
 
-    let payload = serde_json::json!({
+    let stage_profile = if args.profile_stages {
+        Some(profile_stages(&mut model, &first, &second, &args)?)
+    } else {
+        None
+    };
+
+    let mut payload = serde_json::json!({
         "schema": "mlxstab.raft_compat.bench_flow_bidir/1",
         "backend": "rust-mlx",
         "mode": "bidir",
@@ -295,6 +466,9 @@ fn run() -> Result<(), String> {
         ),
         "argv": std::env::args().collect::<Vec<_>>(),
     });
+    if let Some(stage_profile) = stage_profile {
+        payload["stage_profile"] = stage_profile;
+    }
     println!(
         "{}",
         serde_json::to_string(&payload).map_err(|e| e.to_string())?

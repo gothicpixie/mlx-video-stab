@@ -4667,3 +4667,29 @@ effect and the combined median went the other way. Median process peak RSS was 9
 batched, a small decrease that is not yet evidence of a sustained-memory advantage. Keep batching opt-in and
 the separate path as default. The next Rust speed action is to profile encoder, correlation construction,
 and refinement separately before attempting another fusion.
+
+### E20 follow-up (2026-10-18): Rust stage profile
+
+Added opt-in `--profile-stages 1` to the release harness. It separately times and evaluates frame-feature
+encoding and `flow_bidir_features` at 0, 1 and the configured iteration count. The zero-iteration call is the
+mask/upsample baseline; differences involving it are labeled estimates because MLX execution, graph scheduling
+and eval overhead are included. Normal benchmark JSON remains unchanged when profiling is off. CodeGraph
+reports no linked test files; formatting, all **18 Rust tests**, strict clippy and release build pass.
+
+Five independent release-process profiles at 360x640 (compiled update, separate encoders, 24 iterations, one
+warmup and five repetitions per stage) produced these medians-of-process-medians:
+
+| stage | median |
+|---|---:|
+| two-frame feature encoding | 109.54 ms |
+| zero-iteration mask/upsample baseline | 4.69 ms |
+| one-iteration flow | 27.56 ms |
+| 24-iteration flow from precomputed features | 409.76 ms |
+| full `flow_bidir` call including encoding | 518.67 ms |
+
+The estimated first correlation/update increment is **22.88 ms**; estimated later iterations average
+**16.62 ms** each, including lookup, recurrent core and eval overhead. Feature encoding plus full flow stage
+totals 519.30 ms, closely matching the full-call median. This identifies the recurrent flow stage as the
+largest optimization target; it does not yet split correlation lookup from the compiled update core. The next
+experiment is an opt-in fp16 update path, with fixture and output-error gates, to test whether it reduces that
+dominant stage without changing coordinates or correlation storage precision.
