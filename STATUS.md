@@ -4578,3 +4578,26 @@ tests passed**, including the 1/24-iteration flow fixture. But the 360x640 Rust 
 to 0.544 s** (seven calls), about 11% slower. The paired kernel and API were removed. The extra per-thread
 direction branch and combined scheduling cost more than the dispatches they saved on this workload. Keep the
 single-direction cached kernel; investigate update-path graph execution next.
+
+### E20 follow-up (2026-10-18): compiled update-block core
+
+Added an optional cached MLX `compile_with_state` path around `BasicUpdateBlock::core`, defaulting to
+compiled execution to match Python MLX's compiled update core. The update block projects its convolution
+parameters as mutable module state; `net`, `inp`, correlation and flow remain explicit runtime inputs rather
+than captured arrays. The benchmark now selects either compiled or direct mode with `--compiled-update 1|0`
+and reports that choice in its JSON. The direct path remains available as the parity reference.
+
+Both paths pass the checked-in 1- and 24-iteration bidirectional Python fixtures. The direct one-iteration
+outputs remain exact. Compiled execution introduces a small fusion/operation-order difference (about
+`2.7e-4` px in the one-iteration full-resolution output), so that case now uses a `1e-3` px tolerance; the
+24-iteration fixture remains under the existing `5e-3` px gate. A separate core-level fixture comparison
+also passes at `1e-5`. All **18 Rust tests pass**, with formatting, strict clippy and `git diff --check` clean.
+
+For five alternating fresh-process pairs at 360x640, each with one warmup and seven measured 24-iteration
+calls, compiled mode was faster in every pair. The median of process medians was **0.51246 s compiled** and
+**0.53594 s direct** (4.4% lower latency); median process peak RSS was **90.5 MiB compiled** and **90.3 MiB
+direct**, effectively unchanged. These are noisy single-host measurements and do not establish a broad win.
+Python MLX and PyTorch were not rerun in this experiment. Against their last recorded results, Rust's
+cross-backend standing therefore remains unsettled; in particular this experiment does not establish that
+Rust beats PyTorch overall. Continue with exact MLX version pairing, more input sizes and longer repeats,
+then address full-model parity, warm starts, cancellation/recovery and video-level quality.

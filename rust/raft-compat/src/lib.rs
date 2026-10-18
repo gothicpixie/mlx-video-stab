@@ -3,18 +3,21 @@
 //! The crate now covers the checkpoint-backed encoders, correlation pyramid,
 //! update block, and a bidirectional flow loop. It remains a correctness
 //! prototype: correlation lookup runs as a cached MLX Metal kernel on-device,
-//! and the update block is not compiled. The API and numerical behavior mirror
-//! Python's `RAFT.frame_features` / `RAFT.flow_bidir` so outputs can be compared
-//! directly; compilation and performance work are still outstanding.
+//! and the update-block core runs through a cached compiled step by default.
+//! The API and numerical behavior mirror Python's `RAFT.frame_features` /
+//! `RAFT.flow_bidir` so outputs can be compared directly; performance work is
+//! still outstanding.
 
 use std::cell::RefCell;
 use std::ffi::{CString, c_char};
 use std::sync::Once;
 
+use mlx_rs::error::Exception;
 use mlx_rs::module::Module;
 use mlx_rs::nn::{BatchNorm, Conv2d, relu, sigmoid};
 use mlx_rs::ops::indexing::IndexOp;
 use mlx_rs::ops::{concatenate, einsum, pad, softmax_axis, stack, tanh};
+use mlx_rs::transforms::compile::compile_with_state;
 use mlx_rs::{Array, Dtype, Stream};
 use mlx_sys as sys;
 
@@ -927,12 +930,16 @@ pub struct BidirectionalFlow {
 ///
 /// The bidirectional loop mirrors `mlxstab.raft.model.RAFT`: features are encoded once per frame, the
 /// forward and backward correlation pyramids are kept separate, and both directions share one
-/// batch-2 update-block call per iteration. Coordinate and flow updates stay float32. This is an
-/// uncompiled host-lookup compatibility reference; it is not a production inference path.
+/// batch-2 update-block call per iteration. Coordinate and flow updates stay float32. By default the
+/// update-block core runs through one cached `compile_with_state` step whose state is the mutable
+/// update block, so no model `Array` is captured by the compiled closure. `set_compiled_update(false)`
+/// selects the direct `BasicUpdateBlock::core` reference path instead.
 #[derive(Debug)]
 pub struct Raft {
     pub encoders: RaftEncoders,
     pub update_block: BasicUpdateBlock,
+    compiled_update: bool,
+    compiled_core: Option<CompiledCore>,
 }
 
 impl Raft {
@@ -947,7 +954,22 @@ impl Raft {
         Ok(Self {
             encoders: RaftEncoders::from_params(params)?,
             update_block: BasicUpdateBlock::load(params)?,
+            compiled_update: true,
+            compiled_core: None,
         })
+    }
+
+    /// Select the update-block core used by `flow_bidir` and `flow_bidir_features`.
+    ///
+    /// `true` (the default) runs the cached compiled core, matching Python's `mx.compile` path.
+    /// `false` calls `BasicUpdateBlock::core` directly as the uncompiled reference.
+    pub fn set_compiled_update(&mut self, compiled: bool) {
+        self.compiled_update = compiled;
+    }
+
+    /// Return the update-block core mode selected by `set_compiled_update`.
+    pub fn compiled_update(&self) -> bool {
+        self.compiled_update
     }
 
     /// Encode one `[1,H,W,3]` 0..255 image into fnet/cnet features.
@@ -985,7 +1007,7 @@ impl Raft {
     ///
     /// Both features must come from `frame_features` on the same feature grid. The forward pyramid is
     /// `a @ b^T`, the backward pyramid is `b @ a^T`, and each iteration looks up both directions before
-    /// running one batch-2 update-block core step.
+    /// running one batch-2 update-block core step in the mode selected by `set_compiled_update`.
     pub fn flow_bidir_features(
         &mut self,
         a: &FrameFeat,
@@ -1052,7 +1074,12 @@ impl Raft {
             let corr =
                 concatenate(&[&forward_corr, &backward_corr], 0).map_err(|e| e.to_string())?;
             let flow = c1.subtract(&c0).map_err(|e| e.to_string())?;
-            let core = self.update_block.core(&net, &inp, &corr, &flow)?;
+            let core = if self.compiled_update {
+                let compiled_core = self.compiled_core.get_or_insert_with(CompiledCore::new);
+                compiled_core.core(&mut self.update_block, &net, &inp, &corr, &flow)?
+            } else {
+                self.update_block.core(&net, &inp, &corr, &flow)?
+            };
             net = core.net;
             c1 = c1.add(&core.delta).map_err(|e| e.to_string())?;
         }
@@ -1182,12 +1209,17 @@ pub const RAFT_CORR_RADIUS: usize = 4;
 pub const RAFT_MASK_CHANNELS: i32 = 576;
 
 /// The correlation/flow feature encoder inside the RAFT update block.
-#[derive(Debug)]
+#[derive(Debug, mlx_rs::macros::ModuleParameters)]
 pub struct MotionEncoder {
+    #[param]
     convc1: Conv2d,
+    #[param]
     convc2: Conv2d,
+    #[param]
     convf1: Conv2d,
+    #[param]
     convf2: Conv2d,
+    #[param]
     conv: Conv2d,
 }
 
@@ -1229,13 +1261,19 @@ impl MotionEncoder {
 }
 
 /// RAFT's separable convolution GRU: one horizontal pass followed by one vertical pass.
-#[derive(Debug)]
+#[derive(Debug, mlx_rs::macros::ModuleParameters)]
 pub struct SepConvGRU {
+    #[param]
     convz1: Conv2d,
+    #[param]
     convr1: Conv2d,
+    #[param]
     convq1: Conv2d,
+    #[param]
     convz2: Conv2d,
+    #[param]
     convr2: Conv2d,
+    #[param]
     convq2: Conv2d,
 }
 
@@ -1326,9 +1364,11 @@ fn sep_gru_step(
 }
 
 /// Two-layer 3x3 flow head producing the per-iteration flow delta.
-#[derive(Debug)]
+#[derive(Debug, mlx_rs::macros::ModuleParameters)]
 pub struct FlowHead {
+    #[param]
     conv1: Conv2d,
+    #[param]
     conv2: Conv2d,
 }
 
@@ -1355,9 +1395,11 @@ impl FlowHead {
 }
 
 /// Convex-upsampling mask head: 3x3 convolution, ReLU, then a 1x1 576-channel projection scaled by 0.25.
-#[derive(Debug)]
+#[derive(Debug, mlx_rs::macros::ModuleParameters)]
 pub struct MaskHead {
+    #[param]
     conv1: Conv2d,
+    #[param]
     conv2: Conv2d,
 }
 
@@ -1397,11 +1439,18 @@ pub struct UpdateBlockOutput {
 }
 
 /// Checkpoint-backed RAFT `BasicUpdateBlock` for the production 4-level, radius-4 correlation pyramid.
-#[derive(Debug)]
+///
+/// Its `ModuleParameters` projection is the compile state: exactly the update-block convolution
+/// weights and biases, with no runtime tensors.
+#[derive(Debug, mlx_rs::macros::ModuleParameters)]
 pub struct BasicUpdateBlock {
+    #[param]
     pub encoder: MotionEncoder,
+    #[param]
     pub gru: SepConvGRU,
+    #[param]
     pub flow_head: FlowHead,
+    #[param]
     pub mask: MaskHead,
 }
 
@@ -1469,6 +1518,66 @@ impl BasicUpdateBlock {
             delta: core.delta,
             mask,
         })
+    }
+}
+
+type CompiledCoreFn =
+    Box<dyn for<'a> FnMut(&mut BasicUpdateBlock, &'a [Array]) -> Result<Vec<Array>, Exception>>;
+
+/// One cached `compile_with_state` update-block core step.
+///
+/// The compiled closure captures no model arrays. Every runtime tensor is a call input: net, inp,
+/// corr and flow. The update block is passed as mutable compile state, so MLX supplies its
+/// convolution weights and biases as graph inputs instead of treating captured arrays as constants.
+struct CompiledCore {
+    run: CompiledCoreFn,
+}
+
+impl std::fmt::Debug for CompiledCore {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("CompiledCore")
+    }
+}
+
+impl CompiledCore {
+    fn new() -> Self {
+        let run = compile_with_state(
+            |state: &mut BasicUpdateBlock, args: &[Array]| -> Result<Vec<Array>, Exception> {
+                if args.len() != 4 {
+                    return Err(Exception::custom(format!(
+                        "compiled update-block core expects 4 inputs (net, inp, corr, flow), got {}",
+                        args.len()
+                    )));
+                }
+                let core = state
+                    .core(&args[0], &args[1], &args[2], &args[3])
+                    .map_err(|error| Exception::custom(error))?;
+                Ok(vec![core.net, core.delta])
+            },
+            None,
+        );
+        Self { run: Box::new(run) }
+    }
+
+    fn core(
+        &mut self,
+        state: &mut BasicUpdateBlock,
+        net: &Array,
+        inp: &Array,
+        corr: &Array,
+        flow: &Array,
+    ) -> Result<CoreOutput, String> {
+        let inputs = [net.clone(), inp.clone(), corr.clone(), flow.clone()];
+        let mut outputs = (self.run)(state, &inputs).map_err(|error| error.to_string())?;
+        if outputs.len() != 2 {
+            return Err(format!(
+                "compiled update-block core returned {} outputs, expected 2",
+                outputs.len()
+            ));
+        }
+        let delta = outputs.pop().expect("checked output count");
+        let net = outputs.pop().expect("checked output count");
+        Ok(CoreOutput { net, delta })
     }
 }
 
@@ -2056,6 +2165,41 @@ mod tests {
     }
 
     #[test]
+    fn compiled_core_matches_direct_core() {
+        let checkpoint = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vendor/weights/conv/raft-things.safetensors");
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/update_block_reference.json"
+        ))
+        .unwrap();
+        let inputs = &fixture["inputs"];
+        let net = json_f32(&inputs["net"], &json_shape(&inputs["net_shape"]));
+        let inp = json_f32(&inputs["inp"], &json_shape(&inputs["inp_shape"]));
+        let corr = json_f32(&inputs["corr"], &json_shape(&inputs["corr_shape"]));
+        let flow = json_f32(&inputs["flow"], &json_shape(&inputs["flow_shape"]));
+
+        let mut block = BasicUpdateBlock::load_checkpoint(&checkpoint).unwrap();
+        let direct = block.core(&net, &inp, &corr, &flow).unwrap();
+        let mut compiled = CompiledCore::new();
+        let compiled = compiled.core(&mut block, &net, &inp, &corr, &flow).unwrap();
+
+        // A missing state projection would surface as an MLX compile error or as
+        // captured-weight behavior rather than these matching outputs.
+        let tolerance = 1e-5f32;
+        for (label, actual, expected) in [
+            ("net", &compiled.net, &direct.net),
+            ("delta", &compiled.delta, &direct.delta),
+        ] {
+            let error = max_abs_error(actual, expected);
+            println!("compiled vs direct core {label}: max abs error {error:e}");
+            assert!(
+                error < tolerance,
+                "compiled vs direct core {label} max abs error {error} exceeds {tolerance}"
+            );
+        }
+    }
+
+    #[test]
     fn flow_bidir_matches_python_mlx_fixture() {
         let checkpoint = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../vendor/weights/conv/raft-things.safetensors");
@@ -2092,47 +2236,76 @@ mod tests {
         let cases = fixture["cases"].as_array().unwrap();
         assert_eq!(cases.len(), verified_iters.len());
         let mut model = Raft::load(checkpoint).unwrap();
+        assert!(
+            model.compiled_update(),
+            "compiled update must default to true"
+        );
         for (case, expected_iters) in cases.iter().zip(&verified_iters) {
             let iters = case["iters"].as_u64().unwrap();
             assert_eq!(iters, *expected_iters);
-            let flow = model.flow_bidir(&first, &second, iters as usize).unwrap();
+            model.set_compiled_update(true);
+            let compiled = model.flow_bidir(&first, &second, iters as usize).unwrap();
+            model.set_compiled_update(false);
+            assert!(!model.compiled_update());
+            let direct = model.flow_bidir(&first, &second, iters as usize).unwrap();
 
-            for (label, shape_key, actual, expected) in [
+            for (label, shape_key, compiled_output, direct_output, expected) in [
                 (
                     "low forward",
                     "low_forward_shape",
-                    &flow.low_forward,
+                    &compiled.low_forward,
+                    &direct.low_forward,
                     &case["low_forward"],
                 ),
                 (
                     "full forward",
                     "up_forward_shape",
-                    &flow.up_forward,
+                    &compiled.up_forward,
+                    &direct.up_forward,
                     &case["up_forward"],
                 ),
                 (
                     "low backward",
                     "low_backward_shape",
-                    &flow.low_backward,
+                    &compiled.low_backward,
+                    &direct.low_backward,
                     &case["low_backward"],
                 ),
                 (
                     "full backward",
                     "up_backward_shape",
-                    &flow.up_backward,
+                    &compiled.up_backward,
+                    &direct.up_backward,
                     &case["up_backward"],
                 ),
             ] {
                 let expected = json_f32(expected, &json_shape(&case[shape_key]));
-                let error = max_abs_error(actual, &expected);
-                println!("flow_bidir {iters} iters {label}: max abs error {error:e}");
-                // The 1-iteration case is the original regression and stays exact.
+                // The 1-iteration direct case is the original regression and stays
+                // exact. The compiled graph fuses/reorders operations, so its 1-iteration
+                // full-resolution output differs by ~2.7e-4 px after convex upsampling.
                 // At 24 iterations small per-step differences accumulate; the observed
-                // worst output is under 3e-3 px while the one-iteration case is zero.
-                let tolerance = if iters == 1 { 1e-4 } else { 5e-3 };
+                // worst output is under 3e-3 px for both paths.
+                let (direct_tolerance, compiled_tolerance) = if iters == 1 {
+                    (1e-4, 1e-3)
+                } else {
+                    (5e-3, 5e-3)
+                };
+                let compiled_error = max_abs_error(compiled_output, &expected);
+                let direct_error = max_abs_error(direct_output, &expected);
+                let split_error = max_abs_error(compiled_output, direct_output);
+                println!(
+                    "flow_bidir {iters} iters {label}: compiled error {compiled_error:e}, \
+                     direct error {direct_error:e}, compiled vs direct {split_error:e}"
+                );
                 assert!(
-                    error < tolerance,
-                    "flow_bidir {iters} iters {label} max abs error {error} exceeds {tolerance}"
+                    compiled_error < compiled_tolerance,
+                    "compiled flow_bidir {iters} iters {label} max abs error {compiled_error} \
+                     exceeds {compiled_tolerance}"
+                );
+                assert!(
+                    direct_error < direct_tolerance,
+                    "direct flow_bidir {iters} iters {label} max abs error {direct_error} \
+                     exceeds {direct_tolerance}"
                 );
             }
         }

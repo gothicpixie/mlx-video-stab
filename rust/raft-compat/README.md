@@ -29,8 +29,11 @@ can share one batch-2 update, matching Python's `_iterate`.
 - `Raft::flow_bidir` / `flow_bidir_features` build separate forward and backward
   correlation pyramids, initialize one shared XY coordinate grid, then for each
   of `iters` iterations look up both directions, run one batch-2
-  `update_block.core`, and add the float32 delta to the coordinates. The final
-  mask head runs once and both directions are convex-upsampled by 8x.
+  `update_block.core`, and add the float32 delta to the coordinates. By default
+  this core runs through a cached `compile_with_state` function;
+  `Raft::set_compiled_update(false)` selects the direct core for reference and
+  comparison. The final mask head runs once and both directions are
+  convex-upsampled by 8x.
 
 Inputs must be positive multiples of 8 in height and width. The 64x64 fixture
 uses an 8x8 feature grid, so all four correlation levels remain non-empty.
@@ -83,9 +86,11 @@ Regenerate them with:
 
 Correlation lookup runs through a cached MLX Metal kernel, with a narrow
 `mlx-sys` FFI wrapper; correlation and coordinates stay on-device. `CorrBlock`
-construction and pooling use ordinary MLX operations. The bidirectional loop
-and update block are still uncompiled, so this remains a parity spike rather
-than a production inference path:
+construction and pooling use ordinary MLX operations. The recurrent update
+core is compiled with `compile_with_state`; its weights are projected as
+mutable module state, and net/context/correlation/flow are explicit inputs.
+The surrounding bidirectional loop is still eager, so this remains a parity
+spike rather than a production inference path:
 
 - The fixture covers 1 and 24 shared iterations in fp32; 24 matches the
   production Python stabilization path. The loop accepts any iteration count,
@@ -93,7 +98,10 @@ than a production inference path:
   construction but not separately tested.
 - Initial flow (`init_f`/`init_b` in Python) is not exposed; both directions
   start from zero flow.
-- fp16 encoder/correlation variants and the Python compile path are not ported.
+- fp16 encoder/correlation variants are not ported. Compiled update outputs can
+  differ slightly from the direct and Python paths due to graph fusion and
+  operation ordering; the checked-in fixture covers only fp32 at 1 and 24
+  iterations.
 - Synchronization, cancellation, error recovery, and sustained-memory behavior
   still need measurement. Exact MLX version pairing remains open:
   `mlx-rs` 0.32.0 targets MLX 0.32.2 while this checkout's Python environment
@@ -160,7 +168,7 @@ grep 'maximum resident set size' out/raft-bench/*.time.txt
 ```
 
 The Rust path here is the current compatibility prototype (device-side
-correlation lookup, uncompiled update block), not a production runtime. The
+correlation lookup, compiled update-block core by default), not a production runtime. The
 PyTorch reference computes the upsampling mask on every iteration while the
 MLX paths compute it once; the harness therefore measures each implementation
 as it currently exists, not an identical graph. Keep the generated inputs and
@@ -195,9 +203,18 @@ calls per backend:
 Rust is 8% slower than Python MLX and 15% faster than PyTorch MPS in this run.
 Compared with its pre-kernel 0.707 s baseline, Rust is 31% faster and uses
 144 MB less process peak RSS. These short measurements support the targeted
-optimization, but do not establish a general speed or memory win; the
-uncompiled update block remains in the critical path, and process RSS does not
-report accelerator allocations.
+optimization, but do not establish a general speed or memory win; process RSS
+does not report accelerator allocations.
+
+The benchmark accepts `--compiled-update 1` (default) or `--compiled-update 0`
+to select the cached compiled update core or the direct reference core. Both
+are checked against the Python fixture. On 2026-10-18, five alternating pairs
+of fresh Rust processes at 360x640, with one warmup and seven measured
+24-iteration calls each, had median-of-process-medians **0.512 s compiled**
+and **0.536 s direct**; compiled was faster in all five pairs. Median process
+peak RSS was 90.5 MiB compiled and 90.3 MiB direct. Treat this as a modest
+single-host result, not a general win. Python MLX and PyTorch were not rerun in
+this experiment, so it does not change the cross-backend comparison above.
 
 Run on Apple Silicon with Rust and Xcode installed:
 
@@ -207,11 +224,13 @@ cargo test --manifest-path rust/raft-compat/Cargo.toml
 
 `mlx-rs` 0.32.0 currently targets MLX 0.32.2; the Python environment in this
 checkout has MLX 0.32.3. Encoder, update-block, and bidirectional fixture
-outputs at 1 and 24 iterations match on this setup: max absolute error is zero
-for all four 1-iteration outputs, while the 24-iteration errors are
+outputs at 1 and 24 iterations match on this setup. Direct mode has zero max
+absolute error for all four 1-iteration outputs; its 24-iteration errors are
 `1.09e-4` (low forward), `7.04e-4` (full forward), `8.91e-4` (low backward)
-and `2.89e-3` (full backward) pixels. That is not full-model parity across
-versions or iteration counts. E20 still requires an exact version pairing,
+and `2.89e-3` (full backward) pixels. Compiled mode also passes the fixture,
+using a `1e-3` pixel tolerance for one iteration because fusion shifts the
+full-resolution result by about `2.7e-4` pixels. That is not full-model parity
+across versions or iteration counts. E20 still requires an exact version pairing,
 strict validation of the complete RAFT parameter schema, comparisons at
 iteration counts beyond 1 and 24, cancellation/error-recovery tests, and
 repeated end-to-end runtime and memory measurements before any migration

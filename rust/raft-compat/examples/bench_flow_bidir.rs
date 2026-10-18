@@ -15,8 +15,13 @@
 //!     --first out/raft-bench/pair-256x320/first.f32 \
 //!     --second out/raft-bench/pair-256x320/second.f32 \
 //!     --checkpoint vendor/weights/conv/raft-things.safetensors \
-//!     --height 256 --width 320 --iters 24 --reps 5 --warmup 1
+//!     --height 256 --width 320 --iters 24 --reps 5 --warmup 1 \
+//!     --compiled-update 1
 //! ```
+//!
+//! `--compiled-update` selects the update-block core mode: `1` (the default) uses the cached
+//! compiled core, and `0` uses the direct `BasicUpdateBlock::core` reference. The selected mode is
+//! recorded in the JSON output.
 //!
 //! The program prints one compact JSON line. Peak process RSS is deliberately
 //! not inferred here; wrap the executable with `/usr/bin/time -l` as shown.
@@ -41,6 +46,7 @@ struct Args {
     iters: usize,
     reps: usize,
     warmup: usize,
+    compiled_update: bool,
 }
 
 impl Args {
@@ -54,6 +60,7 @@ impl Args {
             iters: 24,
             reps: 5,
             warmup: 1,
+            compiled_update: true,
         };
         let mut argv = std::env::args().skip(1);
         while let Some(arg) = argv.next() {
@@ -67,11 +74,15 @@ impl Args {
                 "--iters" => args.iters = parse_usize("--iters", &value()?)?,
                 "--reps" => args.reps = parse_usize("--reps", &value()?)?,
                 "--warmup" => args.warmup = parse_usize("--warmup", &value()?)?,
+                "--compiled-update" => {
+                    args.compiled_update = parse_bool01("--compiled-update", &value()?)?
+                }
                 "--help" | "-h" => {
                     println!(
                         "usage: bench_flow_bidir --first PATH --second PATH \
                          [--checkpoint PATH] [--height N] [--width N] \
-                         [--iters N] [--reps N] [--warmup N]"
+                         [--iters N] [--reps N] [--warmup N] \
+                         [--compiled-update 0|1]"
                     );
                     std::process::exit(0);
                 }
@@ -97,6 +108,14 @@ impl Args {
 fn parse_usize(flag: &str, text: &str) -> Result<usize, String> {
     text.parse::<usize>()
         .map_err(|e| format!("{flag}: invalid integer {text:?}: {e}"))
+}
+
+fn parse_bool01(flag: &str, text: &str) -> Result<bool, String> {
+    match text {
+        "0" => Ok(false),
+        "1" => Ok(true),
+        _ => Err(format!("{flag}: expected 0 or 1, got {text:?}")),
+    }
 }
 
 fn sha256_file(path: &Path) -> Result<(String, u64), String> {
@@ -187,6 +206,7 @@ fn run() -> Result<(), String> {
     // Model construction and checkpoint loading are outside both warmup and
     // measured timing, matching bench_raft.py's placement.
     let mut model = Raft::load(&args.checkpoint)?;
+    model.set_compiled_update(args.compiled_update);
 
     let mut warmup_s = Vec::with_capacity(args.warmup);
     for _ in 0..args.warmup {
@@ -240,7 +260,12 @@ fn run() -> Result<(), String> {
             "target_os": std::env::consts::OS,
         },
         "compile": {
-            "update_block_compiled": false,
+            "update_block_compiled": model.compiled_update(),
+            "update_block_mode": if model.compiled_update() {
+                "compiled"
+            } else {
+                "direct"
+            },
             "correlation_lookup": "cached MLX Metal kernel",
         },
         "timing_scope": (
