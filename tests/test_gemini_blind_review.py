@@ -155,6 +155,23 @@ def test_build_request_is_only_video_bytes_and_fixed_brief():
         assert token not in G.REVIEW_BRIEF
 
 
+def test_brief_limits_are_truthful_for_all_comparison_clips():
+    brief = G.REVIEW_BRIEF
+    # The brief must not claim a restriction that full-render comparison clips do not share.
+    assert "translation-only" not in brief.lower()
+    assert "short, low-resolution comparison renders" in brief
+    # The visual dimensions the reviewer is asked to judge remain named.
+    for dimension in ["residual shake or jitter", "unwanted drift or float", "distortion or warping",
+                      "crop or border changes", "detail preservation"]:
+        assert dimension in brief
+    # Instruction changes must invalidate cached judgments from the prior prompt version.
+    assert G.PROMPT_VERSION != "mlxstab.gemini_blind_review.prompt/1"
+    # The fixed brief still names no method, filename or path.
+    for token in ["multiscale", "l1", "raw", "stabilized", "baseline", "candidate",
+                  "pair_", ".mp4", "blind_mapping", "left_panel", "right_panel"]:
+        assert token not in brief
+
+
 def test_request_never_carries_hidden_metadata(tmp_path):
     review_path, document = _write_review(tmp_path / "r", pairs=1)
     captured = {}
@@ -526,7 +543,7 @@ def test_run_review_set_resume_invalidates_on_prompt_schema_and_model(tmp_path, 
     G.run_review_set([review_path], out, token="tok", opener=opener, sleep=lambda _s: None)
     assert opener.calls == 1
 
-    monkeypatch.setattr(G, "PROMPT_VERSION", "mlxstab.gemini_blind_review.prompt/2")
+    monkeypatch.setattr(G, "PROMPT_VERSION", "mlxstab.gemini_blind_review.prompt/3")
     bumped = _SequenceOpener([_vertex_response(_vertex_judgment())])
     G.run_review_set([review_path], out, token="tok", opener=bumped, sleep=lambda _s: None)
     assert bumped.calls == 1

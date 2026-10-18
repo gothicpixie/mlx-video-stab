@@ -65,7 +65,7 @@ PROJECT = "phx-ai-billing"
 LOCATION = "global"
 MODEL = "gemini-3.8-flash"
 
-PROMPT_VERSION = "mlxstab.gemini_blind_review.prompt/1"
+PROMPT_VERSION = "mlxstab.gemini_blind_review.prompt/2"
 RESPONSE_SCHEMA_VERSION = "mlxstab.gemini_blind_review.response/1"
 
 VIDEO_MIME = "video/mp4"
@@ -100,7 +100,7 @@ NO_QUALITY_SCORE_NOTE = (
 
 #: The only instructions and context the reviewer receives, alongside the video bytes. It is fixed: it never
 #: varies with the clip and it names no method, filename, path, hash, window, run or candidate.
-REVIEW_BRIEF = """You are a careful independent visual reviewer comparing two video stabilization results. Each attached video is a single 2-panel blind A/B comparison. The panels show the same source frames synchronized side by side, with A on the left and B on the right. Judge only visible motion stability and image integrity: residual shake or jitter, unwanted drift or float, distortion or warping, crop or border changes, and detail preservation. Do not infer which method or settings produced either panel, and do not guess details you cannot see. If the difference is not clearly visible, answer tie. For each clip return a concise structured judgment: which side appears steadier (A, B, or tie), your confidence (low, medium, or high), the concrete visible evidence for the call or an explicit statement that no reliable difference is visible, any apparent artifacts, and the limitations of your judgment. These are short, low-resolution, translation-only research renders; account for that limit. Never declare an overall method winner."""
+REVIEW_BRIEF = """You are a careful independent visual reviewer comparing two video stabilization results. Each attached video is a single 2-panel blind A/B comparison. The panels show the same source frames synchronized side by side, with A on the left and B on the right. Judge only visible motion stability and image integrity: residual shake or jitter, unwanted drift or float, distortion or warping, crop or border changes, and detail preservation. Do not infer which method or settings produced either panel, and do not guess details you cannot see. If the difference is not clearly visible, answer tie. For each clip return a concise structured judgment: which side appears steadier (A, B, or tie), your confidence (low, medium, or high), the concrete visible evidence for the call or an explicit statement that no reliable difference is visible, any apparent artifacts, and the limitations of your judgment. These are short, low-resolution comparison renders; judge only differences clearly visible at this scale and account for that limitation. Never declare an overall method winner."""
 
 #: Vertex structured-output schema for one clip judgment.
 GEMINI_RESPONSE_SCHEMA = {
