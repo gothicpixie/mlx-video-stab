@@ -36,6 +36,7 @@ use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use mlx_rs::Array;
+use mlx_rs::Dtype;
 use mlxstab_raft_compat::{FrameFeat, Raft};
 use sha2::{Digest, Sha256};
 
@@ -52,6 +53,7 @@ struct Args {
     reps: usize,
     warmup: usize,
     compiled_update: bool,
+    update_dtype: Dtype,
     batched_encoding: bool,
     profile_stages: bool,
 }
@@ -68,6 +70,7 @@ impl Args {
             reps: 5,
             warmup: 1,
             compiled_update: true,
+            update_dtype: Dtype::Float32,
             batched_encoding: false,
             profile_stages: false,
         };
@@ -86,6 +89,7 @@ impl Args {
                 "--compiled-update" => {
                     args.compiled_update = parse_bool01("--compiled-update", &value()?)?
                 }
+                "--update-dtype" => args.update_dtype = parse_update_dtype(&value()?)?,
                 "--batched-encoding" => {
                     args.batched_encoding = parse_bool01("--batched-encoding", &value()?)?
                 }
@@ -97,7 +101,8 @@ impl Args {
                         "usage: bench_flow_bidir --first PATH --second PATH \
                          [--checkpoint PATH] [--height N] [--width N] \
                          [--iters N] [--reps N] [--warmup N] \
-                         [--compiled-update 0|1] [--batched-encoding 0|1] \
+                         [--compiled-update 0|1] [--update-dtype fp32|fp16] \
+                         [--batched-encoding 0|1] \
                          [--profile-stages 0|1]"
                     );
                     std::process::exit(0);
@@ -134,6 +139,24 @@ fn parse_bool01(flag: &str, text: &str) -> Result<bool, String> {
         "0" => Ok(false),
         "1" => Ok(true),
         _ => Err(format!("{flag}: expected 0 or 1, got {text:?}")),
+    }
+}
+
+fn parse_update_dtype(text: &str) -> Result<Dtype, String> {
+    match text {
+        "fp32" | "float32" => Ok(Dtype::Float32),
+        "fp16" | "float16" => Ok(Dtype::Float16),
+        _ => Err(format!(
+            "--update-dtype: expected fp32 or fp16, got {text:?}"
+        )),
+    }
+}
+
+fn dtype_name(dtype: Dtype) -> &'static str {
+    match dtype {
+        Dtype::Float16 => "fp16",
+        Dtype::Float32 => "fp32",
+        other => panic!("unexpected update dtype {other:?}"),
     }
 }
 
@@ -376,6 +399,7 @@ fn run() -> Result<(), String> {
     // Model construction and checkpoint loading are outside both warmup and
     // measured timing, matching bench_raft.py's placement.
     let mut model = Raft::load(&args.checkpoint)?;
+    model.set_update_dtype(args.update_dtype)?;
     model.set_compiled_update(args.compiled_update);
     model.set_batched_encoding(args.batched_encoding);
 
@@ -405,10 +429,15 @@ fn run() -> Result<(), String> {
         "iters": args.iters,
         "reps": args.reps,
         "warmup": args.warmup,
+        "update_dtype": dtype_name(model.update_dtype()),
         "precision": {
-            "network": "float32",
+            "encoders": "float32",
+            "feature_maps": "float32",
             "correlation": "float32",
             "coordinates": "float32",
+            "flow_accumulator": "float32",
+            "returned_flow": "float32",
+            "update_block": dtype_name(model.update_dtype()),
         },
         "correlation": {"levels": 4, "radius": 4},
         "images": {

@@ -13,7 +13,7 @@ use std::ffi::{CString, c_char};
 use std::sync::Once;
 
 use mlx_rs::error::Exception;
-use mlx_rs::module::Module;
+use mlx_rs::module::{Module, ModuleParameters};
 use mlx_rs::nn::{BatchNorm, Conv2d, relu, sigmoid};
 use mlx_rs::ops::indexing::IndexOp;
 use mlx_rs::ops::{concatenate, einsum, pad, softmax_axis, stack, tanh};
@@ -964,20 +964,60 @@ pub struct Raft {
 
 impl Raft {
     /// Load all RAFT parameters from a converted safetensors checkpoint.
+    ///
+    /// The update block defaults to float32.
     pub fn load(path: impl AsRef<std::path::Path>) -> Result<Self, String> {
         let params = Array::load_safetensors(path).map_err(|e| e.to_string())?;
         Self::from_params(&params)
     }
 
+    /// Load a converted safetensors checkpoint and select the update-block parameter dtype.
+    pub fn load_with_update_dtype(
+        path: impl AsRef<std::path::Path>,
+        dtype: Dtype,
+    ) -> Result<Self, String> {
+        let params = Array::load_safetensors(path).map_err(|e| e.to_string())?;
+        Self::from_params_with_update_dtype(&params, dtype)
+    }
+
     /// Build the complete model from an already-loaded converted parameter map.
+    ///
+    /// The update block defaults to float32.
     pub fn from_params(params: &std::collections::HashMap<String, Array>) -> Result<Self, String> {
+        Self::from_params_with_update_dtype(params, Dtype::Float32)
+    }
+
+    /// Build the complete model and select the update-block parameter dtype.
+    pub fn from_params_with_update_dtype(
+        params: &std::collections::HashMap<String, Array>,
+        dtype: Dtype,
+    ) -> Result<Self, String> {
+        let mut update_block = BasicUpdateBlock::load(params)?;
+        update_block.set_dtype(dtype)?;
         Ok(Self {
             encoders: RaftEncoders::from_params(params)?,
-            update_block: BasicUpdateBlock::load(params)?,
+            update_block,
             compiled_update: true,
             compiled_core: None,
             batched_encoding: false,
         })
+    }
+
+    /// Select float32 (default) or float16 update-block convolution parameters.
+    ///
+    /// Only the update block's Conv2d weights/biases are cast. Encoders, feature maps,
+    /// correlation pyramids, coordinates, the flow accumulator, and returned flows stay float32.
+    /// Changing this invalidates the cached compiled update core so it is rebuilt against the new
+    /// parameter dtype on the next call.
+    pub fn set_update_dtype(&mut self, dtype: Dtype) -> Result<(), String> {
+        self.update_block.set_dtype(dtype)?;
+        self.compiled_core = None;
+        Ok(())
+    }
+
+    /// Return the current update-block parameter dtype.
+    pub fn update_dtype(&self) -> Dtype {
+        self.update_block.dtype()
     }
 
     /// Select the update-block core used by `flow_bidir` and `flow_bidir_features`.
@@ -1123,8 +1163,17 @@ impl Raft {
 
         let c0 = coords_grid(2, height, width);
         let mut c1 = c0.clone();
+        let update_dtype = self.update_dtype();
+        let cast = |array: &Array| -> Result<Array, String> {
+            if array.dtype() == update_dtype {
+                Ok(array.clone())
+            } else {
+                array.as_dtype(update_dtype).map_err(|e| e.to_string())
+            }
+        };
         let mut net = concatenate(&[&a.net, &b.net], 0).map_err(|e| e.to_string())?;
-        let inp = concatenate(&[&a.inp, &b.inp], 0).map_err(|e| e.to_string())?;
+        net = cast(&net)?;
+        let inp = cast(&concatenate(&[&a.inp, &b.inp], 0).map_err(|e| e.to_string())?)?;
 
         for _ in 0..iters {
             let forward_coords = c1.index((0..1, .., .., ..));
@@ -1133,7 +1182,9 @@ impl Raft {
             let backward_corr = corr_backward.lookup(&backward_coords)?;
             let corr =
                 concatenate(&[&forward_corr, &backward_corr], 0).map_err(|e| e.to_string())?;
+            let corr = cast(&corr)?;
             let flow = c1.subtract(&c0).map_err(|e| e.to_string())?;
+            let flow = cast(&flow)?;
             let core = if self.compiled_update {
                 let compiled_core = self.compiled_core.get_or_insert_with(CompiledCore::new);
                 compiled_core.core(&mut self.update_block, &net, &inp, &corr, &flow)?
@@ -1141,10 +1192,15 @@ impl Raft {
                 self.update_block.core(&net, &inp, &corr, &flow)?
             };
             net = core.net;
-            c1 = c1.add(&core.delta).map_err(|e| e.to_string())?;
+            let delta = core
+                .delta
+                .as_dtype(Dtype::Float32)
+                .map_err(|e| e.to_string())?;
+            c1 = c1.add(&delta).map_err(|e| e.to_string())?;
         }
 
         let mask = self.update_block.mask_head(&net)?;
+        let mask = mask.as_dtype(Dtype::Float32).map_err(|e| e.to_string())?;
         let low = c1.subtract(&c0).map_err(|e| e.to_string())?;
         let up = upsample_flow_batch(&low, &mask)?;
         Ok(BidirectionalFlow {
@@ -1420,7 +1476,12 @@ fn sep_gru_step(
     let q = q_conv.forward(&q_input).map_err(|e| e.to_string())?;
     let q = tanh(&q).map_err(|e| e.to_string())?;
 
-    Ok(((-&z) + 1.0) * h + &z * &q)
+    // Keep the scalar in the hidden-state dtype. A float32 scalar would promote
+    // a float16 GRU to float32 and defeat the opt-in update-block path.
+    let one = Array::from_f32(1.0)
+        .as_dtype(h.dtype())
+        .map_err(|e| e.to_string())?;
+    Ok((&one - &z) * h + &z * &q)
 }
 
 /// Two-layer 3x3 flow head producing the per-iteration flow delta.
@@ -1479,7 +1540,10 @@ impl MaskHead {
         let y = self.conv1.forward(net).map_err(|e| e.to_string())?;
         let y = relu(&y).map_err(|e| e.to_string())?;
         let y = self.conv2.forward(&y).map_err(|e| e.to_string())?;
-        Ok(&y * 0.25)
+        let scale = Array::from_f32(0.25)
+            .as_dtype(y.dtype())
+            .map_err(|e| e.to_string())?;
+        Ok(&y * &scale)
     }
 }
 
@@ -1512,6 +1576,10 @@ pub struct BasicUpdateBlock {
     pub flow_head: FlowHead,
     #[param]
     pub mask: MaskHead,
+    // Pristine float32 weights, kept out of the compile-state projection so switching back to
+    // float32 restores the checkpoint exactly instead of round-tripping through float16.
+    fp32_parameters: std::collections::HashMap<String, Array>,
+    parameter_dtype: Dtype,
 }
 
 impl BasicUpdateBlock {
@@ -1519,17 +1587,64 @@ impl BasicUpdateBlock {
     ///
     /// Every `update_block.*` key is consumed exactly once by name and shape. Missing or
     /// unexpected parameters under that prefix are rejected; unrelated `fnet`/`cnet` keys
-    /// in the same checkpoint are ignored.
+    /// in the same checkpoint are ignored. Parameters start in float32.
     pub fn load(params: &std::collections::HashMap<String, Array>) -> Result<Self, String> {
         let mut reader = ParamReader::new(params);
-        let block = Self {
+        let mut block = Self {
             encoder: MotionEncoder::load(&mut reader, "update_block.encoder")?,
             gru: SepConvGRU::load(&mut reader, "update_block.gru")?,
             flow_head: FlowHead::load(&mut reader, "update_block.flow_head")?,
             mask: MaskHead::load(&mut reader, "update_block.mask.0", "update_block.mask.2")?,
+            fp32_parameters: std::collections::HashMap::new(),
+            parameter_dtype: Dtype::Float32,
         };
         reader.finish("update_block")?;
+        block.fp32_parameters = block
+            .parameters()
+            .flatten()
+            .into_iter()
+            .map(|(name, value)| (name.to_string(), value.clone()))
+            .collect();
         Ok(block)
+    }
+
+    /// Return the dtype currently used by every update-block convolution weight and bias.
+    pub fn dtype(&self) -> Dtype {
+        self.parameter_dtype
+    }
+
+    /// Select float32 (default) or float16 update-block convolution parameters.
+    ///
+    /// Only this block's weights and biases are cast. Switching back to float32 restores the
+    /// pristine checkpoint values captured at load time.
+    pub fn set_dtype(&mut self, dtype: Dtype) -> Result<(), String> {
+        if !matches!(dtype, Dtype::Float16 | Dtype::Float32) {
+            return Err(format!(
+                "update-block dtype must be float16 or float32, got {dtype:?}"
+            ));
+        }
+        if dtype == self.parameter_dtype {
+            return Ok(());
+        }
+        let sources = self.fp32_parameters.clone();
+        for (name, value) in self.parameters_mut().flatten() {
+            let source = sources
+                .get(name.as_ref())
+                .ok_or_else(|| format!("missing pristine float32 update-block parameter {name}"))?;
+            *value = source.as_dtype(dtype).map_err(|e| e.to_string())?;
+        }
+        self.parameter_dtype = dtype;
+        Ok(())
+    }
+
+    fn cast_input(&self, array: &Array) -> Result<Array, String> {
+        if array.dtype() == self.parameter_dtype {
+            Ok(array.clone())
+        } else {
+            array
+                .as_dtype(self.parameter_dtype)
+                .map_err(|e| e.to_string())
+        }
     }
 
     /// Load the update block directly from a converted safetensors checkpoint.
@@ -1550,17 +1665,24 @@ impl BasicUpdateBlock {
         flow: &Array,
     ) -> Result<CoreOutput, String> {
         validate_update_inputs(net, inp, corr, flow)?;
-        let motion = self.encoder.forward(flow, corr)?;
-        let gru_input = concatenate(&[inp, &motion], -1).map_err(|e| e.to_string())?;
-        let net = self.gru.forward(net, &gru_input)?;
+        let net = self.cast_input(net)?;
+        let inp = self.cast_input(inp)?;
+        let corr = self.cast_input(corr)?;
+        let flow = self.cast_input(flow)?;
+        let motion = self.encoder.forward(&flow, &corr)?;
+        let gru_input = concatenate(&[&inp, &motion], -1).map_err(|e| e.to_string())?;
+        let net = self.gru.forward(&net, &gru_input)?;
         let delta = self.flow_head.forward(&net)?;
         Ok(CoreOutput { net, delta })
     }
 
     /// Run the mask head on a `[B,H,W,128]` hidden state, returning `[B,H,W,576]` scaled by 0.25.
+    ///
+    /// The result uses the update-block parameter dtype; callers choose when to cast it back.
     pub fn mask_head(&mut self, net: &Array) -> Result<Array, String> {
         validate_hidden(net)?;
-        self.mask.forward(net)
+        let net = self.cast_input(net)?;
+        self.mask.forward(&net)
     }
 
     /// Run the complete update block: core step followed by the mask head on the updated state.
@@ -2141,6 +2263,97 @@ mod tests {
     }
 
     #[test]
+    fn update_block_fp16_matches_python_mlx_fixture() {
+        let checkpoint = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vendor/weights/conv/raft-things.safetensors");
+        let checkpoint_hash = format!(
+            "{:x}",
+            sha2::Sha256::digest(std::fs::read(&checkpoint).unwrap())
+        );
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/update_block_fp16_reference.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["schema"], "mlxstab.raft_compat.update_block_fp16/1");
+        assert_eq!(fixture["checkpoint_sha256"], checkpoint_hash);
+        assert_eq!(fixture["rust_mlx_rs"], "0.32.0");
+        assert_eq!(fixture["rust_mlx"], "0.32.2");
+        assert!(fixture["python_mlx"].is_string());
+        assert_eq!(fixture["update_weight_dtype"], "float16");
+        assert_eq!(fixture["update_input_dtype"], "float16");
+        assert_eq!(fixture["returned_dtype"], "float32");
+
+        let inputs = &fixture["inputs"];
+        let net = json_f32(&inputs["net"], &json_shape(&inputs["net_shape"]));
+        let inp = json_f32(&inputs["inp"], &json_shape(&inputs["inp_shape"]));
+        let corr = json_f32(&inputs["corr"], &json_shape(&inputs["corr_shape"]));
+        let flow = json_f32(&inputs["flow"], &json_shape(&inputs["flow_shape"]));
+
+        let mut block = BasicUpdateBlock::load_checkpoint(&checkpoint).unwrap();
+        assert_eq!(block.dtype(), Dtype::Float32);
+        block.set_dtype(Dtype::Float16).unwrap();
+        assert_eq!(block.dtype(), Dtype::Float16);
+        assert!(
+            block
+                .parameters()
+                .flatten()
+                .values()
+                .all(|value| value.dtype() == Dtype::Float16),
+            "all update-block parameters must be float16"
+        );
+
+        let core = block.core(&net, &inp, &corr, &flow).unwrap();
+        let mask = block.mask_head(&core.net).unwrap();
+        assert_eq!(core.net.dtype(), Dtype::Float16);
+        assert_eq!(core.delta.dtype(), Dtype::Float16);
+        assert_eq!(mask.dtype(), Dtype::Float16);
+        let mask = mask.as_dtype(Dtype::Float32).unwrap();
+
+        let expected_core = &fixture["core"];
+        let expected_net = json_f32(
+            &expected_core["net"],
+            &json_shape(&expected_core["net_shape"]),
+        );
+        let expected_delta = json_f32(
+            &expected_core["delta"],
+            &json_shape(&expected_core["delta_shape"]),
+        );
+        let expected_mask = json_f32(&fixture["mask"], &json_shape(&fixture["mask_shape"]));
+
+        for (label, actual, expected) in [
+            ("updated net", &core.net, &expected_net),
+            ("delta flow", &core.delta, &expected_delta),
+            ("mask", &mask, &expected_mask),
+        ] {
+            // Measured against the Python reference: 9.765625e-4 for net/delta and
+            // 1.953125e-3 for the mask (one float16 quantum at these magnitudes).
+            let tolerance = if label == "mask" {
+                3.0e-3f32
+            } else {
+                1.5e-3f32
+            };
+            let error = max_abs_error(actual, expected);
+            println!("update block fp16 {label}: max abs error {error:e}");
+            assert!(
+                error < tolerance,
+                "update block fp16 {label} max abs error {error} exceeds {tolerance}"
+            );
+        }
+
+        block.set_dtype(Dtype::Float32).unwrap();
+        assert_eq!(block.dtype(), Dtype::Float32);
+        assert!(
+            block
+                .parameters()
+                .flatten()
+                .values()
+                .all(|value| value.dtype() == Dtype::Float32),
+            "switching back must restore float32 parameters"
+        );
+        assert!(block.set_dtype(Dtype::Int32).is_err());
+    }
+
+    #[test]
     fn update_block_loader_rejects_missing_extra_and_misshapen_parameters() {
         let checkpoint = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../../vendor/weights/conv/raft-things.safetensors");
@@ -2383,6 +2596,128 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn flow_bidir_fp16_update_matches_python_mlx_fixture() {
+        let checkpoint = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vendor/weights/conv/raft-things.safetensors");
+        let checkpoint_hash = format!(
+            "{:x}",
+            sha2::Sha256::digest(std::fs::read(&checkpoint).unwrap())
+        );
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/flow_bidir_fp16_reference.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["schema"], "mlxstab.raft_compat.flow_bidir_fp16/1");
+        assert_eq!(fixture["checkpoint_sha256"], checkpoint_hash);
+        assert_eq!(fixture["rust_mlx_rs"], "0.32.0");
+        assert_eq!(fixture["rust_mlx"], "0.32.2");
+        assert!(fixture["python_mlx"].is_string());
+        assert_eq!(fixture["height"], 64);
+        assert_eq!(fixture["width"], 64);
+        assert_eq!(fixture["corr_dtype"], "float32");
+        assert_eq!(fixture["coordinate_dtype"], "float32");
+        assert_eq!(fixture["flow_accumulator_dtype"], "float32");
+        assert_eq!(fixture["update_weight_dtype"], "float16");
+        assert_eq!(fixture["update_input_dtype"], "float16");
+        assert_eq!(fixture["returned_dtype"], "float32");
+        let verified_iters: Vec<u64> = fixture["verified_iters"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_u64().unwrap())
+            .collect();
+        assert_eq!(verified_iters, [1, 24]);
+
+        let images = &fixture["images"];
+        let first = json_f32(&images["first"], &json_shape(&images["first_shape"]));
+        let second = json_f32(&images["second"], &json_shape(&images["second_shape"]));
+
+        let mut model = Raft::load(checkpoint).unwrap();
+        assert_eq!(model.update_dtype(), Dtype::Float32);
+        assert!(model.compiled_core.is_none());
+        model.set_update_dtype(Dtype::Float16).unwrap();
+        assert_eq!(model.update_dtype(), Dtype::Float16);
+        assert!(
+            model.compiled_core.is_none(),
+            "changing update dtype must invalidate the compiled core"
+        );
+
+        let cases = fixture["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), verified_iters.len());
+        for (case, expected_iters) in cases.iter().zip(&verified_iters) {
+            let iters = case["iters"].as_u64().unwrap();
+            assert_eq!(iters, *expected_iters);
+            model.set_compiled_update(true);
+            let compiled = model.flow_bidir(&first, &second, iters as usize).unwrap();
+            assert!(
+                model.compiled_core.is_some(),
+                "compiled core should be rebuilt for the current update dtype"
+            );
+            model.set_compiled_update(false);
+            let direct = model.flow_bidir(&first, &second, iters as usize).unwrap();
+
+            for (label, shape_key, compiled_output, direct_output, expected) in [
+                (
+                    "low forward",
+                    "low_forward_shape",
+                    &compiled.low_forward,
+                    &direct.low_forward,
+                    &case["low_forward"],
+                ),
+                (
+                    "full forward",
+                    "up_forward_shape",
+                    &compiled.up_forward,
+                    &direct.up_forward,
+                    &case["up_forward"],
+                ),
+                (
+                    "low backward",
+                    "low_backward_shape",
+                    &compiled.low_backward,
+                    &direct.low_backward,
+                    &case["low_backward"],
+                ),
+                (
+                    "full backward",
+                    "up_backward_shape",
+                    &compiled.up_backward,
+                    &direct.up_backward,
+                    &case["up_backward"],
+                ),
+            ] {
+                let expected = json_f32(expected, &json_shape(&case[shape_key]));
+                assert_eq!(compiled_output.dtype(), Dtype::Float32);
+                assert_eq!(direct_output.dtype(), Dtype::Float32);
+                let compiled_error = max_abs_error(compiled_output, &expected);
+                let direct_error = max_abs_error(direct_output, &expected);
+                println!(
+                    "flow_bidir fp16 update {iters} iters {label}: compiled error \
+                     {compiled_error:e}, direct error {direct_error:e}"
+                );
+                // Measured against the uncompiled Python reference: worst 1.775e-3 at
+                // 1 iteration and 7.752e-3 at 24 iterations (full backward). The
+                // compiled and direct Rust paths matched to the printed precision.
+                let tolerance = if iters == 1 { 2.5e-3f32 } else { 1.0e-2f32 };
+                assert!(
+                    direct_error < tolerance,
+                    "direct fp16-update flow_bidir {iters} iters {label} max abs error \
+                     {direct_error} exceeds {tolerance}"
+                );
+                assert!(
+                    compiled_error < tolerance,
+                    "compiled fp16-update flow_bidir {iters} iters {label} max abs error \
+                     {compiled_error} exceeds {tolerance}"
+                );
+            }
+        }
+
+        model.set_update_dtype(Dtype::Float32).unwrap();
+        assert_eq!(model.update_dtype(), Dtype::Float32);
+        assert!(model.compiled_core.is_none());
     }
 
     #[test]

@@ -40,6 +40,17 @@ and runs fnet/cnet as batch-2 before splitting their features. Separate
 per-frame encoding remains the default because the measured latency change was
 inconclusive.
 
+`Raft::set_update_dtype(Dtype::Float16)` is an opt-in mixed-precision
+experiment. It casts only the update block's weights and runtime inputs to
+float16; encoders, feature maps, correlation, coordinates, flow accumulation,
+and returned flows remain float32. The default remains float32. Goldens in
+`tests/fixtures/update_block_fp16_reference.json` and
+`tests/fixtures/flow_bidir_fp16_reference.json` check the update block and the
+complete 1/24-iteration path against Python MLX. The API retains pristine
+float32 update weights so switching back restores checkpoint values exactly;
+this means the measured whole-process memory change should not be interpreted
+as a reduction in resident update-weight storage.
+
 Inputs must be positive multiples of 8 in height and width. The 64x64 fixture
 uses an 8x8 feature grid, so all four correlation levels remain non-empty.
 
@@ -103,10 +114,10 @@ spike rather than a production inference path:
   construction but not separately tested.
 - Initial flow (`init_f`/`init_b` in Python) is not exposed; both directions
   start from zero flow.
-- fp16 encoder/correlation variants are not ported. Compiled update outputs can
-  differ slightly from the direct and Python paths due to graph fusion and
-  operation ordering; the checked-in fixture covers only fp32 at 1 and 24
-  iterations.
+- fp16 encoder/correlation variants are not ported. The opt-in fp16 update
+  experiment is checked at 1 and 24 iterations only. Compiled update outputs
+  can differ slightly from the direct and Python paths due to graph fusion and
+  operation ordering.
 - Synchronization, cancellation, error recovery, and sustained-memory behavior
   still need measurement. Exact MLX version pairing remains open:
   `mlx-rs` 0.32.0 targets MLX 0.32.2 while this checkout's Python environment

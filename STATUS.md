@@ -4693,3 +4693,35 @@ totals 519.30 ms, closely matching the full-call median. This identifies the rec
 largest optimization target; it does not yet split correlation lookup from the compiled update core. The next
 experiment is an opt-in fp16 update path, with fixture and output-error gates, to test whether it reduces that
 dominant stage without changing coordinates or correlation storage precision.
+
+### E20 follow-up (2026-10-18): opt-in float16 update block
+
+Added a reversible `Raft::set_update_dtype(Float16)` experiment. Only update-block convolution
+parameters and inputs use float16; encoders, features, correlation lookup, coordinates, flow
+accumulation, and returned flows remain float32. Switching back restores pristine checkpoint
+weights, and changing dtype invalidates the compiled update core. Python MLX goldens cover the
+update block directly and the integrated bidirectional path at 1 and 24 iterations. All 20 Rust
+tests pass, including compiled and direct flow paths; formatting, strict clippy, `git diff --check`,
+and CodeGraph sync/affected checks pass. The complete-flow comparison's maximum observed absolute
+error was 1.775e-3 px at one iteration and 7.7523e-3 px at 24 iterations; test gates are 2.5e-3 and
+1e-2 respectively.
+
+Five alternating fresh-process Rust runs per dtype used the same 360x640 pair, checkpoint, compiled
+update, 24 iterations, one warmup, and seven measured calls. Pairwise medians were:
+
+| pair | fp32 | fp16 | fp16 / fp32 |
+|---|---:|---:|---:|
+| 1 | 0.5433 s | 0.5117 s | 0.942 |
+| 2 | 0.5590 s | 0.4941 s | 0.884 |
+| 3 | 0.5788 s | 0.5032 s | 0.869 |
+| 4 | 0.5789 s | 0.4929 s | 0.851 |
+| 5 | 0.5862 s | 0.5852 s | 0.998 |
+
+The mean paired ratio is 0.909 and the median paired ratio is 0.884. Four pairs favored fp16 by
+6-15%, while one was effectively a tie, so this is a promising but noisy single-resolution result.
+`/usr/bin/time -l` reported median process peak memory footprint of 2,318 MiB for fp32 and 1,634 MiB
+for fp16 on this host. This is whole-process peak footprint, not a steady accelerator-memory
+measurement; the reversible API retains pristine fp32 update weights, so the decrease does not mean
+resident update-weight storage was halved. Keep fp16 opt-in and fp32 as default until broader-size
+benchmarks and video-quality review confirm the tradeoff. Rust stabilization output has not yet been
+produced, so no end-to-end Gemini quality review is available for this experiment.
