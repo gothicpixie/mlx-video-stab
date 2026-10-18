@@ -4188,3 +4188,27 @@ fixed zoom consistently improves edge support at a small measured motion cost, b
 show a perceived quality difference on these clips. This remains a four-window screen across three source files,
 not held-out population evidence; `crop_zoom=1.0` remains the default. Full reports are in ignored
 `out/bench/cropzoom_102_crosssource/`.
+
+### Real-pixel depth-rank camera-path kill gate (2026-10-18)
+
+Added `bench/depth_layer_real_render_review.py`, an isolated renderer for the existing E13 pooled and
+relative-depth-rank affine corrections. It backward-warps cached RGB samples with explicit bilinear support,
+writes matched pooled/rank outputs and validity masks, and delegates blinded A/B clip creation plus panel
+reversal to `bench.real_pair_review`. It changes no production path. CodeGraph was synced; its affected-test
+query found no linked tests, so the five new sampler/input-validation tests were run directly and passed.
+
+The first pixel gate used the existing two-second `STREAM_00025.MTS` cache (source SHA-256
+`d6744f20554b80cf93ac7e7a1310ce16bc1d567a7409eaf96cc6d272b2b97ca0`) and the frozen E13 `bins_4__sigma_1`
+variant. The 30 depth-sampled frames were rendered at their effective **15000/1001 fps** cadence. Mean
+bilinear-valid support was **99.488%** for the pooled path and **99.512%, 99.495%, 99.355%, and 99.009%** for
+rank 0–3. Gemini 3.8 Flash reviewed four pooled-versus-rank comparisons and their position reversals: **all
+eight calls were ties**, with no repeatable non-tie method preference.
+
+The independent KLT check could not score continuous path jitter: input and pooled outputs each had **4 failed
+pairs of 29**; rank 0 had 4, ranks 1 and 2 had 5 each, and rank 3 had 7. Per the evaluator contract, jitter
+remains unavailable for every sequence. This is an inconclusive, single-window screen, not evidence of
+equivalence or quality improvement. Together with the five earlier E13 geometric windows showing no
+consistent rank-policy advantage, DeepSeek Flash via Pi recommended stopping the **rank-selected global path**
+branch rather than extending its sweep. Reopen it only for a pre-registered targeted case with valid independent
+tracking and a decision-relevant predicted benefit. Reports, renders, KLT failures and blinded reviews remain
+under ignored `out/bench/depth_layer_real_render_review_stream00025_t05/`; no depth policy or default changes.
