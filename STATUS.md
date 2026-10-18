@@ -4314,3 +4314,36 @@ consistent rank-policy advantage, DeepSeek Flash via Pi recommended stopping the
 branch rather than extending its sweep. Reopen it only for a pre-registered targeted case with valid independent
 tracking and a decision-relevant predicted benefit. Reports, renders, KLT failures and blinded reviews remain
 under ignored `out/bench/depth_layer_real_render_review_stream00025_t05/`; no depth policy or default changes.
+
+### E25 depth-gated residual mesh prototype and real-footage screen (2026-10-18)
+
+Added a default-off production-path hook for depth-aware local residual mesh fitting. `Config.mesh_depth_strength`
+remains `0.0` by default. When enabled, `analyze`/`stabilize` accept a caller-provided `depth_fn(source_frame_index)`;
+relative depth changes only the local residual mesh regression, fill and smoothing. Global RANSAC/mover handling,
+row correction, planning and rendering remain on their existing paths. The callback is an API for supplying aligned
+maps, not a shipped depth estimator or CLI adapter. Depth inference and its cost are therefore not included in
+these render comparisons.
+
+Focused synthetic tests verify depth-off byte parity, boundary separation, source-frame indexing and that the
+mesh change reaches planned/rendered pixels. The independently rerun full suite passed: **1826 passed, 18 warnings**.
+CodeGraph is synced. The implementation was committed and pushed as `0c23e7e`.
+
+Ran one matched 24-iteration RAFT comparison per arm on two 120-frame, two-second windows, using the same
+`flow_downscale=2` and half-rate `analysis_stride=2`. The candidate used `mesh_depth_strength=1.0`; its every-frame
+relative depth was linearly interpolated from every-fourth-frame Depth Anything V2 Base maps. No arm had fit
+fallbacks and every frame rendered.
+
+| source window | baseline / depth analysis (s) | baseline / depth mean border | baseline / depth worst border | Gemini (original + panel reversal) |
+|---|---:|---:|---:|---|
+| `00176.MTS` t060–062 | 49.249 / 51.727 | 1.5215% / 1.5408% | 3.5185% / 3.6060% | tie / tie |
+| `STREAM_00016.MTS` t130–132 | 50.954 / 50.494 | 0.1468% / 0.1559% | 0.4063% / 0.4077% | tie / tie |
+
+The `00176.MTS` source container's current hash differs from the older cache metadata, so those old depth maps were
+not used until a fresh decode proved the 120 RGB frames byte-identical to the cached frame content digest. The maps
+were then rebound to the fresh frame-cache hash and validated against it. `STREAM_00016.MTS` source and depth-cache
+hashes already matched. This is still only a two-window, two-second screen with one timing run per arm. Gemini's
+`STREAM_00016` judgment explicitly notes that the clip is very dark and too short for fine motion comparison. There
+is no repeatable visible win, and border loss is slightly higher with depth in both windows. Keep this API
+experimental and default-off; do not add a bundled estimator, CLI option, or extra inference cost on this evidence.
+Revisit only under E25's longer parallax-heavy footage and independent-tracking gate. Render pairs, Gemini judgments,
+and provenance stay in ignored `out/bench/depth_mesh_real_*/` artifacts.
