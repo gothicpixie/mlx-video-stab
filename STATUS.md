@@ -4055,3 +4055,22 @@ estimated. The pair, API response and audit are in
 0.2689 → 0.1561 px with zero RAFT fallbacks, but KLT had 2 failed input and 2 failed output pairs and no
 jitter estimates. Treat this as a protocol/limitations check only; it does not validate the real-footage
 intent hypothesis or establish a perceptual benefit.
+
+### Explicit shot-boundary handling (2026-10-17)
+
+DeepSeek Flash via Pi implemented an opt-in `--cut-frames N[,N...]` path for caller-supplied frame indices that
+start new shots. The pair spanning each cut is skipped, the RAFT temporal state is reset, and global-path,
+mesh/row residual accumulation and smoothing restart from the new shot. The default remains a single continuous
+shot; indices must align with `--analysis-stride`. This gives prediction and future depth/scene cues a clean
+state boundary, but does not automatically detect cuts or infer content.
+
+Cut metadata is saved in motion schema `/5` and plan schema `/3`; the audit readers continue to load earlier
+schemas. Motion `/4` reason codes remain limited to 0–3; `/5` adds code 4 for `sequence_boundary`. Audit summaries
+count these boundary placeholders separately from failed geometric fits and verify they match the cut indices and
+analysis stride.
+
+Focused coverage includes skipped flow/reset calls, independent per-shot path and residual planning, fallback
+accounting, invalid/misaligned cut validation, CLI wiring, and old/new schema round-trips. The focused set passed
+**341 tests** and the full suite passed **1,724 tests** after the final audit-accounting changes. This is a lifecycle
+correctness capability, not evidence of better perceptual quality or an integrated prediction/depth/intent
+model.

@@ -57,9 +57,12 @@ SCHEMA = "mlxstab.plan_shape_audit/1"
 # Schema-common keys written by ``mlxstab.stabilize.save_plan``; every one must be present and well-formed.
 REQUIRED_KEYS = ("schema", "width", "height", "frames", "fps", "G", "mesh_corr", "row_corr",
                  "raw_quads", "path_quads", "fallbacks")
-# ``mlxstab.plan/2`` adds the sampled border-backoff result; ``mlxstab.plan/1`` predates it and stays loadable.
+# ``mlxstab.plan/2`` adds sampled border-backoff fields; ``/3`` adds shot boundaries.
 BORDER_KEYS = ("sampled_border_scale", "sampled_border_worst_frac", "sampled_border_measured")
-SCHEMA_KEYS = {S.PLAN_SCHEMA_V1: REQUIRED_KEYS, S.PLAN_SCHEMA: REQUIRED_KEYS + BORDER_KEYS}
+CUT_KEYS = ("cut_frames",)
+SCHEMA_KEYS = {S.PLAN_SCHEMA_V1: REQUIRED_KEYS,
+               S.PLAN_SCHEMA_V2: REQUIRED_KEYS + BORDER_KEYS,
+               S.PLAN_SCHEMA: REQUIRED_KEYS + BORDER_KEYS + CUT_KEYS}
 
 # Output-space probes. The first two are axis-aligned; the last two are the two diagonals. Diagonal (and
 # horizontal/vertical) bending is a warp-geometry proxy only -- it is not object/tree detection or perception.
@@ -173,8 +176,8 @@ def _numeric_array(z, key, shape=None):
 def load_plan_npz(path):
     """Load and validate a ``save_plan`` NPZ, then reconstruct ``mlxstab.stabilize.Plan``.
 
-    Accepts both ``mlxstab.plan/2`` (current) and the legacy ``mlxstab.plan/1`` payload, which lacks the
-    sampled border-backoff fields and loads with ``scale=1.0``, ``worst_frac=0.0``, ``measured=False``.
+    Accepts ``mlxstab.plan/3`` (current, with shot boundaries), ``/2`` (sampled border-backoff fields), and the
+    legacy ``/1`` payload, which lacks those fields and loads with the disabled defaults.
 
     Returns ``(plan, meta)``. Malformed payloads raise ``PlanPayloadError`` with a stable ``code`` (one of
     ``unreadable``, ``missing_keys``, ``bad_schema``, ``bad_scalar``, ``bad_dims``, ``bad_shape``,
@@ -218,8 +221,23 @@ def load_plan_npz(path):
         rq = _numeric_array(z, "raw_quads", (T, 4, 2))
         pq = _numeric_array(z, "path_quads", (T, 4, 2))
 
-        # Sampled border-backoff result: present only in schema /2. Legacy /1 loads as disabled defaults.
+        # Explicit shot boundaries are required by /3; older payloads have no key and load as one shot.
+        cuts = ()
         if schema == S.PLAN_SCHEMA:
+            _require("cut_frames" in files, "missing_key", "missing required plan key 'cut_frames'")
+        if "cut_frames" in files:
+            cf = _numeric_array(z, "cut_frames", None)
+            _require(cf.ndim == 1 and cf.dtype.kind in "iu", "bad_shape",
+                     f"'cut_frames' must be a 1-D integer array, got shape {cf.shape} dtype {cf.dtype}")
+            cf = [int(v) for v in cf]
+            _require(all(0 <= v < T for v in cf), "bad_range",
+                     f"'cut_frames' must lie inside [0, {T}), got {cf}")
+            _require(cf == sorted(set(cf)), "bad_range",
+                     f"'cut_frames' must be sorted and unique, got {cf}")
+            cuts = tuple(cf)
+
+        # Sampled border-backoff result: present in /2 and /3. Legacy /1 loads as disabled defaults.
+        if schema in (S.PLAN_SCHEMA_V2, S.PLAN_SCHEMA):
             scale = _float_scalar(z, "sampled_border_scale")
             worst = _float_scalar(z, "sampled_border_worst_frac")
             measured = _bool_scalar(z, "sampled_border_measured")
@@ -238,6 +256,7 @@ def load_plan_npz(path):
             path_quads=np.array(pq, np.float64),
             fallbacks=fallbacks,
             sampled_border_scale=scale, sampled_border_worst_frac=worst, sampled_border_measured=measured,
+            cuts=cuts,
         )
         meta = {
             "path": str(path),
@@ -247,6 +266,7 @@ def load_plan_npz(path):
             "row_bands": int(rc.shape[1]),
             "sampled_border_scale": scale, "sampled_border_worst_frac": worst,
             "sampled_border_measured": measured,
+            "cut_frames": list(cuts),
         }
         return plan, meta
     finally:

@@ -50,6 +50,7 @@ def base_payload(t=T, w=W, h=H):
         "raw_quads": np.zeros((t, 4, 2)), "path_quads": np.zeros((t, 4, 2)), "fallbacks": np.int64(0),
         "sampled_border_scale": np.float64(1.0), "sampled_border_worst_frac": np.float64(0.0),
         "sampled_border_measured": np.bool_(False),
+        "cut_frames": np.zeros((0,), np.int64),
     }
 
 
@@ -104,8 +105,24 @@ def test_legacy_plan_v1_loads_with_border_defaults(tmp_path):
     assert loaded.sampled_border_measured is False
 
 
-def test_current_plan_requires_border_keys(tmp_path):
-    """The current schema must carry all three sampled border fields; their absence is malformed."""
+def test_plan_v2_remains_loadable_without_cut_metadata(tmp_path):
+    p = base_payload()
+    p["schema"] = np.asarray(S.PLAN_SCHEMA_V2)
+    del p["cut_frames"]
+    loaded, meta = P.load_plan_npz(write_payload(tmp_path, p, name="plan_v2.npz"))
+    assert meta["schema"] == S.PLAN_SCHEMA_V2 and loaded.cuts == ()
+
+
+def test_plan_v3_requires_cut_metadata(tmp_path):
+    p = base_payload()
+    del p["cut_frames"]
+    with pytest.raises(P.PlanPayloadError) as ei:
+        P.load_plan_npz(write_payload(tmp_path, p, name="missing_cuts.npz"))
+    assert ei.value.code == "missing_keys" and "cut_frames" in str(ei.value)
+
+
+def test_current_plan_requires_border_and_cut_keys(tmp_path):
+    """The current schema must carry all sampled-border and shot-boundary fields."""
     p = base_payload()
     del p["sampled_border_scale"]
     with pytest.raises(P.PlanPayloadError) as ei:

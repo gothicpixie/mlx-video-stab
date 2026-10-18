@@ -133,7 +133,8 @@ def test_stabilize_dumps_plan_npz_without_pickle(tmp_path, monkeypatch):
     with np.load(out, allow_pickle=False) as z:                        # loads without unpickling any object
         assert set(z.files) == {"schema", "width", "height", "frames", "fps", "G",
                                 "mesh_corr", "row_corr", "raw_quads", "path_quads", "fallbacks",
-                                "sampled_border_scale", "sampled_border_worst_frac", "sampled_border_measured"}
+                                "sampled_border_scale", "sampled_border_worst_frac", "sampled_border_measured",
+                                "cut_frames"}
         assert str(z["schema"]) == S.PLAN_SCHEMA
         assert float(z["sampled_border_scale"]) == 1.0 and bool(z["sampled_border_measured"]) is False
         assert int(z["width"]) == W and int(z["height"]) == H
@@ -177,8 +178,8 @@ def test_stabilize_dumps_motion_and_raw_flow_samples_without_pickle(tmp_path, mo
                                 "n_valid_samples", "n_ransac_inliers", "fallback_reason_code", "fit_meta_available",
                                 "mesh_support_mass", "row_support_mass",
                                 "cycle_err_rms", "cycle_inconsistency_frac", "cycle_sample_mass",
-                                "cycle_map_available"}
-        assert str(z["schema"]) == S.MOTION_SCHEMA == "mlxstab.motion/4"
+                                "cycle_map_available", "cut_frames"}
+        assert str(z["schema"]) == S.MOTION_SCHEMA == "mlxstab.motion/5"
         assert int(z["width"]) == W and int(z["height"]) == H
         assert int(z["n_frames"]) == len(vid)
         assert int(z["stride"]) == 1

@@ -290,18 +290,94 @@ class Motion:
     fits: list = field(default_factory=list)
     stride: int = 1            # frames between analysed pairs
     n_frames: int = 0          # frames seen
+    cuts: tuple = ()           # internal frame indices that begin a new shot (explicit sequence boundaries)
+
+
+def _normalize_cuts(cuts, n_frames=None):
+    """Validate and canonicalise explicit sequence boundaries (frame indices that begin a new shot).
+
+    ``None`` and an empty sequence both mean one continuous shot, so the default path is unchanged. Indices
+    must be non-negative integers; duplicate or unsorted input is canonicalised to a sorted tuple. A supplied
+    ``0`` is discarded because frame 0 already starts the first shot. When ``n_frames`` is
+    known, every boundary must satisfy ``cut < n_frames``. Floats, booleans and other non-integral values are
+    rejected instead of being silently truncated.
+    """
+    if cuts is None:
+        return ()
+    if isinstance(cuts, (str, bytes)):
+        raise ValueError(f"cuts must be a sequence of frame indices, got {cuts!r}")
+    try:
+        items = list(cuts)
+    except TypeError:
+        raise ValueError(f"cuts must be a sequence of frame indices, got {cuts!r}") from None
+    out = []
+    for value in items:
+        if isinstance(value, bool):
+            raise ValueError(f"cuts must contain integer frame indices, got {value!r}")
+        try:
+            v = operator.index(value)
+        except TypeError:
+            raise ValueError(f"cuts must contain integer frame indices, got {value!r}") from None
+        if v < 0:
+            raise ValueError(f"cuts must be non-negative frame indices, got {v}")
+        out.append(int(v))
+    result = tuple(v for v in sorted(set(out)) if v > 0)
+    if n_frames is not None:
+        bad = [c for c in result if c >= n_frames]
+        if bad:
+            raise ValueError(f"cuts must be inside the clip [0, {n_frames}); got {bad}")
+    return result
+
+
+def _validate_cuts_for_stride(cuts, stride):
+    """Require explicit cuts to land on an analysed frame so the path can reset exactly there."""
+    stride = max(int(stride), 1)
+    if stride > 1:
+        bad = [c for c in cuts if c % stride]
+        if bad:
+            raise ValueError(
+                f"cuts must align with analysis_stride={stride} (frame index % stride == 0); got {bad}")
+    return cuts
+
+
+def _segments(T, cuts):
+    """Half-open frame ranges ``[(start, end), ...]`` separated by internal cuts in ``[0, T)``."""
+    starts = sorted(set([0] + [int(c) for c in cuts if 0 < int(c) < T]))
+    return list(zip(starts, starts[1:] + [T]))
+
+
+def _smooth_segments(C, segments, mode, sigma, budget, w, fidelity):
+    """Apply ``SM.smooth_columns`` independently inside each shot (never across a cut)."""
+    out = np.empty_like(C, dtype=np.float64)
+    for s, e in segments:
+        out[s:e] = SM.smooth_columns(C[s:e], mode, sigma, budget, w, fidelity)
+    return out
 
 
 def analyze(frames, flow_fn, cfg, W, H, fps, log=None, masks=None, on_step=None, stride=1, threads=True,
-            flow_sample_callback=None):
+            flow_sample_callback=None, cuts=None):
     """Pass 1: motion fit for each consecutive analysed pair (every `stride`-th frame). `frames` yields uint8 [H,W,3];
     flow_fn(a, b, key) -> [H,W,2] mx, or flow_fn.bidir(a, b) -> (forward, backward). While the GPU computes the next flow, a worker
-    thread fits the previous pair on the CPU."""
+    thread fits the previous pair on the CPU.
+
+    ``cuts`` is an opt-in sequence of internal frame indices that begin a new shot. A pair spanning a cut is
+    not measured: it becomes an identity placeholder fit tagged ``sequence_boundary``, the flow backend's
+    temporal state is reset (when it exposes ``reset()``), and the fit count stays one per analysed pair. Cuts
+    must align with ``stride`` so ``plan`` can reset the path exactly at the boundary. Default ``None`` keeps
+    the historical single-shot behaviour unchanged."""
     from concurrent.futures import ThreadPoolExecutor
-    mot = Motion(W, H, fps, stride=stride); prev = None; prev_i = None; rng = np.random.default_rng(cfg.seed)
+    cuts = _validate_cuts_for_stride(_normalize_cuts(cuts), stride)
+    mot = Motion(W, H, fps, stride=stride, cuts=cuts); prev = None; prev_i = None; rng = np.random.default_rng(cfg.seed)
     gc, gr = cfg.mesh
     pool = ThreadPoolExecutor(1) if threads else None; pend = []
     fit = lambda obs: MO.fit_motion(obs, (max(gc, 1), max(gr, 1)), cfg.rs_rows, rng=rng, model=cfg.model)
+    mrow, mcol = max(gr, 1), max(gc, 1)
+    def boundary_fit():
+        return MO.Fit(np.eye(3), np.zeros((mrow + 1, mcol + 1, 2)), np.zeros((max(cfg.rs_rows, 1), 2)),
+                      0.0, 0.0, True, n_valid_samples=0, n_ransac_inliers=0,
+                      fallback_reason=MO.FALLBACK_REASON_SEQUENCE_BOUNDARY,
+                      mesh_support_mass=np.zeros((mrow + 1, mcol + 1)),
+                      row_support_mass=np.zeros(max(cfg.rs_rows, 1)))
     pm = None
     for i, fr in enumerate(frames):
         cm = next(masks) if masks is not None else None
@@ -309,31 +385,40 @@ def analyze(frames, flow_fn, cfg, W, H, fps, log=None, masks=None, on_step=None,
         if i % stride: continue
         if on_step: on_step(i)                 # hook for callers that share the GPU (e.g. release/re-acquire a lock between chunks)
         if prev is not None:
-            if hasattr(flow_fn, "bidir"): Ff, Bf = flow_fn.bidir(prev, fr)
-            else: Ff = flow_fn(prev, fr, "f"); Bf = flow_fn(fr, prev, "b")
-            raw_grid = None
-            if flow_sample_callback is not None:
-                ys = np.arange(cfg.step // 2, H, cfg.step)
-                xs = np.arange(cfg.step // 2, W, cfg.step)
-                iy, ix = mx.array(ys), mx.array(xs)
-                forward_grid = Ff[iy][:, ix]
-                backward_grid = Bf[iy][:, ix]
-                mx.eval(forward_grid, backward_grid)
-                raw_grid = (xs, ys, np.asarray(forward_grid, dtype=np.float32),
-                            np.asarray(backward_grid, dtype=np.float32))
-            obs = MO.observe(Ff, Bf, cfg.step)
-            if cm is not None or pm is not None: MO.exclude_masked(obs, pm, cm)
-            if flow_sample_callback is not None:
-                xs, ys, forward_grid, backward_grid = raw_grid
-                flow_sample_callback(prev_i, i, xs, ys, forward_grid, backward_grid,
-                                     obs.valid.copy(), obs.fb_err.copy(), obs.fb_tol.copy(), obs.fb_inside.copy())
-            if pool: pend.append(pool.submit(fit, obs))
-            else: mot.fits.append(fit(obs))
-            while len(pend) > 2: mot.fits.append(pend.pop(0).result())
-            if log and i % 20 == 0: log(f"flow {i}")
+            span_cut = any(prev_i < c <= i for c in cuts)
+            if span_cut:
+                reset = getattr(flow_fn, "reset", None)
+                if callable(reset): reset()
+                if pool: pend.append(pool.submit(boundary_fit))
+                else: mot.fits.append(boundary_fit())
+                while len(pend) > 2: mot.fits.append(pend.pop(0).result())
+            else:
+                if hasattr(flow_fn, "bidir"): Ff, Bf = flow_fn.bidir(prev, fr)
+                else: Ff = flow_fn(prev, fr, "f"); Bf = flow_fn(fr, prev, "b")
+                raw_grid = None
+                if flow_sample_callback is not None:
+                    ys = np.arange(cfg.step // 2, H, cfg.step)
+                    xs = np.arange(cfg.step // 2, W, cfg.step)
+                    iy, ix = mx.array(ys), mx.array(xs)
+                    forward_grid = Ff[iy][:, ix]
+                    backward_grid = Bf[iy][:, ix]
+                    mx.eval(forward_grid, backward_grid)
+                    raw_grid = (xs, ys, np.asarray(forward_grid, dtype=np.float32),
+                                np.asarray(backward_grid, dtype=np.float32))
+                obs = MO.observe(Ff, Bf, cfg.step)
+                if cm is not None or pm is not None: MO.exclude_masked(obs, pm, cm)
+                if flow_sample_callback is not None:
+                    xs, ys, forward_grid, backward_grid = raw_grid
+                    flow_sample_callback(prev_i, i, xs, ys, forward_grid, backward_grid,
+                                         obs.valid.copy(), obs.fb_err.copy(), obs.fb_tol.copy(), obs.fb_inside.copy())
+                if pool: pend.append(pool.submit(fit, obs))
+                else: mot.fits.append(fit(obs))
+                while len(pend) > 2: mot.fits.append(pend.pop(0).result())
+                if log and i % 20 == 0: log(f"flow {i}")
         prev = fr; prev_i = i; pm = cm
     for f in pend: mot.fits.append(f.result())
     if pool: pool.shutdown()
+    _normalize_cuts(cuts, mot.n_frames)          # reject a cut that lies beyond the decoded clip
     return mot
 
 
@@ -348,18 +433,22 @@ class Plan:
     sampled_border_scale: float = 1.0        # clip-wide scale applied by the opt-in sampled border backoff (1.0 = untouched)
     sampled_border_worst_frac: float = 0.0   # worst sampled out-of-bounds fraction over frames at that scale
     sampled_border_measured: bool = False    # whether the sampled border probe ran (Config.max_sampled_border_frac was set)
+    cuts: tuple = ()                         # internal shot-start frame indices this plan was segmented on
 
 
-PLAN_SCHEMA = "mlxstab.plan/2"   # schema tag stored inside every dumped Plan NPZ (bump on layout change)
-PLAN_SCHEMA_V1 = "mlxstab.plan/1"   # legacy layout (no sampled border-backoff fields); still loadable, read-only
-PLAN_SCHEMAS = (PLAN_SCHEMA_V1, PLAN_SCHEMA)
-MOTION_SCHEMA = "mlxstab.motion/4"   # schema tag stored inside every dumped Motion NPZ (bump on layout change)
+PLAN_SCHEMA = "mlxstab.plan/3"   # /3 adds explicit shot boundaries; bump on layout change
+PLAN_SCHEMA_V2 = "mlxstab.plan/2"   # sampled border-backoff fields, no shot boundaries; still loadable, read-only
+PLAN_SCHEMA_V1 = "mlxstab.plan/1"   # legacy layout without sampled border-backoff fields; still loadable, read-only
+PLAN_SCHEMAS = (PLAN_SCHEMA_V1, PLAN_SCHEMA_V2, PLAN_SCHEMA)
+MOTION_SCHEMA = "mlxstab.motion/5"   # /5 adds shot boundaries and their sequence_boundary fit reason
+MOTION_SCHEMA_V4 = "mlxstab.motion/4"   # fit-gate diagnostics, no shot boundaries; still loadable, read-only
 MOTION_SCHEMA_V3 = "mlxstab.motion/3"   # cycle maps, no fit-gate metadata; still loadable, read-only
 MOTION_SCHEMA_V2 = "mlxstab.motion/2"   # support mass, no cycle maps; still loadable, read-only
 MOTION_SCHEMA_V1 = "mlxstab.motion/1"   # legacy layout (no support-mass / cycle / fit-gate arrays); still loadable, read-only
-MOTION_SCHEMAS = (MOTION_SCHEMA_V1, MOTION_SCHEMA_V2, MOTION_SCHEMA_V3, MOTION_SCHEMA)
-MOTION_SCHEMAS_WITH_SUPPORT = (MOTION_SCHEMA_V2, MOTION_SCHEMA_V3, MOTION_SCHEMA)   # /1 predates support mass
-MOTION_SCHEMAS_WITH_CYCLE = (MOTION_SCHEMA_V3, MOTION_SCHEMA)                        # /1 and /2 predate cycle maps
+MOTION_SCHEMAS = (MOTION_SCHEMA_V1, MOTION_SCHEMA_V2, MOTION_SCHEMA_V3, MOTION_SCHEMA_V4, MOTION_SCHEMA)
+MOTION_SCHEMAS_WITH_SUPPORT = (MOTION_SCHEMA_V2, MOTION_SCHEMA_V3, MOTION_SCHEMA_V4, MOTION_SCHEMA)
+MOTION_SCHEMAS_WITH_CYCLE = (MOTION_SCHEMA_V3, MOTION_SCHEMA_V4, MOTION_SCHEMA)
+MOTION_SCHEMAS_WITH_FIT_META = (MOTION_SCHEMA_V4, MOTION_SCHEMA)
 FLOW_SAMPLES_SCHEMA = "mlxstab.flow_samples/1"
 
 
@@ -368,7 +457,8 @@ def save_flow_samples_npz(samples, path, W, H, fps, stride, step, n_frames):
 
     Forward and backward vectors are sampled at grid-cell centres in source-frame pixels, before cycle
     validation, masking, robust fitting or planning. The companion validity fields record cycle results and
-    any source/destination mask rejection immediately before robust fitting. This bounded diagnostic is much
+    any source/destination mask rejection immediately before robust fitting. A pair that spans an explicit
+    sequence cut is not measured and therefore has no row in this capture. This bounded diagnostic is much
     smaller than retaining both full-resolution fields while preserving every vector that enters the fit.
     """
     if not samples:
@@ -450,7 +540,8 @@ def save_motion_npz(mot, path, cfg=None):
     and the per-fit ``fit_meta_available [n_fits]`` flag), the observation-coverage support masses
     (``mesh_support_mass [n_fits,gr+1,gc+1]``, ``row_support_mass [n_fits,nr]``) and the forward-backward
     cycle-consistency maps (``cycle_err_rms``, ``cycle_inconsistency_frac``, ``cycle_sample_mass``, each
-    ``[n_fits,gr+1,gc+1]``, plus the per-fit ``cycle_map_available [n_fits]`` flag).
+    ``[n_fits,gr+1,gc+1]``, plus the per-fit ``cycle_map_available [n_fits]`` flag), and the explicit
+    shot-start frame indices (``cut_frames``, empty for one continuous shot).
 
     The fit-gate diagnostics name *why* ``fit_motion`` returned an identity fallback. ``n_valid_samples`` and
     ``n_ransac_inliers`` are the valid-sample count and RANSAC-inlier count of the initial all-valid solve;
@@ -509,6 +600,7 @@ def save_motion_npz(mot, path, cfg=None):
         cycle_inconsistency_frac=np.asarray([c[1] for c in cycle], np.float64).reshape(n, gr + 1, gc + 1),
         cycle_sample_mass=np.asarray([c[2] for c in cycle], np.float64).reshape(n, gr + 1, gc + 1),
         cycle_map_available=np.asarray([c[3] for c in cycle], np.bool_),
+        cut_frames=np.asarray(getattr(mot, "cuts", ()), np.int64).reshape(-1),
     )
 
 
@@ -518,9 +610,10 @@ def save_plan(pl, path, W, H, fps):
     Only plain numeric/unicode/boolean arrays are stored (no object dtype), so the file loads with
     ``np.load(path, allow_pickle=False)``. Contents: schema tag, frame dimensions, frame count, analysis fps,
     the per-frame global homographies, residual mesh/row corrections, raw/smoothed corner quads, the
-    fallback count, and the opt-in sampled border-backoff result (applied clip-wide ``scale``, the worst
-    sampled out-of-bounds fraction at that scale, and whether the probe ran). Schema ``mlxstab.plan/1`` is the
-    legacy layout without those three fields and is still loadable read-only."""
+    fallback count, the opt-in sampled border-backoff result (applied clip-wide ``scale``, the worst
+    sampled out-of-bounds fraction at that scale, and whether the probe ran), and the explicit shot-start
+    frame indices (``cut_frames``, empty for one continuous shot). Schema ``mlxstab.plan/1`` is the
+    legacy layout without those fields and is still loadable read-only."""
     np.savez_compressed(
         path,
         schema=np.asarray(PLAN_SCHEMA), width=np.int64(W), height=np.int64(H),
@@ -531,6 +624,7 @@ def save_plan(pl, path, W, H, fps):
         sampled_border_scale=np.float64(pl.sampled_border_scale),
         sampled_border_worst_frac=np.float64(pl.sampled_border_worst_frac),
         sampled_border_measured=np.bool_(pl.sampled_border_measured),
+        cut_frames=np.asarray(getattr(pl, "cuts", ()), np.int64).reshape(-1),
     )
 
 
@@ -604,7 +698,8 @@ def _scaled_plan(pl, scale):
     eye = np.eye(3)
     Gs = [eye + scale * (np.asarray(g, np.float64) - eye) for g in pl.G]
     return Plan(G=Gs, mesh_corr=pl.mesh_corr * scale, row_corr=pl.row_corr * scale,
-                raw_quads=pl.raw_quads, path_quads=pl.path_quads, fallbacks=pl.fallbacks)
+                raw_quads=pl.raw_quads, path_quads=pl.path_quads, fallbacks=pl.fallbacks,
+                cuts=getattr(pl, "cuts", ()))
 
 
 def _valid_mask_np(coords, H, W):
@@ -757,7 +852,7 @@ def _with_sampled_border_meta(pl, scale, worst):
     return Plan(G=pl.G, mesh_corr=pl.mesh_corr, row_corr=pl.row_corr, raw_quads=pl.raw_quads,
                 path_quads=pl.path_quads, fallbacks=pl.fallbacks,
                 sampled_border_scale=float(scale), sampled_border_worst_frac=float(worst),
-                sampled_border_measured=True)
+                sampled_border_measured=True, cuts=getattr(pl, "cuts", ()))
 
 
 def sampled_border_backoff(pl, W, H, limit):
@@ -789,9 +884,14 @@ def sampled_border_backoff(pl, W, H, limit):
 def plan(mot, cfg, roll=None, n_frames=None):
     W, H = mot.W, mot.H; stride = getattr(mot, "stride", 1)
     Ta = len(mot.fits) + 1; T = n_frames or (Ta - 1) * stride + 1
+    cuts = _validate_cuts_for_stride(_normalize_cuts(getattr(mot, "cuts", ()), T), stride)
+    cut_set = set(cuts)
+    segments = _segments(T, cuts)
     cs = G.corners(W, H)
     Cs = [np.eye(3)]
-    for f in mot.fits: Cs.append(Cs[-1] @ np.linalg.inv(f.H))                 # analysed frame -> reference
+    for k, f in enumerate(mot.fits):                                         # analysed frame -> shot reference
+        if (k + 1) * stride in cut_set: Cs.append(np.eye(3))                  # new shot starts a fresh reference
+        else: Cs.append(Cs[-1] @ np.linalg.inv(f.H))
     quads = np.stack([G.apply_h(C, cs) for C in Cs])                           # camera path in corner space
     if stride > 1 or T != Ta:                                                  # path analysed at a lower rate: interpolate it
         quads = _upsample_time(quads, stride, T); Cs = [G.dlt(cs, q) for q in quads]
@@ -805,9 +905,12 @@ def plan(mot, cfg, roll=None, n_frames=None):
     th = np.unwrap(np.angle(a)); ls = np.log(np.abs(a))
     R = 0.5 * np.hypot(W, H); b = cfg.budget * W
     P = np.stack([t.real, t.imag], 1)
-    P = SM.smooth_columns(P, cfg.smooth, cfg.sigma, b, cfg.l1_weights, cfg.fidelity)
-    ang = SM.smooth_columns(np.stack([th, ls], 1) * R, cfg.smooth, cfg.sigma, b, cfg.l1_weights, cfg.fidelity) / R      # in corner-pixel units
-    rs = SM.smooth_columns(res.reshape(T, 8), cfg.smooth, cfg.sigma, b, cfg.l1_weights, cfg.fidelity).reshape(T, 4, 2)
+    # Smooth each shot independently: a cut must not leak path or residuals into the next shot.
+    P = _smooth_segments(P, segments, cfg.smooth, cfg.sigma, b, cfg.l1_weights, cfg.fidelity)
+    ang = _smooth_segments(np.stack([th, ls], 1) * R, segments, cfg.smooth, cfg.sigma, b,
+                           cfg.l1_weights, cfg.fidelity) / R      # in corner-pixel units
+    rs = _smooth_segments(res.reshape(T, 8), segments, cfg.smooth, cfg.sigma, b,
+                          cfg.l1_weights, cfg.fidelity).reshape(T, 4, 2)
     path = np.zeros_like(quads)
     for i in range(T):
         path[i] = G.similarity_apply(base, np.exp(ang[i, 1] + 1j * ang[i, 0]), P[i, 0] + 1j * P[i, 1]) + rs[i]
@@ -823,17 +926,27 @@ def plan(mot, cfg, roll=None, n_frames=None):
     gc, gr = cfg.mesh
     mesh_corr = np.zeros((T, gr + 1, gc + 1, 2)); row_corr = np.zeros((T, max(cfg.rs_rows, 1), 2))
     mb = cfg.mesh_budget * W
+    def residual_path(values, shape):
+        """Accumulate per-pair residuals from zero at every shot start, then bring them to frame rate."""
+        out = np.zeros((Ta,) + shape, np.float64)
+        for k, v in enumerate(values):
+            out[k + 1] = (np.zeros_like(v) if (k + 1) * stride in cut_set else out[k] + v)
+        if stride > 1 or T != Ta: out = _upsample_time(out, stride, T)
+        return out
     if gc > 0 and mot.fits:
-        M = np.concatenate([np.zeros((1, gr + 1, gc + 1, 2)), np.cumsum([f.mesh for f in mot.fits], 0)])
-        if stride > 1 or T != Ta: M = _upsample_time(M, stride, T)
-        Ms = SM.smooth_columns(M.reshape(T, -1), cfg.smooth, cfg.sigma, mb, cfg.l1_weights, cfg.fidelity).reshape(M.shape)
+        M = residual_path([f.mesh for f in mot.fits], (gr + 1, gc + 1, 2))
+        Ms = _smooth_segments(M.reshape(T, -1), segments, cfg.smooth, cfg.sigma, mb,
+                              cfg.l1_weights, cfg.fidelity).reshape(M.shape)
         mesh_corr = M - Ms
     if cfg.rs_rows > 0 and mot.fits:
-        Rw = np.concatenate([np.zeros((1, cfg.rs_rows, 2)), np.cumsum([f.rows for f in mot.fits], 0)])
-        if stride > 1 or T != Ta: Rw = _upsample_time(Rw, stride, T)
-        Rs = SM.smooth_columns(Rw.reshape(T, -1), cfg.smooth, cfg.sigma, mb, cfg.l1_weights, cfg.fidelity).reshape(Rw.shape)
+        Rw = residual_path([f.rows for f in mot.fits], (cfg.rs_rows, 2))
+        Rs = _smooth_segments(Rw.reshape(T, -1), segments, cfg.smooth, cfg.sigma, mb,
+                              cfg.l1_weights, cfg.fidelity).reshape(Rw.shape)
         row_corr = Rw - Rs
-    pl = Plan(Gs, mesh_corr, row_corr, quads, path, sum(f.fallback for f in mot.fits))
+    fallbacks = sum(bool(f.fallback) and
+                    getattr(f, "fallback_reason", None) != MO.FALLBACK_REASON_SEQUENCE_BOUNDARY
+                    for f in mot.fits)
+    pl = Plan(Gs, mesh_corr, row_corr, quads, path, fallbacks, cuts=cuts)
     limit = getattr(cfg, "max_sampled_border_frac", None)
     if limit is not None:
         pl = sampled_border_backoff(pl, W, H, limit)
@@ -989,7 +1102,13 @@ def _distortion(Gm, W, H):
 
 def stabilize(src, out, mask=None, weights=None, cfg=None, roll=None, start=None, duration=None, fps_out=None,
               flow_fn=None, log=print, report=None, on_step=None, dump_motion=None, dump_motion_npz=None,
-              dump_plan=None, diag_every=0, diag_callback=None, dump_flow_samples_npz=None):
+              dump_plan=None, diag_every=0, diag_callback=None, dump_flow_samples_npz=None, cuts=None):
+    """Stabilize one clip.
+
+    ``cuts`` is opt-in: a sequence of internal frame indices that begin a new shot. Pairs spanning a cut are
+    not measured, the flow backend is reset, and planning/smoothing restart independently per shot. Default
+    ``None`` preserves the single-shot behaviour. Cuts must align with ``Config.analysis_stride``.
+    """
     cfg = cfg or Config()
     if cfg.warp_diag and diag_callback is not None and diag_every:
         raise ValueError("choose all-frame warp_diag or sampled diagnostics, not both")
@@ -1009,7 +1128,7 @@ def stabilize(src, out, mask=None, weights=None, cfg=None, roll=None, start=None
                              valid, fb_err, fb_tol, fb_inside))
 
     mot = analyze(frames, flow_fn, cfg, W, H, fps, log, on_step=on_step, stride=cfg.analysis_stride,
-                  flow_sample_callback=capture_flow_sample if flow_samples is not None else None)
+                  flow_sample_callback=capture_flow_sample if flow_samples is not None else None, cuts=cuts)
     if flow_samples is not None:
         save_flow_samples_npz(flow_samples, dump_flow_samples_npz, W, H, fps, cfg.analysis_stride,
                               cfg.step, mot.n_frames)
@@ -1060,6 +1179,7 @@ def stabilize(src, out, mask=None, weights=None, cfg=None, roll=None, start=None
            "diagnostics_total_s": diag_total, "observed_nondiag_render_s": (t3 - t2) - diag_total,
            "timing_s": {"analysis": t1 - t0, "plan": t2 - t1, "render": t3 - t2},
            "fps_analysis": n / (t1 - t0), "fps_render": n / (t3 - t2), "fps_total": n / (t3 - t0), "fps": fps, "interlaced": info["interlaced"], "fallback_frames": pl.fallbacks,
+           "cut_frames": list(pl.cuts), "sequence_boundaries": len(pl.cuts),
            "mean_border_frac": float(np.mean(borders)), "max_border_frac": float(np.max(borders)),
            "cropping_ratio": float(1 - np.mean(borders)), "distortion_scope": "global_homography_only",
            "distortion_min": float(np.min(dv)) if dv else None, "distortion_mean": float(np.mean(dv)) if dv else None,

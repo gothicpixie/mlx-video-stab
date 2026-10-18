@@ -75,15 +75,15 @@ MODE_META = {
 # Keys written by ``mlxstab.stabilize.save_motion_npz``; every one must be present and well-formed.
 MOTION_REQUIRED_KEYS = ("schema", "width", "height", "n_frames", "fps", "stride", "n_fits",
                         "H", "mesh", "rows", "inlier_frac", "mover_frac", "fallback")
-# Observation-coverage support masses added in ``mlxstab.motion/2``; required for /2, /3 and /4, absent for /1.
+# Observation-coverage support masses added in ``mlxstab.motion/2``; required for /2 through /5, absent for /1.
 MOTION_SUPPORT_KEYS = ("mesh_support_mass", "row_support_mass")
-# Forward-backward cycle-consistency maps added in ``mlxstab.motion/3``; required for /3 and /4, absent for /1, /2.
+# Forward-backward cycle-consistency maps added in ``mlxstab.motion/3``; required for /3 through /5.
 MOTION_CYCLE_KEYS = ("cycle_err_rms", "cycle_inconsistency_frac", "cycle_sample_mass", "cycle_map_available")
 # Fit-gate diagnostics (valid/RANSAC-inlier counts and a stable numeric fallback reason code) added in
-# ``mlxstab.motion/4``; required for /4, absent for /1, /2 and /3 (their Fits load with the three fields ``None``).
+# ``mlxstab.motion/4``; required for /4 and /5, absent for /1, /2 and /3 (their Fits load with the three fields ``None``).
 MOTION_FIT_META_KEYS = ("n_valid_samples", "n_ransac_inliers", "fallback_reason_code", "fit_meta_available")
-# The just-captured, still-unpublished ``/4`` payloads named the same integer code array ``fallback_reason``
-# before the standard field name ``fallback_reason_code``; read that pre-standardization key as a fallback so
+# The just-captured, still-unpublished ``/4`` payloads named the integer code array ``fallback_reason`` before
+# the standard field name ``fallback_reason_code``; read that pre-standardization key as a fallback so
 # the preserved capture still loads. The writer only ever emits the canonical ``fallback_reason_code``.
 MOTION_FIT_META_REASON_FALLBACK_KEY = "fallback_reason"
 
@@ -167,7 +167,8 @@ def _numeric_array(z, key, shape=None):
 def load_motion_npz(path):
     """Load and validate a ``save_motion_npz`` NPZ, then reconstruct ``mlxstab.stabilize.Motion``.
 
-    Returns ``(motion, meta)``. ``mlxstab.motion/4`` (with the ``mesh_support_mass``/``row_support_mass``
+    Returns ``(motion, meta)``. ``mlxstab.motion/5`` (with explicit shot boundaries and the
+    ``sequence_boundary`` reason), ``mlxstab.motion/4`` (with the ``mesh_support_mass``/``row_support_mass``
     observation-coverage arrays, the forward-backward cycle maps **and** the per-fit gate diagnostics
     ``n_valid_samples``/``n_ransac_inliers``/``fallback_reason_code``), ``mlxstab.motion/3`` (support + cycle, no fit
     metadata), ``mlxstab.motion/2`` (support only, cycle maps and fit metadata loaded as ``None``) and legacy
@@ -192,9 +193,9 @@ def load_motion_npz(path):
         _require(schema in S.MOTION_SCHEMAS, "bad_schema",
                  f"schema {schema!r} is not one of {S.MOTION_SCHEMAS!r}")
         legacy = schema == S.MOTION_SCHEMA_V1                    # /1 has no support-mass arrays (support=None)
-        has_support = schema in S.MOTION_SCHEMAS_WITH_SUPPORT    # /2, /3, /4 carry support mass
-        has_cycle = schema in S.MOTION_SCHEMAS_WITH_CYCLE        # /3, /4 carry the cycle maps
-        has_fit_meta = schema == S.MOTION_SCHEMA                 # only /4 carries the fit-gate diagnostics
+        has_support = schema in S.MOTION_SCHEMAS_WITH_SUPPORT    # /2 through /5 carry support mass
+        has_cycle = schema in S.MOTION_SCHEMAS_WITH_CYCLE        # /3 through /5 carry cycle maps
+        has_fit_meta = schema in S.MOTION_SCHEMAS_WITH_FIT_META   # /4 and /5 carry fit-gate diagnostics
 
         W, H = _int_scalar(z, "width"), _int_scalar(z, "height")
         n_frames = _int_scalar(z, "n_frames")
@@ -308,16 +309,16 @@ def load_motion_npz(path):
             _a_max = int(avail.max()) if avail.size else 0
             _require(_a_min >= 0 and _a_max <= 1, "bad_range",
                      f"'fit_meta_available' values must be 0 or 1, got [{_a_min}, {_a_max}]")
-            # Reason codes are the stable integer codes in ``mlxstab.motion.FALLBACK_REASON_CODES`` (0..3),
-            # with ``FALLBACK_REASON_UNAVAILABLE_CODE`` (-1) for a fit whose metadata was not recorded. Check
-            # the global range first, then that the code agrees with the per-fit availability flag: an
-            # unavailable fit must be exactly -1 and an available fit must be 0..3. This never invents metadata.
+            # Reason codes are schema-versioned: /4 permits 0..3 and /5 adds sequence_boundary as code 4.
+            # ``FALLBACK_REASON_UNAVAILABLE_CODE`` (-1) marks a fit whose metadata was not recorded.
             _code_lo, _code_hi = min(MO.FALLBACK_REASON_BY_CODE), max(MO.FALLBACK_REASON_BY_CODE)
+            _schema_reason_hi = (_code_hi if schema == S.MOTION_SCHEMA else
+                                 MO.FALLBACK_REASON_CODES[MO.FALLBACK_REASON_LOW_RANSAC_INLIER_FRACTION])
             _c_min = int(reason_code.min()) if reason_code.size else 0
             _c_max = int(reason_code.max()) if reason_code.size else 0
-            _require(_c_min >= MO.FALLBACK_REASON_UNAVAILABLE_CODE and _c_max <= _code_hi, "bad_range",
-                     f"{reason_key!r} must be in [{MO.FALLBACK_REASON_UNAVAILABLE_CODE}, {_code_hi}] "
-                     f"(-1 = unavailable, {_code_lo}..{_code_hi} = a real reason), got [{_c_min}, {_c_max}]")
+            _require(_c_min >= MO.FALLBACK_REASON_UNAVAILABLE_CODE and _c_max <= _schema_reason_hi, "bad_range",
+                     f"{reason_key!r} must be in [{MO.FALLBACK_REASON_UNAVAILABLE_CODE}, {_schema_reason_hi}] "
+                     f"for schema {schema!r} (-1 = unavailable), got [{_c_min}, {_c_max}]")
             _unavail = ~avail.astype(bool)
             for _key, _a in (("n_valid_samples", n_valid), ("n_ransac_inliers", n_inliers)):
                 _bad = int(np.count_nonzero(_a[_unavail] != -1))
@@ -337,6 +338,28 @@ def load_motion_npz(path):
             # /1, /2 and /3 predate the fit-gate diagnostics; their Fits load with all three fields None.
             n_valid = n_inliers = reason_code = avail = None
 
+        # Explicit shot boundaries are required by /5; older payloads have no key and load as one shot.
+        cuts = ()
+        if schema == S.MOTION_SCHEMA:
+            _require("cut_frames" in files, "missing_keys", "schema /5 requires 'cut_frames'")
+        if "cut_frames" in files:
+            cf = _numeric_array(z, "cut_frames", None)
+            _require(cf.ndim == 1 and cf.dtype.kind in "iu", "bad_shape",
+                     f"'cut_frames' must be a 1-D integer array, got shape {cf.shape} dtype {cf.dtype}")
+            cf = [int(v) for v in cf]
+            _require(all(0 <= v < n_frames for v in cf), "bad_range",
+                     f"'cut_frames' must lie inside [0, {n_frames}), got {cf}")
+            _require(cf == sorted(set(cf)), "bad_range",
+                     f"'cut_frames' must be sorted and unique, got {cf}")
+            cuts = tuple(cf)
+        if schema == S.MOTION_SCHEMA:
+            expected_boundary_fits = [c // stride - 1 for c in cuts]
+            actual_boundary_fits = np.flatnonzero(
+                reason_code == MO.FALLBACK_REASON_CODES[MO.FALLBACK_REASON_SEQUENCE_BOUNDARY]).tolist()
+            _require(actual_boundary_fits == expected_boundary_fits, "bad_range",
+                     "schema /5 sequence_boundary fit reasons must match cut_frames and stride; "
+                     f"expected fit indices {expected_boundary_fits}, got {actual_boundary_fits}")
+
         def _cycle(i, arr):
             return None if cyc_avail is None or not bool(cyc_avail[i]) else np.array(arr[i], np.float64)
 
@@ -355,14 +378,21 @@ def load_motion_npz(path):
                     cycle_err_rms=_cycle(i, cyc_rms), cycle_inconsistency_frac=_cycle(i, cyc_frac),
                     cycle_sample_mass=_cycle(i, cyc_mass))
                 for i in range(n_fits)]
-        mot = S.Motion(W, H, fps, fits=fits, stride=stride, n_frames=n_frames)
+        mot = S.Motion(W, H, fps, fits=fits, stride=stride, n_frames=n_frames, cuts=cuts)
+        sequence_boundary_code = MO.FALLBACK_REASON_CODES[MO.FALLBACK_REASON_SEQUENCE_BOUNDARY]
+        sequence_boundaries = (int(np.count_nonzero(reason_code == sequence_boundary_code))
+                               if reason_code is not None else len(cuts))
+        actual_fallbacks = (fb & (reason_code != sequence_boundary_code)
+                            if reason_code is not None else fb)
         meta = {
             "path": str(path),
             "schema": schema,
             "width": W, "height": H, "n_frames": n_frames, "fps": fps, "stride": stride, "n_fits": n_fits,
             "mesh_cells": [int(mesh.shape[2] - 1), int(mesh.shape[1] - 1)],   # (gc, gr)
             "row_bands": int(rows.shape[1]),
-            "fallback_fits": int(np.count_nonzero(fb)),
+            "fallback_fits": int(np.count_nonzero(actual_fallbacks)),
+            "sequence_boundaries": sequence_boundaries,
+            "cut_frames": list(cuts),
             "support_mass": {
                 "present": has_support,
                 "keys": list(MOTION_SUPPORT_KEYS),

@@ -137,7 +137,7 @@ def test_motion_npz_roundtrip_reconstructs_fits(tmp_path):
                                 "n_valid_samples", "n_ransac_inliers", "fallback_reason_code", "fit_meta_available",
                                 "mesh_support_mass", "row_support_mass",
                                 "cycle_err_rms", "cycle_inconsistency_frac", "cycle_sample_mass",
-                                "cycle_map_available"}
+                                "cycle_map_available", "cut_frames"}
         assert all(z[k].dtype.kind in "fiuUb" for k in z.files)
         assert z["mesh_support_mass"].shape == (2, 4, 5) and z["row_support_mass"].shape == (2, 1)
         # The fixtures carry no cycle maps, so save dumps zero maps tagged unavailable.
@@ -186,7 +186,7 @@ def test_motion_v2_roundtrip_preserves_support_mass(tmp_path):
     S.save_motion_npz(mot, str(path), S.Config(mesh=(gc, gr), rs_rows=nr))
 
     with np.load(path, allow_pickle=False) as z:
-        assert str(z["schema"]) == "mlxstab.motion/4"
+        assert str(z["schema"]) == "mlxstab.motion/5"
         np.testing.assert_array_equal(z["mesh_support_mass"][0], msm)
         np.testing.assert_array_equal(z["row_support_mass"][0], rsm)
 
@@ -267,7 +267,7 @@ def test_legacy_v3_payload_loads_with_support_and_cycle_but_no_fit_meta(tmp_path
 def base_motion_payload(n_fits=2, mesh_cells=(4, 3), n_rows=1, n_frames=3):
     gc, gr = mesh_cells
     return {
-        "schema": np.asarray(S.MOTION_SCHEMA), "width": np.int64(W), "height": np.int64(H),
+        "schema": np.asarray(S.MOTION_SCHEMA_V4), "width": np.int64(W), "height": np.int64(H),
         "n_frames": np.int64(n_frames), "fps": np.float64(30.0), "stride": np.int64(1),
         "n_fits": np.int64(n_fits),
         "H": np.tile(np.eye(3), (n_fits, 1, 1)), "mesh": np.zeros((n_fits, gr + 1, gc + 1, 2)),
@@ -284,6 +284,13 @@ def base_motion_payload(n_fits=2, mesh_cells=(4, 3), n_rows=1, n_frames=3):
         "cycle_sample_mass": np.zeros((n_fits, gr + 1, gc + 1)),
         "cycle_map_available": np.zeros((n_fits,), bool),
     }
+
+
+def base_motion_v5_payload(n_fits=2, mesh_cells=(4, 3), n_rows=1, n_frames=3):
+    payload = base_motion_payload(n_fits, mesh_cells, n_rows, n_frames)
+    payload["schema"] = np.asarray(S.MOTION_SCHEMA)
+    payload["cut_frames"] = np.zeros((0,), np.int64)
+    return payload
 
 
 def write_payload(tmp_path, payload, name="payload.npz"):
@@ -430,7 +437,7 @@ def test_rejects_support_object_array_without_unpickling(tmp_path):
     assert ei.value.code == "unreadable"
 
 
-def test_motion_v4_roundtrip_preserves_cycle_maps_and_fit_meta(tmp_path):
+def test_motion_v5_roundtrip_preserves_cycle_maps_fit_meta_and_cuts(tmp_path):
     gc, gr, nr = 4, 3, 2
     mesh = np.zeros((gr + 1, gc + 1, 2))
     rows = np.zeros((nr, 2))
@@ -446,7 +453,8 @@ def test_motion_v4_roundtrip_preserves_cycle_maps_and_fit_meta(tmp_path):
     S.save_motion_npz(mot, str(path), S.Config(mesh=(gc, gr), rs_rows=nr))
 
     with np.load(path, allow_pickle=False) as z:
-        assert str(z["schema"]) == "mlxstab.motion/4"
+        assert str(z["schema"]) == S.MOTION_SCHEMA == "mlxstab.motion/5"
+        assert z["cut_frames"].shape == (0,)
         np.testing.assert_array_equal(z["cycle_err_rms"][0], rms)
         np.testing.assert_array_equal(z["cycle_inconsistency_frac"][0], frac)
         np.testing.assert_array_equal(z["cycle_sample_mass"][0], mass)
@@ -470,6 +478,46 @@ def test_motion_v4_roundtrip_preserves_cycle_maps_and_fit_meta(tmp_path):
     assert loaded.fits[1].n_valid_samples is None and loaded.fits[1].n_ransac_inliers is None
     assert loaded.fits[1].fallback_reason is None
     assert meta["cycle_maps"]["present"] is True and meta["cycle_maps"]["available_fits"] == 1
+
+
+def test_motion_v4_remains_loadable_without_cut_metadata(tmp_path):
+    p = base_motion_payload()
+    loaded, meta = R.load_motion_npz(write_payload(tmp_path, p, name="motion_v4.npz"))
+    assert loaded.cuts == () and meta["cut_frames"] == []
+
+
+def test_motion_v4_rejects_v5_sequence_boundary_reason_code(tmp_path):
+    p = base_motion_payload(n_fits=1, n_frames=2)
+    p["n_valid_samples"] = np.array([0], np.int64)
+    p["n_ransac_inliers"] = np.array([0], np.int64)
+    p["fallback_reason_code"] = np.array([MO.FALLBACK_REASON_CODES[MO.FALLBACK_REASON_SEQUENCE_BOUNDARY]],
+                                          np.int64)
+    p["fit_meta_available"] = np.array([True])
+    p["fallback"] = np.array([True])
+    with pytest.raises(R.MotionPayloadError) as ei:
+        R.load_motion_npz(write_payload(tmp_path, p, name="v4_new_reason.npz"))
+    assert ei.value.code == "bad_range"
+
+
+def test_motion_v5_requires_cut_metadata(tmp_path):
+    p = base_motion_v5_payload()
+    del p["cut_frames"]
+    with pytest.raises(R.MotionPayloadError) as ei:
+        R.load_motion_npz(write_payload(tmp_path, p, name="v5_missing_cuts.npz"))
+    assert ei.value.code == "missing_keys" and "cut_frames" in str(ei.value)
+
+
+def test_motion_v5_requires_boundary_fit_reason_to_match_cut_frames(tmp_path):
+    p = base_motion_v5_payload(n_fits=1, n_frames=2)
+    p["n_valid_samples"] = np.array([0], np.int64)
+    p["n_ransac_inliers"] = np.array([0], np.int64)
+    p["fallback_reason_code"] = np.array(
+        [MO.FALLBACK_REASON_CODES[MO.FALLBACK_REASON_SEQUENCE_BOUNDARY]], np.int64)
+    p["fit_meta_available"] = np.array([True])
+    p["fallback"] = np.array([True])
+    with pytest.raises(R.MotionPayloadError) as ei:
+        R.load_motion_npz(write_payload(tmp_path, p, name="orphan_boundary_reason.npz"))
+    assert ei.value.code == "bad_range" and "must match cut_frames" in str(ei.value)
 
 
 def test_rejects_v4_missing_fit_meta_keys(tmp_path):

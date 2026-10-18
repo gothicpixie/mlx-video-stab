@@ -17,6 +17,33 @@ def _flow_downscale_arg(value):
     return scale
 
 
+def _cut_frames_arg(value):
+    """Parse ``--cut-frames`` as comma-separated internal shot-start frame indices."""
+    parts = [p.strip() for p in value.split(",")]
+    if not parts or any(not p for p in parts):
+        raise argparse.ArgumentTypeError("--cut-frames needs at least one integer frame index")
+    out = []
+    for part in parts:
+        try:
+            v = int(part)
+        except ValueError:
+            raise argparse.ArgumentTypeError(f"--cut-frames contains a non-integer: {part!r}") from None
+        if v < 0:
+            raise argparse.ArgumentTypeError(f"--cut-frames must be non-negative, got {v}")
+        out.append(v)
+    return tuple(sorted(set(out)))
+
+
+def _analysis_stride_arg(value):
+    try:
+        stride = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("--analysis-stride must be a positive integer") from None
+    if stride <= 0:
+        raise argparse.ArgumentTypeError("--analysis-stride must be a positive integer")
+    return stride
+
+
 def _positive_gib_bytes(value):
     try:
         gib = float(value)
@@ -64,14 +91,21 @@ def main(argv=None):
                    help="opt-in: cap the sampled output-out-of-bounds fraction (finite, in [0,1)); one clip-wide "
                         "correction scale in [0,1] is chosen so every frame's sampled fraction stays <= this. "
                         "Sampled probe-grid estimate, not a per-pixel guarantee; default disables the backoff")
+    p.add_argument("--cut-frames", type=_cut_frames_arg, default=None, metavar="N[,N...]",
+                   help="opt-in: comma-separated internal frame indices that begin a new shot; no flow pair is "
+                        "measured across a cut and planning restarts per shot (relative to the decoded clip; "
+                        "must align with --analysis-stride)")
+    p.add_argument("--analysis-stride", type=_analysis_stride_arg, default=1,
+                   help="analyse every n-th frame and interpolate the path (default 1)")
     a = p.parse_args(argv)
     gc, gr = (int(v) for v in a.mesh.lower().split("x"))
     cfg = Config(smooth=a.smooth, sigma=a.sigma, budget=a.budget, mesh=(gc, gr), rs_rows=a.rs_rows, flow_iters=a.iters,
                  flow_downscale=a.flow_downscale, max_flow_corr_bytes=a.max_flow_corr_gib,
                  kernel=a.kernel, zoom=a.zoom, fidelity=a.fidelity, warp_diag=a.warp_diag,
-                 max_sampled_border_frac=a.max_sampled_border_frac, crop_zoom=a.crop_zoom)
+                 max_sampled_border_frac=a.max_sampled_border_frac, crop_zoom=a.crop_zoom,
+                 analysis_stride=a.analysis_stride)
     rep = stabilize(a.input, a.output, a.mask, a.weights, cfg, a.roll, a.start, a.duration, a.fps, report=a.report,
-                    log=lambda m: print(m, file=sys.stderr))
+                    log=lambda m: print(m, file=sys.stderr), cuts=a.cut_frames)
     print(json.dumps(rep, indent=1))
 
 

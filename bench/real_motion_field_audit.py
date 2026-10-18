@@ -25,10 +25,10 @@ For every analysed frame pair it reports:
   fitted first-to-last-band displacement delta, the pooled nonlinear residual RMS and a multivariate
   linear-explained fraction, with per-case descriptive statistics and per-pair series;
 * the fit ``inlier_frac`` / ``mover_frac`` / ``fallback`` metadata and per-case aggregates, plus the
-  ``mlxstab.motion/4`` gate diagnostics ``n_valid_samples``, ``n_ransac_inliers`` and the numeric payload
-  ``fallback_reason_code`` mapped back to the human-readable ``fallback_reason`` label
-  (``none`` / ``insufficient_valid_samples`` / ``insufficient_ransac_inliers`` /
-  ``low_ransac_inlier_fraction``) per pair and their counts per case. A legacy ``/1``-``/3`` payload predates
+  ``mlxstab.motion/4`` and ``/5`` gate diagnostics ``n_valid_samples``, ``n_ransac_inliers`` and the numeric payload
+  ``fallback_reason_code`` mapped back to the human-readable ``fallback_reason`` label per pair and their counts
+  per case. Explicit ``sequence_boundary`` placeholders are reported separately from failed geometric fits. A
+  legacy ``/1``-``/3`` payload predates
   these fields, so they are reported as ``null`` with ``fit_metadata_available=false`` rather than invented.
 
 Honesty scope
@@ -48,9 +48,10 @@ estimate: a smooth vertical row displacement is rolling-shutter-*like*, but it c
 motion or model mismatch, and no camera readout time, focal calibration or ground-truth readout is inferred.
 The source windows of different runs are typically inferred from
 historical filenames and may be nested; this audit records them but never treats them as a formal selection.
-The ``fallback_reason`` is a label for the existing ``fit_motion`` refusal gates (the first failing gate wins),
-not a new decision or a quality judgement: it says *which* sample/inlier threshold produced an identity
-fallback, not whether the footage is stable or whether the pixels are correct. No production code, default or
+The ``fallback_reason`` labels the first failing ``fit_motion`` gate, or ``sequence_boundary`` when a caller
+explicitly skips a pair across a cut. Boundary placeholders are counted separately from failed geometric fits.
+These labels are not quality judgements: they do not say whether the footage is stable or whether the pixels are
+correct. No production code, default or
 output is changed and no media is decoded.
 
 Payload safety
@@ -73,7 +74,8 @@ from pathlib import Path
 
 import numpy as np
 
-from mlxstab.motion import FALLBACK_REASONS, SUPPORT_THRESHOLD
+from mlxstab.motion import (FALLBACK_REASONS, FALLBACK_REASON_SEQUENCE_BOUNDARY,
+                            SUPPORT_THRESHOLD)
 
 from . import real_composition_audit as RCA
 from .manifest import json_safe
@@ -119,11 +121,11 @@ SCOPE_NOTE = (
     "from other motion or model mismatch, so this is NOT a rolling-shutter detector and NOT a physical readout "
     "estimate: no camera readout time, focal calibration or ground-truth readout is inferred. No media is "
     "decoded, no frames are rendered, no production code/default/output is changed, and no composite/winner "
-    "score is produced. It also reports the mlxstab.motion/4 fit-gate diagnostics: per-pair n_valid_samples and "
+    "score is produced. It also reports the mlxstab.motion/4 and /5 fit diagnostics: per-pair n_valid_samples and "
     "n_ransac_inliers and the numeric fallback_reason_code mapped back to the stable human-readable "
-    "fallback_reason label naming the first failing fit_motion gate (none / insufficient_valid_samples / "
-    "insufficient_ransac_inliers / low_ransac_inlier_fraction), with per-case reason counts. These label the "
-    "existing refusal only and are not a quality score; legacy /1-/3 payloads predate them and are reported as "
+    "fallback_reason label for a passed fit, the first failing gate, or an explicit sequence boundary. Boundary "
+    "placeholders are counted separately from failed fits. Per-case reason counts are descriptive and not a "
+    "quality score; legacy /1-/3 payloads predate fit metadata and are reported as "
     "null with fit_metadata_available=false."
 )
 
@@ -638,9 +640,12 @@ def _case_summary(pairs, mesh_mag, row_mag, mesh_supported=None, mesh_filled=Non
     def _cat(chunks):
         return np.concatenate(chunks) if chunks else np.zeros(0)
 
-    fallback_pairs = [p["pair"] for p in pairs if p["fallback"]]
+    sequence_boundary_pairs = [p["pair"] for p in pairs
+                               if p["fallback_reason"] == FALLBACK_REASON_SEQUENCE_BOUNDARY]
+    fallback_pairs = [p["pair"] for p in pairs
+                      if p["fallback"] and p["fallback_reason"] != FALLBACK_REASON_SEQUENCE_BOUNDARY]
     # Per-case counts of the stable fit-gate reasons. "unavailable" collects fits whose payload predates the
-    # mlxstab.motion/4 diagnostics (legacy /1-/3), so an absent reason is never silently counted as "none".
+    # mlxstab.motion/4-/5 diagnostics (legacy /1-/3), so an absent reason is never silently counted as "none".
     fallback_reason_counts = {r: 0 for r in FALLBACK_REASONS}
     fallback_reason_counts["unavailable"] = 0
     fallback_reason_unavailable_pairs = []
@@ -687,6 +692,8 @@ def _case_summary(pairs, mesh_mag, row_mag, mesh_supported=None, mesh_filled=Non
         "n_pairs": len(pairs),
         "n_fallback": len(fallback_pairs),
         "fallback_pairs": fallback_pairs,
+        "n_sequence_boundaries": len(sequence_boundary_pairs),
+        "sequence_boundary_pairs": sequence_boundary_pairs,
         "fallback_reason_counts": fallback_reason_counts,
         "fallback_reason_unavailable_pairs": fallback_reason_unavailable_pairs,
         "rotation_deg_y_down": _stats([p["rotation_deg_y_down"] for p in pairs]),
@@ -825,10 +832,11 @@ def run_real_motion_field_audit(manifest_paths):
         "motion_payload_safety": {
             "loader": "bench.real_composition_audit.load_motion_npz (np.load(..., allow_pickle=False))",
             "validated": ["manifest json object", "status success", "outputs.motion", "source identity",
-                          "motion schema (mlxstab.motion/1, /2, /3 or /4)", "motion required keys",
-                          "motion array shapes", "motion support-mass shapes (v2/v3/v4)",
-                          "motion cycle-map shapes/availability/ranges (v3/v4)",
-                          "motion fit-gate shapes/availability/reason values (v4)", "motion dtype kinds",
+                          "motion schema (mlxstab.motion/1 through /5)", "motion required keys",
+                          "motion array shapes", "motion support-mass shapes (v2 through v5)",
+                          "motion cycle-map shapes/availability/ranges (v3 through v5)",
+                          "motion fit-gate shapes/availability/reason values (v4/v5)",
+                          "motion cut-boundary indices (v5)", "motion dtype kinds",
                           "motion finiteness", "no pickle"],
             "legacy_support": "mlxstab.motion/1 payloads load with support=None; support maps and "
                               "supported-vs-filled splits are then reported as null",
@@ -838,7 +846,7 @@ def run_real_motion_field_audit(manifest_paths):
                                    "n_valid_samples, n_ransac_inliers and fallback_reason are then reported as "
                                    "null with fit_metadata_available=false rather than invented",
             "row_line_note": "the row-band line profile is computed from Fit.rows, which every motion schema "
-                              "(/1, /2, /3 and /4) carries, so it is unaffected by the support/cycle/fit-metadata "
+                              "(/1 through /5) carries, so it is unaffected by support/cycle/fit metadata "
                               "availability differences; the unweighted fit never reads support masses",
         },
         "identity": {
@@ -868,20 +876,23 @@ def run_real_motion_field_audit(manifest_paths):
                      "leftovers are included; not metric depth or object semantics",
         },
         "fallback_reason_definition": {
-            "what": "per-pair fit-gate diagnostics from mlxstab.motion/4: n_valid_samples, n_ransac_inliers "
-                    "and the integer fallback_reason_code (0..3) mapped back to a stable fallback_reason label "
-                    "naming the first fit_motion gate that refused the fit",
+            "what": "per-pair diagnostics from mlxstab.motion/4 and /5: n_valid_samples, n_ransac_inliers "
+                    "and the integer fallback_reason_code mapped back to a stable fallback_reason label; codes "
+                    "0..3 name the first fit_motion gate that refused the fit, and /5 code 4 marks an explicit "
+                    "sequence boundary where no fit was attempted",
             "none": "the fit passed every gate (a successful fit records the observed sample/inlier counts)",
             "insufficient_valid_samples": "n_valid_samples < min_valid; the fit never reached RANSAC",
             "insufficient_ransac_inliers": "n_ransac_inliers < min_valid",
             "low_ransac_inlier_fraction": "n_ransac_inliers / n_valid_samples < the inlier-fraction gate",
-            "precedence": "the reasons are tested in the order above; the first failing gate names the reason, "
-                          "so a pair failing several thresholds still gets one deterministic label",
+            "sequence_boundary": "the frame pair spans a caller-supplied cut; no flow or geometric fit was run",
+            "precedence": "geometric reasons are tested in the order above; the first failing gate names the reason, "
+                          "so a pair failing several thresholds still gets one deterministic label; a skipped "
+                          "sequence-boundary pair is labelled separately and is not a failed fit",
             "is_not": "a label for the existing fit_motion refusal only: it says which sample/inlier threshold "
                       "produced an identity fallback, not whether the footage is stable or the pixels are "
                       "correct, and it is not a quality score or a combined metric",
             "availability": "null (with fit_metadata_available=false) for manually constructed and legacy "
-                            "/1, /2 and /3 fits; only mlxstab.motion/4 carries the counts and reason",
+                            "/1, /2 and /3 fits; /4 and /5 carry the counts and reason",
         },
         "spatial_proxy_definition": {
             "cell_vector": "mean of a mesh cell's four vertex residual vectors (the residual at the cell centre)",

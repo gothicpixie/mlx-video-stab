@@ -84,12 +84,12 @@ def write_manifest(run, motion_path, *, case="baseline", status="success", dump_
 def save_case(root, *, name="run", case="baseline", fits=None, stride=1, motion_name="motion_r0.npz",
               gc=4, gr=3, nr=2, status="success", dump_motion=True, outputs_motion=None, source_sha="s" * 64,
               weights_sha="w" * 64, decoded=None, window=None, preprocessing=None, write=True, W=W, H=H,
-              fps=30.0):
+              fps=30.0, cuts=()):
     run = Path(root) / name
     run.mkdir(parents=True, exist_ok=True)
     if fits is None:
         fits = [make_fit(similarity_h(W, H, 2.0, 1.05), gc=gc, gr=gr, nr=nr)]
-    mot = S.Motion(W, H, fps, fits=fits, stride=stride, n_frames=len(fits) * stride + 1)
+    mot = S.Motion(W, H, fps, fits=fits, stride=stride, n_frames=len(fits) * stride + 1, cuts=cuts)
     motion_path = run / motion_name
     S.save_motion_npz(mot, str(motion_path), S.Config(mesh=(gc, gr), rs_rows=nr))
     manifest_path = run / "manifest.json"
@@ -567,6 +567,19 @@ def test_report_fallback_reason_counts_and_per_pair_series(tmp_path):
     assert pair_reasons == {0: "none", 1: "insufficient_valid_samples",
                             2: "insufficient_ransac_inliers", 3: "low_ransac_inlier_fraction"}
     json.dumps(R.json_safe(rep), allow_nan=False, sort_keys=True)
+
+
+def test_sequence_boundary_is_reported_separately_from_failed_fits(tmp_path):
+    boundary = make_fit(fallback=True, n_valid_samples=0, n_ransac_inliers=0,
+                        fallback_reason="sequence_boundary")
+    fitted = make_fit(n_valid_samples=150, n_ransac_inliers=140, fallback_reason="none")
+    manifest, *_ = save_case(tmp_path, name="cut", fits=[boundary, fitted], cuts=(1,))
+    rep = R.run_real_motion_field_audit([manifest])
+    summary = rep["cases"][0]["summary"]
+    assert summary["sequence_boundary_pairs"] == [0]
+    assert summary["n_sequence_boundaries"] == 1
+    assert summary["fallback_pairs"] == [] and summary["n_fallback"] == 0
+    assert summary["fallback_reason_counts"]["sequence_boundary"] == 1
 
 
 def test_report_fallback_reason_unavailable_for_legacy(tmp_path):

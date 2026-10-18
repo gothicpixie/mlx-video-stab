@@ -19,8 +19,12 @@ FALLBACK_REASON_NONE = "none"
 FALLBACK_REASON_INSUFFICIENT_VALID_SAMPLES = "insufficient_valid_samples"
 FALLBACK_REASON_INSUFFICIENT_RANSAC_INLIERS = "insufficient_ransac_inliers"
 FALLBACK_REASON_LOW_RANSAC_INLIER_FRACTION = "low_ransac_inlier_fraction"
+# The cut itself is a deliberate observation boundary, not a failed geometric fit. It is recorded on the
+# placeholder pair so the motion payload keeps one entry per analysed pair while plan() resets the path there.
+FALLBACK_REASON_SEQUENCE_BOUNDARY = "sequence_boundary"
 FALLBACK_REASONS = (FALLBACK_REASON_NONE, FALLBACK_REASON_INSUFFICIENT_VALID_SAMPLES,
-                    FALLBACK_REASON_INSUFFICIENT_RANSAC_INLIERS, FALLBACK_REASON_LOW_RANSAC_INLIER_FRACTION)
+                    FALLBACK_REASON_INSUFFICIENT_RANSAC_INLIERS, FALLBACK_REASON_LOW_RANSAC_INLIER_FRACTION,
+                    FALLBACK_REASON_SEQUENCE_BOUNDARY)
 # Stable numeric codes for the serialized payload (the names above remain the public identifiers). The order is
 # the precedence order, so a smaller code is a stronger gate; -1 marks a fit whose metadata was not recorded.
 FALLBACK_REASON_CODES = {name: code for code, name in enumerate(FALLBACK_REASONS)}
@@ -207,6 +211,9 @@ def fallback_reason(n_valid_samples, n_ransac_inliers, min_valid, min_inlier_fra
     1. ``insufficient_valid_samples``: ``n_valid_samples < min_valid`` (the fit never reached RANSAC);
     2. ``insufficient_ransac_inliers``: ``n_ransac_inliers < min_valid`` (too few inliers in absolute count);
     3. ``low_ransac_inlier_fraction``: ``n_ransac_inliers / n_valid_samples < min_inlier_frac``.
+
+    ``sequence_boundary`` is not produced by these gates; ``analyze`` assigns it to the skipped pair at an
+    explicit cut so the placeholder is never mistaken for a failed geometric fit.
 
     Returns ``FALLBACK_REASON_NONE`` when every gate passes. This mirrors the existing
     ``inl.sum() < min_valid or inlier_frac < 0.15`` refusal exactly, so it only *labels* the decision and does

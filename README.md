@@ -39,13 +39,13 @@ or the [launch kit](marketing/README.md) for graphics and announcement copy.
 3. **Motion model, spatially varying**: a robust global similarity (affine / homography selectable) fitted by RANSAC on flow samples
    with forward-backward-inconsistent samples masked out, plus a *residual mesh* (16x9 cells by default, robust kernel regression of
    the flow left over after the global model) and per-row-band residuals for the **rolling shutter**. A frame that is too low-texture
-   falls back to "no global motion" and zero mesh (reported as `fallback_frames`). The forward-backward
+   falls back to "no global motion" and zero mesh on a failed fit (reported as `fallback_frames`). The forward-backward
    cycle error and the tolerance it is compared against are retained per sample as a diagnostic -- a
    forward-backward **cycle-consistency** signal, not a true correspondence error and not calibrated
-   uncertainty -- and are dumped as mesh-grid cycle maps (schema `mlxstab.motion/4`) for the offline
+   uncertainty -- and are dumped as mesh-grid cycle maps (schema `mlxstab.motion/5`) for the offline
    captured-motion audit; a small per-fit gate record (`n_valid_samples`, `n_ransac_inliers`, and a numeric
-   `fallback_reason_code` mapped back to the stable `fallback_reason` label) records why a fit fell back to
-   "no global motion". These diagnostics never change the fit
+   `fallback_reason_code` mapped back to the stable `fallback_reason` label) records why a fit failed; schema
+   `/5` also records an explicit `sequence_boundary` where no fit is attempted. These diagnostics never change the fit
    or the rendered pixels.
 4. **Subject vs camera**: samples on independently moving things (coherent blobs whose flow disagrees with the dominant motion, found
    after the first fit) are excluded from the camera fit and from the mesh.
@@ -64,8 +64,14 @@ or the [launch kit](marketing/README.md) for graphics and announcement copy.
 ```
 python -m mlxstab in.mp4 out.mp4 --mask mask.mp4 [--sigma 15] [--roll roll.json] [--budget 0.04] [--smooth l1|gauss]
                                   [--mesh 16x9|0x0] [--rs-rows 18] [--iters 24] [--flow-downscale 1|2|4|auto]
-                                  [--max-flow-corr-gib GiB] [--start S --duration D] [--fps F]
+                                  [--max-flow-corr-gib GiB] [--cut-frames N[,N...]] [--analysis-stride N]
+                                  [--start S --duration D] [--fps F]
 ```
+`--cut-frames` accepts explicit frame indices, relative to the decoded clip, that begin new shots. The flow pair
+across each cut is skipped, temporal flow state resets, and camera-path smoothing restarts within each shot.
+Indices must align with `--analysis-stride`. This is caller-supplied boundary metadata; it does not detect cuts
+or infer scene content. With no cuts, the existing single-shot behavior is unchanged.
+
 `--flow-downscale auto` chooses the highest flow resolution among 1, 2 and 4 that fits the required positive
 `--max-flow-corr-gib` budget. The estimate counts only the stored forward and backward correlation pyramids; it
 excludes features, activations, temporary allocations and allocator caching, so it is not a peak-memory limit.

@@ -92,7 +92,7 @@ Useful options:
   is passed. The option is recorded in `experiment_identity.capture` so toggling it changes the `content_key`.
 - `--dump-motion` – write the retained repeat-0 fitted motion to `<out-dir>/motion_r0.npz` for the
   real-motion composition audit. The file is a compressed NPZ (no pickle; loads with
-  `np.load(path, allow_pickle=False)`) holding the schema tag (`mlxstab.motion/4`), frame dimensions,
+  `np.load(path, allow_pickle=False)`) holding the schema tag (`mlxstab.motion/5`), frame dimensions,
   `n_frames`, analysis fps, `stride`, the fit count and the stacked per-pair fits (`H [n_fits,3,3]`, `mesh`,
   `rows`, `inlier_frac`, `mover_frac`, `fallback`) plus the per-fit gate diagnostics
   (`n_valid_samples [n_fits]`, `n_ransac_inliers [n_fits]`, the integer `fallback_reason_code [n_fits]` and the
@@ -100,7 +100,8 @@ Useful options:
   (`mesh_support_mass [n_fits,gr+1,gc+1]`, `row_support_mass [n_fits,nr]`; a Fit built without them dumps
   shape-correct zeros) and the forward-backward cycle-consistency maps
   (`cycle_err_rms`, `cycle_inconsistency_frac`, `cycle_sample_mass`, each `[n_fits,gr+1,gc+1]`, and the per-fit
-  `cycle_map_available [n_fits]` flag; a Fit built without them dumps zero maps tagged unavailable). Support
+  `cycle_map_available [n_fits]` flag; a Fit built without them dumps zero maps tagged unavailable), and
+  explicit `cut_frames` shot-start indices. Support
   mass is the non-robust kernel-weighted count of usable non-mover flow samples at each mesh vertex / row
   band, recorded before diffusion -- an observation-coverage diagnostic, **not** a probability and **not** flow
   confidence. The cycle maps are a forward-backward **cycle-consistency** diagnostic only (weighted RMS of
