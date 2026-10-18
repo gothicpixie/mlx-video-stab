@@ -92,7 +92,8 @@ SCOPE_NOTE = (
     "(non-tie), method_agreement means the same mapped method (non-tie), and opposite_physical_sides means the "
     "two raw sides differ (non-tie), which a correctly reversed mapping pairs with method agreement. "
     "Observational evidence only: the sample is small and dependent, the reviewer is a single model over short "
-    "low-resolution translation-only clips, and no causal, significance or product-quality conclusion follows."
+    "low-resolution review clips (which may be reduced research renders or full-render comparisons), and no "
+    "causal, significance or product-quality conclusion follows."
 )
 
 NO_QUALITY_SCORE_NOTE = (

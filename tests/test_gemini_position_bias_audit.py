@@ -491,6 +491,16 @@ def test_report_has_no_winner_ranking_score_or_significance(tmp_path):
     assert '"winner"' not in encoded
 
 
+def test_scope_note_does_not_claim_translation_only_clips(tmp_path):
+    report, _, _ = _sample_report(tmp_path)
+    note = report["scope_note"].lower()
+    assert "translation-only" not in note
+    assert "single model" in note
+    assert "short" in note
+    assert "low-resolution" in note
+    assert "no causal, significance or product-quality conclusion follows" in note
+
+
 def test_report_is_byte_stable_and_self_hashed(tmp_path):
     first, original, reversal = _sample_report(tmp_path)
     second = A.audit([original], [reversal], [])
