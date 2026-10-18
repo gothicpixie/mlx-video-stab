@@ -4089,3 +4089,29 @@ accounting, invalid/misaligned cut validation, CLI wiring, and old/new schema ro
 **341 tests** and the full suite passed **1,724 tests** after the final audit-accounting changes. This is a lifecycle
 correctness capability, not evidence of better perceptual quality or an integrated prediction/depth/intent
 model.
+
+### Low-frequency L1 path-fidelity real-footage check (2026-10-18)
+
+Using cached analysis for `00176.MTS` (SHA-256
+`e4b1f80d54dfa9089741486be297c6fe74d754fe127ec04dfe5a7edcf8d9fbb3`), replanned and rendered the previously
+selected t060–070 s and t800–810 s windows with only `l1_low_freq_fidelity=5.0` and sigma 12 changed. The
+reconstruction check reproduced the baseline global path, mesh, rows, and raw/path quads exactly (max absolute
+difference 0); both candidate renders retained the 300-frame cadence and had no fit fallbacks. This isolates the
+planner setting without repeating the expensive optical-flow analysis.
+
+The candidate reduces border loss (mean border fraction 0.718% vs 2.24% at t060, and 0.373% vs the baseline
+1.56% at t800), but it retains more camera path and consequently gives back stabilization. KLT-only estimates
+changed from 0.524 to 0.835 px jitter and 1.039 to 1.756 px frame motion at t060; at t800 they changed from
+0.185 to 0.412 px jitter and 0.239 to 0.626 px frame motion. RAFT measurements also show candidate jitter
+above baseline at both windows (0.848 vs 0.519 px; 0.384 vs 0.063 px), while remaining below raw-input jitter
+(1.587 and 1.036 px). These are correlated windows from one source and flow-based proxies without camera-path
+ground truth; increased retained motion is not itself proof of better intent preservation.
+
+Gemini 3.8 Flash comparisons were baseline-vs-candidate on identical output frames, with panel position reversed.
+The initial review was mixed (ties in original order; opposite mapped preferences on the reversals). A second
+640x360-panel pass on the same windows returned three ties and one baseline preference for visible border/edge
+behavior. Both position-bias audits have zero pairs with non-tie agreement across the two orders. The second
+pass is a resolution-sensitivity check by the same model on the same source windows, not independent evidence.
+The clips, raw judgments and audits are retained under `out/bench/low_freq_l1_fidelity_00176/` and
+`out/bench/gemini_review/low_freq_l1_00176/` (ignored experiment artifacts). The feature remains opt-in; no
+quality win is established and no default change is justified.
