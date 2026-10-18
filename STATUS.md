@@ -4143,3 +4143,13 @@ review and audit remain in ignored `out/bench/matched_crop_visual_review_gemini*
 the same frozen crop rule to the existing `00176.MTS` t060/t800 baselines whose earlier uncropped Gemini calls
 flagged borders, to directly test that framing confound; treat those same-source windows as paired diagnostics,
 not independent validation.
+
+Follow-up (2026-10-18): the frozen rule selected the same 3.885%-area crop for both `00176.MTS` t060–070 and
+t800–810, raising mean mask support to 98.972% and 99.576%, respectively. The earlier uncropped reviews had
+preferred raw at medium confidence in both panel orders for each window. On the matched-crop reviews, Gemini
+returned medium-confidence ties in both orders for both windows; the position audit paired both reversals and
+found zero non-tie method agreements. This directly supports shifting borders as a major contributor to the
+earlier raw preference on these two windows. It does not prove that borders are the only quality issue, eliminate
+all invalid pixels, or generalize beyond two windows from one source. No production crop behavior or default
+changes follow; a crop policy still needs evaluation of motion, retained field of view, and failure cases on
+independent sources.
