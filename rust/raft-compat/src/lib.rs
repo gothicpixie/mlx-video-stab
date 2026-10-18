@@ -6,6 +6,7 @@
 
 use mlx_rs::module::Module;
 use mlx_rs::nn::{BatchNorm, Conv2d, relu};
+use mlx_rs::ops::indexing::IndexOp;
 use mlx_rs::{Array, Dtype};
 
 /// Bilinearly sample one RAFT correlation-pyramid level.
@@ -104,6 +105,161 @@ pub fn lookup_level(
         }
     }
     Ok(Array::from_slice(&out, &[n as i32, k as i32]))
+}
+
+/// Floor-sized 2x2 average pooling on NHWC `[N,H,W,1]`.
+///
+/// Odd trailing rows and columns are dropped before pooling, matching Python's
+/// `_pool2` and PyTorch's `avg_pool2d(2)` rather than padding them. The pooled
+/// result has shape `[N,H/2,W/2,1]` and keeps the input dtype.
+fn pool2(corr: &Array) -> Result<Array, String> {
+    let shape = corr.shape();
+    if shape.len() != 4 || shape[0] <= 0 || shape[1] <= 0 || shape[2] <= 0 || shape[3] != 1 {
+        return Err(format!(
+            "pool2 expects non-empty NHWC [N,H,W,1], got {shape:?}"
+        ));
+    }
+    let (batch, height, width) = (shape[0], shape[1], shape[2]);
+    let pooled_height = height / 2;
+    let pooled_width = width / 2;
+    if pooled_height == 0 || pooled_width == 0 {
+        return Err(format!(
+            "pool2 would drop the whole spatial extent of {height}x{width}"
+        ));
+    }
+    // Slice off the trailing odd row/column before reshaping into 2x2 cells.
+    let cropped = corr.index((.., 0..pooled_height * 2, 0..pooled_width * 2, ..));
+    let cells = cropped
+        .reshape(&[batch, pooled_height, 2, pooled_width, 2, 1])
+        .map_err(|e| e.to_string())?;
+    cells.mean_axes(&[2, 4], false).map_err(|e| e.to_string())
+}
+
+/// RAFT all-pairs correlation pyramid over two NHWC feature maps.
+///
+/// `f1` and `f2` each have shape `[1,H,W,C]`. Level zero stores
+/// `[H*W,H,W,1]` values from `(f1 @ f2^T) / sqrt(C)`; each subsequent level is
+/// the floor-sized 2x2 average of the previous one. Lookups use level-zero
+/// `(x,y)` pixel coordinates and the same XY-order, bilinear, zero-padding
+/// contract as [`lookup_level`].
+#[derive(Debug)]
+pub struct CorrBlock {
+    pub levels: usize,
+    pub radius: usize,
+    pub pyr: Vec<Array>,
+}
+
+impl CorrBlock {
+    /// Build the correlation pyramid from paired NHWC feature maps.
+    ///
+    /// `dtype` controls the stored correlation values and must be float16 or
+    /// float32, matching Python's `CorrBlock(..., dtype=...)`. The result is
+    /// lazy, like the Python graph. Every requested pyramid level must retain a
+    /// non-empty spatial extent.
+    pub fn new(
+        f1: &Array,
+        f2: &Array,
+        levels: usize,
+        radius: usize,
+        dtype: Dtype,
+    ) -> Result<Self, String> {
+        if levels == 0 {
+            return Err("levels must be at least 1".into());
+        }
+        if !matches!(dtype, Dtype::Float16 | Dtype::Float32) {
+            return Err(format!(
+                "correlation dtype must be float16 or float32, got {dtype:?}"
+            ));
+        }
+        let shape = f1.shape();
+        if shape.len() != 4 || shape[0] != 1 || shape[1] <= 0 || shape[2] <= 0 || shape[3] <= 0 {
+            return Err(format!(
+                "f1 must be non-empty NHWC [1,H,W,C], got {shape:?}"
+            ));
+        }
+        if f2.shape() != shape {
+            return Err(format!(
+                "f1 and f2 must have the same shape, got {:?} and {:?}",
+                shape,
+                f2.shape()
+            ));
+        }
+        let (height, width, channels) = (shape[1], shape[2], shape[3]);
+        let pair = height * width;
+
+        let a = f1
+            .reshape(&[pair, channels])
+            .and_then(|v| v.as_dtype(dtype))
+            .map_err(|e| e.to_string())?;
+        let b_t = f2
+            .reshape(&[pair, channels])
+            .and_then(|v| v.as_dtype(dtype))
+            .and_then(|v| v.transpose_axes(&[1, 0]))
+            .map_err(|e| e.to_string())?;
+        // Python computes the divisor with math.sqrt (f64), then MLX converts the
+        // scalar to the stored dtype. Keep the divisor in that dtype: dividing by
+        // a float32 array would promote a float16 correlation pyramid to float32.
+        let divisor = Array::from_f32((channels as f64).sqrt() as f32)
+            .as_dtype(dtype)
+            .map_err(|e| e.to_string())?;
+        let corr = a
+            .matmul(&b_t)
+            .and_then(|v| v.divide(&divisor))
+            .and_then(|v| v.reshape(&[pair, height, width, 1]))
+            .map_err(|e| e.to_string())?;
+
+        let mut pyr = Vec::with_capacity(levels);
+        pyr.push(corr);
+        for level in 1..levels {
+            let previous = pyr.last().unwrap();
+            let (h, w) = (previous.shape()[1], previous.shape()[2]);
+            if h < 2 || w < 2 {
+                return Err(format!(
+                    "correlation level {level} would be empty from level {} {h}x{w}",
+                    level - 1
+                ));
+            }
+            pyr.push(pool2(previous)?);
+        }
+        Ok(Self {
+            levels,
+            radius,
+            pyr,
+        })
+    }
+
+    /// Look up all pyramid levels at NHWC `[1,h,w,2]` level-zero `(x,y)` coordinates.
+    ///
+    /// Returns `[1,h,w,levels*(2*radius+1)^2]` float32 values, matching Python's
+    /// `CorrBlock.__call__`.
+    pub fn lookup(&self, coords: &Array) -> Result<Array, String> {
+        let shape = coords.shape();
+        if shape.len() != 4 || shape[0] != 1 || shape[1] <= 0 || shape[2] <= 0 || shape[3] != 2 {
+            return Err(format!(
+                "coords must be non-empty NHWC [1,H,W,2], got {shape:?}"
+            ));
+        }
+        let (height, width) = (shape[1], shape[2]);
+        let pair = self.pyr[0].shape()[0];
+        if height * width != pair {
+            return Err(format!(
+                "coords cover {} positions but the correlation pyramid stores {pair} pairs",
+                height * width
+            ));
+        }
+        let flat = coords
+            .reshape(&[height * width, 2])
+            .map_err(|e| e.to_string())?;
+        let mut levels = Vec::with_capacity(self.levels);
+        for (level, corr) in self.pyr.iter().enumerate() {
+            levels.push(lookup_level(corr, &flat, level, self.radius)?);
+        }
+        let combined = mlx_rs::ops::concatenate(&levels, 1).map_err(|e| e.to_string())?;
+        let lookup_width = combined.shape()[1];
+        combined
+            .reshape(&[1, height, width, lookup_width])
+            .map_err(|e| e.to_string())
+    }
 }
 
 /// Read a safetensors file through MLX and validate a caller-provided exact
@@ -512,6 +668,168 @@ impl RaftEncoders {
 mod tests {
     use super::*;
     use sha2::Digest;
+
+    fn json_shape(value: &serde_json::Value) -> Vec<i32> {
+        value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_i64().unwrap() as i32)
+            .collect()
+    }
+
+    fn json_f32(value: &serde_json::Value, shape: &[i32]) -> Array {
+        let data: Vec<f32> = value
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
+        let expected_len = shape.iter().map(|&d| d as usize).product::<usize>();
+        assert_eq!(
+            data.len(),
+            expected_len,
+            "fixture count for shape {shape:?}"
+        );
+        Array::from_slice(&data, shape)
+    }
+
+    fn max_normalized_error(actual: &Array, expected: &Array) -> f32 {
+        assert_eq!(actual.shape(), expected.shape());
+        let actual = actual
+            .as_dtype(Dtype::Float32)
+            .unwrap()
+            .contiguous()
+            .unwrap();
+        let expected = expected.contiguous().unwrap();
+        let actual = actual.as_slice::<f32>();
+        let expected = expected.as_slice::<f32>();
+        assert_eq!(actual.len(), expected.len());
+        let scale = expected.iter().map(|value| value.abs()).fold(1.0, f32::max);
+        actual
+            .iter()
+            .zip(expected)
+            .map(|(got, want)| (got - want).abs())
+            .fold(0.0, f32::max)
+            / scale
+    }
+
+    #[test]
+    fn corr_block_matches_python_fixture() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/corr_block_reference.json"))
+                .unwrap();
+        assert_eq!(fixture["schema"], "mlxstab.raft_compat.corr_block/2");
+        assert_eq!(
+            fixture["source"],
+            "rust/raft-compat/tools/generate_corr_block_reference.py"
+        );
+        assert_eq!(fixture["rust_mlx_rs"], "0.32.0");
+        assert_eq!(fixture["rust_mlx"], "0.32.2");
+        assert_eq!(fixture["checkpoint_independent"].as_bool(), Some(true));
+        assert!(fixture.get("checkpoint_sha256").is_none());
+        assert!(fixture["python_mlx"].is_string());
+
+        let feature_shape = json_shape(&fixture["feature_shape"]);
+        let f1 = json_f32(&fixture["f1"], &feature_shape);
+        let f2 = json_f32(&fixture["f2"], &feature_shape);
+        let levels = fixture["levels"].as_u64().unwrap() as usize;
+        let radius = fixture["radius"].as_u64().unwrap() as usize;
+        let coords_shape = json_shape(&fixture["coords_shape"]);
+        let coords = json_f32(&fixture["coords"], &coords_shape);
+
+        let cases = fixture["cases"].as_array().unwrap();
+        assert_eq!(cases.len(), 2);
+        for case in cases {
+            let name = case["dtype"].as_str().unwrap();
+            let dtype = match name {
+                "float32" => Dtype::Float32,
+                "float16" => Dtype::Float16,
+                other => panic!("unexpected fixture dtype {other}"),
+            };
+            // fp16 matmul/pooling may round differently across MLX builds; fp32
+            // is expected to match the Python graph almost exactly. Errors are
+            // normalized the same way as tests/test_raft.py's torch comparison.
+            let tolerance = if dtype == Dtype::Float32 { 1e-5 } else { 1e-3 };
+            let block = CorrBlock::new(&f1, &f2, levels, radius, dtype).unwrap();
+            assert_eq!(block.levels, levels);
+            assert_eq!(block.radius, radius);
+            assert_eq!(block.pyr.len(), levels);
+            assert!(block.pyr.iter().all(|level| level.dtype() == dtype));
+
+            let shapes = case["pyramid_shapes"].as_array().unwrap();
+            let pyramid = case["pyramid"].as_array().unwrap();
+            assert_eq!(block.pyr.len(), shapes.len());
+            assert_eq!(block.pyr.len(), pyramid.len());
+            let mut worst_pyramid = 0.0f32;
+            for (level, ((actual, shape), expected)) in
+                block.pyr.iter().zip(shapes).zip(pyramid).enumerate()
+            {
+                let shape = json_shape(shape);
+                assert_eq!(actual.shape(), shape.as_slice(), "level {level} shape");
+                let expected = json_f32(expected, &shape);
+                let error = max_normalized_error(actual, &expected);
+                worst_pyramid = worst_pyramid.max(error);
+                assert!(
+                    error < tolerance,
+                    "{name} correlation level {level} max normalized error {error}"
+                );
+            }
+
+            let lookup = block.lookup(&coords).unwrap();
+            let lookup_shape = json_shape(&case["lookup_shape"]);
+            assert_eq!(lookup.shape(), lookup_shape.as_slice());
+            assert_eq!(lookup.dtype(), Dtype::Float32);
+            let expected = json_f32(&case["lookup"], &lookup_shape);
+            let lookup_error = max_normalized_error(&lookup, &expected);
+            assert!(
+                lookup_error < tolerance,
+                "{name} lookup max normalized error {lookup_error}"
+            );
+            println!(
+                "corr block {name}: worst pyramid error {worst_pyramid:e}, lookup error {lookup_error:e}"
+            );
+        }
+    }
+
+    #[test]
+    fn pool2_drops_odd_trailing_rows_and_columns() {
+        // The 3x3 grid loses row 2 and column 2; the kept cell is mean(1,2,4,5).
+        let values: Vec<f32> = (1..=9).map(|v| v as f32).collect();
+        let corr = Array::from_slice(&values, &[1, 3, 3, 1]);
+        let pooled = pool2(&corr).unwrap();
+        assert_eq!(pooled.shape(), &[1, 1, 1, 1]);
+        assert_eq!(pooled.contiguous().unwrap().as_slice::<f32>(), &[3.0]);
+    }
+
+    #[test]
+    fn corr_block_rejects_invalid_inputs() {
+        let one = Array::from_slice(&[1.0f32, 2.0], &[1, 1, 1, 2]);
+        let error = CorrBlock::new(&one, &one, 0, 1, Dtype::Float32).unwrap_err();
+        assert!(error.contains("levels"), "unexpected error: {error}");
+        let error = CorrBlock::new(&one, &one, 1, 1, Dtype::Int32).unwrap_err();
+        assert!(
+            error.contains("float16 or float32"),
+            "unexpected error: {error}"
+        );
+        let error = CorrBlock::new(&one, &one, 2, 1, Dtype::Float32).unwrap_err();
+        assert!(
+            error.contains("level 1 would be empty"),
+            "unexpected error: {error}"
+        );
+
+        let wrong_rank = Array::from_slice(&[1.0f32, 2.0], &[2, 1]);
+        assert!(CorrBlock::new(&wrong_rank, &wrong_rank, 1, 1, Dtype::Float32).is_err());
+
+        let features = Array::from_slice(&[0.0f32; 8], &[1, 2, 2, 2]);
+        let block = CorrBlock::new(&features, &features, 1, 1, Dtype::Float32).unwrap();
+        let coords = Array::from_slice(&[0.0f32, 0.0], &[1, 1, 1, 2]);
+        let error = block.lookup(&coords).unwrap_err();
+        assert!(
+            error.contains("coords cover 1 positions"),
+            "unexpected error: {error}"
+        );
+    }
 
     #[test]
     fn lookup_matches_xy_order_bilinear_and_zero_padding() {

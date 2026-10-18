@@ -4405,3 +4405,21 @@ network, compiled recurrent updates, bidirectional final flow, end-to-end timing
 packaging, or sustained ownership. The encoder fixture crosses the current MLX `0.32.2`/`0.32.3` version gap,
 but the broader migration gate still requires an explicitly pinned pairing. Keep the migration decision open and
 continue with correlation-pyramid construction and the update block before judging Rust for production.
+
+### E20 follow-up (2026-10-18): correlation pyramid parity
+
+Added a Rust `CorrBlock` that forms the all-pairs correlation from paired NHWC features, divides by `sqrt(C)`,
+builds floor-sized 2x2 average-pooled levels (dropping odd trailing rows and columns), and samples each level with
+the already-tested RAFT XY-order, bilinear, zero-padded lookup. The checkpoint-independent fixture exercises
+fractional and out-of-frame coordinates on deterministic 7x9x5 feature maps, compares every pyramid value and
+lookup output, and covers float32 and float16 storage. Its Python generator uses `mlxstab.raft.model.CorrBlock`;
+two consecutive generations produced the same SHA-256
+`87b06c7de783fcd1e104175ada38ac30a7eefaa4497c85fdd63344185d51f1e0`.
+
+The exact pyramid values matched the Python fixture in both dtypes; worst normalized lookup error was
+`7.14e-8` for float32 and zero for float16. All **11 Rust tests pass**, and `cargo fmt --check` and strict clippy
+pass. CodeGraph was synced; its affected-file query did not discover Rust tests, which were run directly. This
+closes correlation construction and lookup parity for the small fixture only. It is still not a compiled or
+device-side production path, and the recurrent update block, bidirectional RAFT flow, end-to-end parity, and
+runtime/memory evidence remain open. Continue with the update block and integrate the full flow before judging
+whether Rust improves the project.
