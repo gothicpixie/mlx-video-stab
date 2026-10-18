@@ -4012,3 +4012,23 @@ source real-footage gate is complete; the next useful gate is an independently s
 separate measurements of high-frequency shake attenuation and low-frequency path retention, plus edge/crop
 artifacts and blinded review. The small resolution/frame-length sensitivity check remains open, and no model
 or production default change follows from these results.
+
+### Preregistered unseen-segment replication on `00177.MTS` (2026-10-17)
+
+The two-window `00176.MTS` screen cannot validate intent preservation because it has no camera-path ground truth.
+To test whether the jitter/artifact tradeoff repeats on a different recording, use the existing `00177.MTS`
+source (SHA-256 `8c5d98d15448ad0557537ba9d02a28fc426185b4e32bdf1be3eb4964fdbea714`) at one previously unused
+ten-second segment. Candidate integer-second starts were `5..40`, `65..80`, and `100..105`, excluding all
+previously measured windows; select uniformly with `random.Random(20261017)`. The frozen draw is **22–32 s**.
+This is an unexamined segment from a second source file, not a new camera or a source-level holdout: other
+windows in `00177.MTS` have been studied.
+
+Use the existing fidelity-0.1 baseline config (digest
+`8e0378b967beaed72f14d572ad1dd6d0b480034c1b5a094c2d90c7562258a2fe`), output and evaluation at `30000/1001`
+fps, one run and no tuning. Keep the result row even if RAFT/KLT reliability fails. Before interpretation require
+exact cadence alignment, no fit fallback, and adequate independent KLT support; report RAFT and KLT jitter and
+wobble separately, per-axis path stability, crop/edge support, and frame-motion retention. Then build a
+source-hash-verified raw/stabilized pair and its position reversal and review both with the fixed blinded Gemini
+protocol. Treat agreement as descriptive only. This screen tests whether the measured tradeoff recurs on a new
+segment; it cannot identify intended camera motion or validate content-aware intent. Do not change the model or
+defaults from it.
