@@ -4619,3 +4619,29 @@ uses one synthetic pair on one host. PyTorch computes the convex-upsample mask e
 Python MLX compute it only on the final iteration, so the graph work is not identical. RSS is process-level,
 not accelerator allocation. The result supports continuing the Rust path; it does not establish superiority in
 video quality, robustness, supported features or other hardware/workloads.
+
+### E20 follow-up (2026-10-18): matched PyTorch final-mask schedule
+
+Extended `bench/bench_raft.py` with a `final_only` PyTorch schedule that skips the mask head and convex
+upsampling on refinement iterations whose result is discarded, while preserving the upstream
+`every_iteration` mode as the default. This change is benchmark-only and does not modify vendored RAFT. On the
+exact benchmark inputs, both returned tensors from final-only mode match the upstream test-mode forward
+exactly; fp32 MPS smoke checks returned zero max absolute error for low- and full-resolution flow. The
+benchmark performs this untimed parity check before recording final-only timings. The `mlx` path reports
+`final_only` in its JSON metadata.
+
+With this work matched, two fresh-process runs per backend (360x640, same checkpoint and seeded pair, 24
+iterations, one warmup and seven timed calls) gave median-of-run-medians **0.54412 s compiled Rust**,
+**0.54919 s Python MLX**, and **0.55386 s PyTorch MPS final-only**. Per-pair Rust medians were 0.54059 and
+0.54764 s; PyTorch was 0.54638 and 0.56134 s; MLX was 0.55401 and 0.54437 s. The Rust lead is only 0.9% over
+Python MLX and 1.8% over PyTorch, which is too small to call a robust speed win at this run count. This
+replaces the previous comparison against PyTorch's extra intermediate mask work as the fairer performance
+reference.
+
+Rust process peak RSS was 90.4–90.9 MiB and MLX was 171.2–171.8 MiB. MPS reported 444–532 MiB, but that
+high-water mark includes the untimed parity pass and its simultaneously held reference and final-only output
+tensors, so it is not a comparable steady-path memory result. The parity mode and results are now recorded in
+the benchmark JSON; the measured data remain local under ignored `out/raft-bench/`. This still covers only one
+synthetic pair and one host. The result does not establish a video-quality win, and the near-tie shifts the
+next performance work toward profiling Rust stages and batched feature encoding instead of counting the
+previous PyTorch timing advantage.

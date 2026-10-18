@@ -234,6 +234,25 @@ is not identical. Process RSS does not include accelerator allocations. This
 does not establish better stabilization quality, robustness, or performance on
 other inputs and hardware.
 
+The PyTorch run above used the upstream schedule that computes the mask on all
+24 iterations. `bench/bench_raft.py` now accepts an optional final
+`mask_schedule` argument (`every_iteration` or `final_only`). The latter
+reproduces the RAFT test-mode forward while skipping unused intermediate masks
+and upsampling; an untimed check on the exact benchmark inputs verifies both
+returned flows against the upstream path before timing. It matched exactly on
+the tested fp32 MPS inputs.
+
+With work matched, two fresh-process runs per backend at the same resolution
+and iteration count gave median-of-run-medians **0.5441 s Rust**, **0.5492 s
+Python MLX**, and **0.5539 s PyTorch MPS final-mask-only**. Rust's lead is only
+0.9% over Python MLX and 1.8% over PyTorch, too small to treat as a robust
+performance win at this sample count. Peak process RSS was 90.4–90.9 MiB for
+Rust and 171.2–171.8 MiB for MLX. The MPS process peaked at 444–532 MiB, but
+that includes the untimed parity pass holding both reference and optimized
+outputs, so this run does not support a comparable MPS memory claim. All runs
+remain one synthetic pair on one host; real-video quality and broader workload
+coverage are still open.
+
 Run on Apple Silicon with Rust and Xcode installed:
 
 ```sh
