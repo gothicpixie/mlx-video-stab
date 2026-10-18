@@ -4381,3 +4381,27 @@ strength, and do not add a bundled depth estimator or inference/runtime cost. Th
 KLT report, Gemini judgments and reversal audit remain in ignored
 `out/bench/depth_mesh_real_00176_t60_10s/`. Continue the plan at the Rust compatibility spike (E20) rather than
 extend this depth branch without a new evidence-backed target.
+
+### E20 follow-up (2026-10-18): checkpoint-backed RAFT encoder parity
+
+Expanded `rust/raft-compat` from the correlation-lookup prototype to both RAFT `BasicEncoder` paths. The Rust
+implementation now loads the converted `fnet` and `cnet` parameters by their exact names and shapes, rejects
+missing or unconsumed tensors within each encoder prefix, and runs the six residual blocks, stride-2 projections,
+instance normalization for `fnet`, checkpoint-stat batch normalization for evaluation-mode `cnet`, and final
+1x1 projection. It does not yet port the correlation pyramid or recurrent update block.
+
+The reproducible fixture uses a deterministic normalized 32x40 frame pair. It runs `fnet` at the production
+batch shape `[2,32,40,3]` and `cnet` on the first frame at `[1,32,40,3]`; it stores all 10,240 `fnet` output
+values at `[2,4,5,256]` and all 5,120 `cnet` output values at `[1,4,5,256]`. It records the source checkpoint SHA-256
+`84c1f730d4620ef4dd0a2eeeef97db7a729fc4190ee05cdd0169030fc92fccc1`, Python MLX `0.32.3`, Rust `mlx-rs 0.32.0`,
+and its MLX `0.32.2` target. Regenerating the fixture produced the same SHA-256. The independent Rust comparison
+reported **zero maximum absolute and relative error** for both encoders on this fixture. The earlier
+checkpoint-backed `cnet.conv1` comparison and encoder loader rejection cases also pass. All **8 Rust tests pass**;
+`cargo fmt --check` and `cargo clippy --all-targets -- -D warnings` pass. CodeGraph is synced (its affected-test
+query does not discover Rust tests, which were run directly).
+
+This closes only the encoder portion of E20. It does not establish parity for correlation lookup inside the
+network, compiled recurrent updates, bidirectional final flow, end-to-end timing/copies/memory, cancellation,
+packaging, or sustained ownership. The encoder fixture crosses the current MLX `0.32.2`/`0.32.3` version gap,
+but the broader migration gate still requires an explicitly pinned pairing. Keep the migration decision open and
+continue with correlation-pyramid construction and the update block before judging Rust for production.

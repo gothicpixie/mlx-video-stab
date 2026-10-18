@@ -5,7 +5,7 @@
 //! intentionally small so it can be compared against Python's `lookup_level`.
 
 use mlx_rs::module::Module;
-use mlx_rs::nn::Conv2d;
+use mlx_rs::nn::{BatchNorm, Conv2d, relu};
 use mlx_rs::{Array, Dtype};
 
 /// Bilinearly sample one RAFT correlation-pyramid level.
@@ -169,6 +169,345 @@ pub fn cnet_conv1(
     conv.forward(input).map_err(|e| e.to_string())
 }
 
+// --- Full RAFT BasicEncoder (encoders only; the update block is not ported yet) -----------------------------
+
+use std::collections::HashSet;
+
+/// Normalization used by a RAFT `BasicEncoder`: instance norm for `fnet`, batch norm for `cnet`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EncoderNorm {
+    Instance,
+    Batch,
+}
+
+/// The normalization layer paired with an encoder convolution.
+#[derive(Debug)]
+enum NormLayer {
+    /// Parameter-free instance norm with statistics accumulated in f32, matching the Python reference.
+    Instance { eps: f32 },
+    /// Evaluation-mode batch norm using the checkpoint's running statistics.
+    Batch(BatchNorm),
+}
+
+impl NormLayer {
+    fn instance() -> Self {
+        NormLayer::Instance { eps: 1e-5 }
+    }
+
+    fn batch(reader: &mut ParamReader<'_>, prefix: &str, channels: i32) -> Result<Self, String> {
+        let width = [channels];
+        let weight = reader.get(&format!("{prefix}.weight"), &width)?;
+        let bias = reader.get(&format!("{prefix}.bias"), &width)?;
+        let running_mean = reader.get(&format!("{prefix}.running_mean"), &width)?;
+        let running_var = reader.get(&format!("{prefix}.running_var"), &width)?;
+        let mut norm = BatchNorm::new(channels).map_err(|e| e.to_string())?;
+        norm.training = false;
+        norm.weight.value = Some(weight);
+        norm.bias.value = Some(bias);
+        norm.running_mean.value = Some(running_mean);
+        norm.running_var.value = Some(running_var);
+        Ok(NormLayer::Batch(norm))
+    }
+
+    fn forward(&mut self, x: &Array) -> Result<Array, String> {
+        match self {
+            NormLayer::Instance { eps } => {
+                // Match Python's InstanceNorm: force f32 statistics even if the caller uses fp16.
+                let dtype = x.dtype();
+                let xf = x.as_dtype(Dtype::Float32).map_err(|e| e.to_string())?;
+                let mean = xf.mean_axes(&[1, 2], true).map_err(|e| e.to_string())?;
+                let variance = xf
+                    .var_axes(&[1, 2], true, None)
+                    .map_err(|e| e.to_string())?;
+                let denom = variance
+                    .add(Array::from_f32(*eps))
+                    .and_then(|v| mlx_rs::ops::rsqrt(&v))
+                    .map_err(|e| e.to_string())?;
+                xf.subtract(&mean)
+                    .and_then(|v| v.multiply(&denom))
+                    .and_then(|v| v.as_dtype(dtype))
+                    .map_err(|e| e.to_string())
+            }
+            NormLayer::Batch(norm) => norm.forward(x).map_err(|e| e.to_string()),
+        }
+    }
+}
+
+/// Loads and verifies parameters by their converted safetensors names.
+struct ParamReader<'a> {
+    params: &'a std::collections::HashMap<String, Array>,
+    used: HashSet<String>,
+}
+
+impl<'a> ParamReader<'a> {
+    fn new(params: &'a std::collections::HashMap<String, Array>) -> Self {
+        Self {
+            params,
+            used: HashSet::new(),
+        }
+    }
+
+    fn get(&mut self, name: &str, shape: &[i32]) -> Result<Array, String> {
+        if !self.used.insert(name.to_owned()) {
+            return Err(format!("parameter {name} requested more than once"));
+        }
+        let value = self
+            .params
+            .get(name)
+            .ok_or_else(|| format!("missing parameter {name}"))?;
+        if value.shape() != shape {
+            return Err(format!(
+                "parameter shape mismatch for {name}: expected {shape:?}, got {:?}",
+                value.shape()
+            ));
+        }
+        Ok(value.clone())
+    }
+
+    fn conv(
+        &mut self,
+        prefix: &str,
+        input_channels: i32,
+        output_channels: i32,
+        kernel: i32,
+        stride: i32,
+        padding: i32,
+    ) -> Result<Conv2d, String> {
+        let weight = self.get(
+            &format!("{prefix}.weight"),
+            &[output_channels, kernel, kernel, input_channels],
+        )?;
+        let bias = self.get(&format!("{prefix}.bias"), &[output_channels])?;
+        let mut conv = Conv2d::new(input_channels, output_channels, (kernel, kernel))
+            .map_err(|e| e.to_string())?;
+        conv.stride = (stride, stride);
+        conv.padding = (padding, padding);
+        conv.weight.value = weight;
+        conv.bias.value = Some(bias);
+        Ok(conv)
+    }
+
+    fn finish(&self, prefix: &str) -> Result<(), String> {
+        let scope = format!("{prefix}.");
+        let mut extra: Vec<_> = self
+            .params
+            .keys()
+            .filter(|key| key.starts_with(&scope) && !self.used.contains(*key))
+            .cloned()
+            .collect();
+        extra.sort();
+        if extra.is_empty() {
+            Ok(())
+        } else {
+            Err(format!("unexpected parameters under {prefix}: {extra:?}"))
+        }
+    }
+}
+
+/// One RAFT residual stage with its optional 1x1 downsample projection.
+#[derive(Debug)]
+pub struct ResidualBlock {
+    conv1: Conv2d,
+    conv2: Conv2d,
+    norm1: NormLayer,
+    norm2: NormLayer,
+    downsample: Option<(Conv2d, NormLayer)>,
+}
+
+impl ResidualBlock {
+    fn load(
+        reader: &mut ParamReader<'_>,
+        prefix: &str,
+        input_channels: i32,
+        channels: i32,
+        norm: EncoderNorm,
+        stride: i32,
+    ) -> Result<Self, String> {
+        let conv1 = reader.conv(
+            &format!("{prefix}.conv1"),
+            input_channels,
+            channels,
+            3,
+            stride,
+            1,
+        )?;
+        let conv2 = reader.conv(&format!("{prefix}.conv2"), channels, channels, 3, 1, 1)?;
+        let norm1 = match norm {
+            EncoderNorm::Instance => NormLayer::instance(),
+            EncoderNorm::Batch => NormLayer::batch(reader, &format!("{prefix}.norm1"), channels)?,
+        };
+        let norm2 = match norm {
+            EncoderNorm::Instance => NormLayer::instance(),
+            EncoderNorm::Batch => NormLayer::batch(reader, &format!("{prefix}.norm2"), channels)?,
+        };
+        let downsample = if stride == 1 {
+            None
+        } else {
+            let conv = reader.conv(
+                &format!("{prefix}.downsample.0"),
+                input_channels,
+                channels,
+                1,
+                stride,
+                0,
+            )?;
+            let norm = match norm {
+                EncoderNorm::Instance => NormLayer::instance(),
+                EncoderNorm::Batch => {
+                    NormLayer::batch(reader, &format!("{prefix}.downsample.1"), channels)?
+                }
+            };
+            Some((conv, norm))
+        };
+        Ok(Self {
+            conv1,
+            conv2,
+            norm1,
+            norm2,
+            downsample,
+        })
+    }
+
+    /// Run the residual block on an NHWC f32 tensor.
+    pub fn forward(&mut self, x: &Array) -> Result<Array, String> {
+        let mut y = self.conv1.forward(x).map_err(|e| e.to_string())?;
+        y = self.norm1.forward(&y)?;
+        y = relu(&y).map_err(|e| e.to_string())?;
+        y = self.conv2.forward(&y).map_err(|e| e.to_string())?;
+        y = self.norm2.forward(&y)?;
+        y = relu(&y).map_err(|e| e.to_string())?;
+
+        let shortcut = match &mut self.downsample {
+            Some((conv, norm)) => {
+                let projected = conv.forward(x).map_err(|e| e.to_string())?;
+                norm.forward(&projected)?
+            }
+            None => x.clone(),
+        };
+        let sum = shortcut.add(&y).map_err(|e| e.to_string())?;
+        relu(&sum).map_err(|e| e.to_string())
+    }
+}
+
+/// RAFT's BasicEncoder. `fnet` uses instance norm and `cnet` uses batch norm in the reference model.
+#[derive(Debug)]
+pub struct BasicEncoder {
+    pub norm: EncoderNorm,
+    pub out_dim: i32,
+    conv1: Conv2d,
+    norm1: NormLayer,
+    layer1: Vec<ResidualBlock>,
+    layer2: Vec<ResidualBlock>,
+    layer3: Vec<ResidualBlock>,
+    conv2: Conv2d,
+}
+
+impl BasicEncoder {
+    /// Load one encoder from converted RAFT parameters, validating every expected name and shape.
+    ///
+    /// `params` is the converted safetensors map; `prefix` is `"fnet"` or `"cnet"`. Any unconsumed
+    /// parameter under that prefix is rejected so an architecture change cannot silently ignore a
+    /// checkpoint tensor.
+    pub fn load(
+        params: &std::collections::HashMap<String, Array>,
+        prefix: &str,
+        norm: EncoderNorm,
+    ) -> Result<Self, String> {
+        let mut reader = ParamReader::new(params);
+        let encoder = Self::load_with(&mut reader, prefix, norm)?;
+        reader.finish(prefix)?;
+        Ok(encoder)
+    }
+
+    fn load_with(
+        reader: &mut ParamReader<'_>,
+        prefix: &str,
+        norm: EncoderNorm,
+    ) -> Result<Self, String> {
+        let out_dim = 256;
+        let conv1 = reader.conv(&format!("{prefix}.conv1"), 3, 64, 7, 2, 3)?;
+        let norm1 = match norm {
+            EncoderNorm::Instance => NormLayer::instance(),
+            EncoderNorm::Batch => NormLayer::batch(reader, &format!("{prefix}.norm1"), 64)?,
+        };
+        let layer1 = vec![
+            ResidualBlock::load(reader, &format!("{prefix}.layer1.0"), 64, 64, norm, 1)?,
+            ResidualBlock::load(reader, &format!("{prefix}.layer1.1"), 64, 64, norm, 1)?,
+        ];
+        let layer2 = vec![
+            ResidualBlock::load(reader, &format!("{prefix}.layer2.0"), 64, 96, norm, 2)?,
+            ResidualBlock::load(reader, &format!("{prefix}.layer2.1"), 96, 96, norm, 1)?,
+        ];
+        let layer3 = vec![
+            ResidualBlock::load(reader, &format!("{prefix}.layer3.0"), 96, 128, norm, 2)?,
+            ResidualBlock::load(reader, &format!("{prefix}.layer3.1"), 128, 128, norm, 1)?,
+        ];
+        let conv2 = reader.conv(&format!("{prefix}.conv2"), 128, out_dim, 1, 1, 0)?;
+        Ok(Self {
+            norm,
+            out_dim,
+            conv1,
+            norm1,
+            layer1,
+            layer2,
+            layer3,
+            conv2,
+        })
+    }
+
+    /// Run the encoder on an already normalized NHWC f32 input `[N,H,W,3]`.
+    ///
+    /// This matches the tensor the Python `RAFT.encode` path passes to `fnet`/`cnet`; image scaling
+    /// from 0..255 to -1..1 is the caller's responsibility. H and W must be multiples of 8 (the
+    /// reference `pad8` step pads them before calling the encoder).
+    pub fn forward(&mut self, x: &Array) -> Result<Array, String> {
+        let shape = x.shape();
+        if shape.len() != 4 || shape[3] != 3 {
+            return Err(format!("input must be NHWC [N,H,W,3], got {shape:?}"));
+        }
+        if shape[1] % 8 != 0 || shape[2] % 8 != 0 {
+            return Err(format!(
+                "input height and width must be multiples of 8, got {shape:?}"
+            ));
+        }
+        let mut y = self.conv1.forward(x).map_err(|e| e.to_string())?;
+        y = self.norm1.forward(&y)?;
+        y = relu(&y).map_err(|e| e.to_string())?;
+        for block in self
+            .layer1
+            .iter_mut()
+            .chain(self.layer2.iter_mut())
+            .chain(self.layer3.iter_mut())
+        {
+            y = block.forward(&y)?;
+        }
+        self.conv2.forward(&y).map_err(|e| e.to_string())
+    }
+}
+
+/// The two RAFT feature/context encoders, loaded from the same converted checkpoint.
+#[derive(Debug)]
+pub struct RaftEncoders {
+    pub fnet: BasicEncoder,
+    pub cnet: BasicEncoder,
+}
+
+impl RaftEncoders {
+    /// Load `fnet` (instance norm) and `cnet` (batch norm) from a converted RAFT safetensors file.
+    pub fn load(path: impl AsRef<std::path::Path>) -> Result<Self, String> {
+        let params = Array::load_safetensors(path).map_err(|e| e.to_string())?;
+        Self::from_params(&params)
+    }
+
+    /// Build both encoders from an already-loaded parameter map.
+    pub fn from_params(params: &std::collections::HashMap<String, Array>) -> Result<Self, String> {
+        Ok(Self {
+            fnet: BasicEncoder::load(params, "fnet", EncoderNorm::Instance)?,
+            cnet: BasicEncoder::load(params, "cnet", EncoderNorm::Batch)?,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -250,6 +589,128 @@ mod tests {
         let params = Array::load_safetensors(checkpoint).unwrap();
         assert_eq!(params.len(), 154);
         assert_eq!(params["cnet.conv1.weight"].shape(), &[64, 7, 7, 3]);
+    }
+
+    #[test]
+    fn encoder_loader_rejects_missing_and_unexpected_parameters() {
+        let checkpoint = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vendor/weights/conv/raft-things.safetensors");
+        let params = Array::load_safetensors(checkpoint).unwrap();
+
+        let mut missing = params.clone();
+        missing.remove("fnet.layer3.1.conv2.weight");
+        let error = BasicEncoder::load(&missing, "fnet", EncoderNorm::Instance).unwrap_err();
+        assert!(
+            error.contains("missing parameter fnet.layer3.1.conv2.weight"),
+            "unexpected error: {error}"
+        );
+
+        let mut extra = params.clone();
+        extra.insert(
+            "fnet.unexpected.weight".to_string(),
+            Array::from_slice(&[0.0f32], &[1]),
+        );
+        let error = BasicEncoder::load(&extra, "fnet", EncoderNorm::Instance).unwrap_err();
+        assert!(
+            error.contains("unexpected parameters under fnet"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn basic_encoders_match_python_mlx_fixture() {
+        let checkpoint = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../vendor/weights/conv/raft-things.safetensors");
+        let checkpoint_hash = format!(
+            "{:x}",
+            sha2::Sha256::digest(std::fs::read(&checkpoint).unwrap())
+        );
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../tests/fixtures/basic_encoder_reference.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture["schema"], "mlxstab.raft_compat.basic_encoder/1");
+        assert_eq!(fixture["checkpoint_sha256"], checkpoint_hash);
+        assert_eq!(fixture["rust_mlx_rs"], "0.32.0");
+        assert_eq!(fixture["rust_mlx"], "0.32.2");
+
+        let params = Array::load_safetensors(checkpoint).unwrap();
+        let mut encoders = RaftEncoders::from_params(&params).unwrap();
+
+        let input_shape: Vec<i32> = fixture["input_shape"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_i64().unwrap() as i32)
+            .collect();
+        let input: Vec<f32> = fixture["input"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_f64().unwrap() as f32)
+            .collect();
+        assert_eq!(
+            input.len(),
+            input_shape.iter().map(|&d| d as usize).product::<usize>()
+        );
+        assert_eq!(input_shape, [2, 32, 40, 3]);
+        let paired_input = Array::from_slice(&input, &input_shape);
+        let cnet_input = Array::from_slice(&input[..32 * 40 * 3], &[1, 32, 40, 3]);
+
+        for (name, norm) in [
+            ("fnet", EncoderNorm::Instance),
+            ("cnet", EncoderNorm::Batch),
+        ] {
+            let encoder_fixture = &fixture["encoders"][name];
+            let expected: Vec<f32> = encoder_fixture["output"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_f64().unwrap() as f32)
+                .collect();
+            let expected_shape: Vec<i32> = encoder_fixture["output_shape"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|v| v.as_i64().unwrap() as i32)
+                .collect();
+            let expected_len = expected_shape
+                .iter()
+                .map(|&d| d as usize)
+                .product::<usize>();
+            assert_eq!(
+                encoder_fixture["norm"],
+                match norm {
+                    EncoderNorm::Instance => "instance",
+                    EncoderNorm::Batch => "batch",
+                }
+            );
+            assert_eq!(expected.len(), expected_len);
+            let output = match name {
+                "fnet" => encoders.fnet.forward(&paired_input).unwrap(),
+                "cnet" => encoders.cnet.forward(&cnet_input).unwrap(),
+                _ => unreachable!(),
+            };
+            assert_eq!(output.shape(), expected_shape);
+            let actual = output.contiguous().unwrap();
+            let actual = actual.as_slice::<f32>();
+            assert_eq!(actual.len(), expected.len());
+
+            let mut max_abs_error = 0.0f32;
+            let mut max_rel_error = 0.0f32;
+            for (got, want) in actual.iter().zip(expected.iter()) {
+                let abs = (got - want).abs();
+                max_abs_error = max_abs_error.max(abs);
+                if want.abs() > 1e-5 {
+                    max_rel_error = max_rel_error.max(abs / want.abs());
+                }
+            }
+            println!("{name}: max abs error {max_abs_error:e}, max rel error {max_rel_error:e}");
+            assert!(
+                max_abs_error < 1e-5,
+                "{name} max abs error {max_abs_error} exceeds tolerance"
+            );
+        }
     }
 
     #[test]
